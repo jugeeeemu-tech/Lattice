@@ -1,0 +1,14 @@
+# Copy this file to config/lattice.yaml and edit the values for your environment.
+server:
+  listen: "127.0.0.1:3000"
+
+discovery:
+  interval_seconds: 300
+  timeout_millis: 5000
+
+sources:
+  - name: "core-switch"
+    kind: "snmp"
+    target: "192.0.2.10:161"
+    community: "public"
+    version: "2c"
