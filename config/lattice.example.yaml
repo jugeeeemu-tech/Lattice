@@ -1,14 +1,23 @@
-# Copy this file to config/lattice.yaml and edit the values for your environment.
 server:
-  listen: "127.0.0.1:3000"
+  host: "127.0.0.1"
+  port: 8080
 
 discovery:
-  interval_seconds: 300
-  timeout_millis: 5000
+  max_hops: 10
+  timeout_seconds: 5
+  retries: 2
+  concurrent_devices: 1
 
 sources:
-  - name: "core-switch"
-    kind: "snmp"
-    target: "192.0.2.10:161"
-    community: "public"
+  - kind: "snmp"
     version: "2c"
+    community: "public"
+    seeds:
+      - ip: "192.0.2.10"
+        label: "vyos-core"
+
+  - kind: "proxmox"
+    base_url: "https://192.168.10.50:8006"
+    token_id: "${LATTICE_PROXMOX_TOKEN_ID}"
+    token_secret: "${LATTICE_PROXMOX_TOKEN_SECRET}"
+    tls_verify: true

@@ -13,3 +13,8 @@ serde_json.workspace = true
 serde_yaml.workspace = true
 chrono.workspace = true
 snmp.workspace = true
+futures-util.workspace = true
+reqwest.workspace = true
+
+[dev-dependencies]
+axum.workspace = true

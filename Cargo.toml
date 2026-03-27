@@ -3,6 +3,7 @@ members = [
     "crates/lattice-core",
     "crates/lattice-server",
 ]
+default-members = ["crates/lattice-server"]
 resolver = "2"
 
 [workspace.package]
@@ -19,5 +20,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 chrono = { version = "0.4", features = ["serde"] }
 snmp = "0.2"
-axum = "0.7"
+axum = { version = "0.7", features = ["ws"] }
 clap = { version = "4", features = ["derive"] }
+futures-util = "0.3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
