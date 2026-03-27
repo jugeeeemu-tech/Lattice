@@ -1,14 +1,91 @@
 <!doctype html>
-<html lang="en">
+<html lang="ja">
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Lattice</title>
+    <meta name="theme-color" content="#f4f6f8" />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <main id="app">
-      <p>Frontend assets will be added in a later issue.</p>
+      <header class="chrome">
+        <div class="chrome__brand">
+          <div class="brand-mark" aria-hidden="true">L</div>
+          <div>
+            <p class="eyebrow">Network topology viewer</p>
+            <h1>Lattice</h1>
+          </div>
+        </div>
+        <div class="chrome__actions">
+          <button
+            type="button"
+            class="action"
+            data-action="toggle-legend"
+            aria-expanded="false"
+            aria-controls="legend-card"
+          >
+            凡例
+          </button>
+          <button type="button" class="action action--primary" data-action="discover">
+            再探索
+          </button>
+          <button type="button" class="action" data-action="reload">
+            再読込
+          </button>
+        </div>
+      </header>
+
+      <section class="status-strip" aria-live="polite">
+        <div class="status-strip__item">
+          <span class="status-strip__label">状態</span>
+          <span class="status-pill" data-role="status-pill">loading</span>
+        </div>
+        <div class="status-strip__item">
+          <span class="status-strip__label">更新</span>
+          <span data-role="status-message">初期化中</span>
+        </div>
+        <div class="status-strip__item">
+          <span class="status-strip__label">構成</span>
+          <span data-role="summary">0 devices / 0 links</span>
+        </div>
+      </section>
+
+      <main class="workspace">
+        <aside class="sidebar">
+          <section class="panel panel--info">
+            <h2>案内ツリー</h2>
+            <p class="panel__hint">枝をたたみながら、3D 表示と同じ構成をたどれます。</p>
+            <div id="tree" class="tree" role="tree" aria-label="network navigation tree"></div>
+          </section>
+        </aside>
+
+        <section class="viewport">
+          <div class="viewport__scene" id="scene-host" aria-label="3D network topology view"></div>
+          <div class="viewport__empty" data-role="empty-state">
+            <div class="empty-card">
+              <p class="empty-card__title">Topology is warming up</p>
+              <p class="empty-card__body">
+                初回探索の結果を待っています。完了後に 3D 構成図と案内ツリーへ切り替わります。
+              </p>
+            </div>
+          </div>
+          <div
+            id="legend-card"
+            class="legend-card"
+            data-role="legend-card"
+            hidden
+            aria-label="shape and color legend"
+          >
+            <p class="legend-card__title">形は役割、色は物理 / 仮想を示します</p>
+            <div class="legend-card__list" data-role="legend-list"></div>
+          </div>
+          <div class="hover-card" data-role="hover-card" hidden>
+            <div class="hover-card__title" data-role="hover-title"></div>
+            <div class="hover-card__body" data-role="hover-body"></div>
+          </div>
+        </section>
+      </main>
     </main>
     <script type="module" src="./app.js"></script>
   </body>
