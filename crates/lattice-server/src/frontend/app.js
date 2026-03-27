@@ -507,13 +507,6 @@ class TopologyViewer {
 
     this.scene.add(ambient, key, fill);
 
-    const grid = new THREE.GridHelper(140, 56, 0xd8e1eb, 0xe9eef5);
-    grid.rotation.x = Math.PI / 2;
-    grid.position.z = -3;
-    grid.material.transparent = true;
-    grid.material.opacity = 0.24;
-    this.scene.add(grid);
-
     this.deviceRoot = new THREE.Group();
     this.linkRoot = new THREE.Group();
     this.scene.add(this.linkRoot);
@@ -1301,13 +1294,13 @@ class TopologyViewer {
     this.updateObjectStyles();
   }
 
-  setDeviceHover(deviceId, linkId = null) {
+  setSceneHover({ deviceId = null, linkId = null } = {}) {
     if (!deviceId && !linkId) {
       return;
     }
     this.hoverSource = 'scene';
     this.hoveredDeviceId = deviceId;
-    this.hoveredLinkId = linkId;
+    this.hoveredLinkId = deviceId ? null : linkId;
     this.hoveredEntryId = deviceId ? this.preferredEntryForDevice(deviceId) : null;
     this.hoveredRowId = deviceId ? this.preferredRowForDevice(deviceId) : null;
     this.renderHoverCard();
@@ -2104,19 +2097,8 @@ class TopologyViewer {
         opacity: 0.36,
       })
     );
+    edges.userData.role = 'device-edges';
     group.add(edges);
-
-    const ring = new THREE.Mesh(
-      new THREE.TorusGeometry(1.5, 0.055, 10, 40),
-      new THREE.MeshBasicMaterial({
-        color: 0x0f62fe,
-        transparent: true,
-        opacity: 0.0,
-      })
-    );
-    ring.rotation.x = Math.PI / 2;
-    ring.position.z = -0.24;
-    group.add(ring);
 
     group.userData = {
       kind: 'device',
@@ -2125,7 +2107,6 @@ class TopologyViewer {
       target: new THREE.Vector3(),
       mesh,
       edges,
-      ring,
       material,
     };
 
@@ -2245,10 +2226,6 @@ class TopologyViewer {
       const scale = isSelected ? 1.16 : isHovered ? 1.1 : onSelectedPath ? 1.06 : onHoveredPath ? 1.03 : 1;
       group.scale.setScalar(scale);
 
-      const ringOpacity = isSelected ? 0.64 : isHovered ? 0.48 : onSelectedPath ? 0.34 : onHoveredPath ? 0.2 : 0;
-      group.userData.ring.material.opacity = ringOpacity;
-      group.userData.ring.material.color.setHex(isHovered ? 0xd97706 : 0x0f62fe);
-
       group.userData.material.emissive.setHex(
         isSelected ? 0x123b88 : isHovered ? 0x7c2d12 : onSelectedPath ? 0x09368f : 0x000000
       );
@@ -2277,6 +2254,74 @@ class TopologyViewer {
     group.userData.overlayMesh.visible = overlayMaterial.opacity > 0;
   }
 
+  scenePickables() {
+    return [
+      ...Array.from(this.deviceGroups.values()).map((group) => group.userData.mesh),
+      ...Array.from(this.linkGroups.values()).map((group) => group.userData.hitMesh),
+    ];
+  }
+
+  resolveSceneIntersection(object) {
+    const role = object.userData.role;
+    if (role === 'device-mesh') {
+      const deviceGroup = this.findAncestorByKind(object, 'device');
+      if (deviceGroup?.userData?.deviceId) {
+        return {
+          kind: 'mesh',
+          deviceId: deviceGroup.userData.deviceId,
+        };
+      }
+      return null;
+    }
+
+    if (role === 'link-hit') {
+      const linkGroup = this.findAncestorByKind(object, 'link');
+      if (linkGroup?.userData?.linkId) {
+        return {
+          kind: 'link',
+          linkId: linkGroup.userData.linkId,
+        };
+      }
+    }
+
+    return null;
+  }
+
+  collectScenePointerHits() {
+    this.raycaster.setFromCamera(this.pointer, this.camera);
+
+    const result = {
+      nearest: null,
+      meshDeviceId: null,
+      linkId: null,
+    };
+
+    for (const intersection of this.raycaster.intersectObjects(this.scenePickables(), true)) {
+      const resolved = this.resolveSceneIntersection(intersection.object);
+      if (!resolved) {
+        continue;
+      }
+
+      if (!result.nearest) {
+        result.nearest = resolved;
+      }
+
+      if (resolved.kind === 'mesh' && !result.meshDeviceId) {
+        result.meshDeviceId = resolved.deviceId;
+      }
+
+      if (resolved.kind === 'link' && !result.linkId) {
+        result.linkId = resolved.linkId;
+      }
+
+      if (result.nearest && result.meshDeviceId && result.linkId) {
+        break;
+      }
+    }
+
+    return result;
+  }
+
   handlePointerMove(event) {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.hoverPointer = {
@@ -2287,46 +2332,22 @@ class TopologyViewer {
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
 
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-    const pickables = [
-      ...Array.from(this.linkGroups.values()).flatMap((group) => group.children),
-      ...Array.from(this.deviceGroups.values()).flatMap((group) => group.children),
-    ];
-    const intersects = this.raycaster.intersectObjects(pickables, true);
-    const hit = intersects.find((intersection) => {
-      const object = intersection.object;
-      return (
-        object.userData.role === 'link-hit' ||
-        object.userData.role === 'device-mesh' ||
-        object.parent?.userData.kind === 'device'
-      );
-    });
+    const hits = this.collectScenePointerHits();
+    if (hits.meshDeviceId) {
+      this.setSceneHover({ deviceId: hits.meshDeviceId });
+      return;
+    }
 
-    if (!hit) {
+    if (hits.linkId) {
+      this.setSceneHover({ linkId: hits.linkId });
+      return;
+    }
+
+    if (!hits.nearest) {
       if (this.hoverSource === 'scene') {
         this.clearHover();
       }
       return;
-    }
-
-    const object = hit.object.parent?.userData.kind === 'device' ? hit.object.parent : hit.object;
-    const deviceGroup = this.findAncestorByKind(object, 'device');
-    const linkGroup = this.findAncestorByKind(object, 'link');
-
-    if (linkGroup?.userData?.linkId) {
-      this.hoverSource = 'scene';
-      this.hoveredLinkId = linkGroup.userData.linkId;
-      this.hoveredDeviceId = null;
-      this.hoveredEntryId = null;
-      this.hoveredRowId = null;
-      this.renderHoverCard();
-      this.applyTreeHighlights();
-      this.updateObjectStyles();
-      return;
-    }
-
-    if (deviceGroup?.userData?.deviceId) {
-      this.setDeviceHover(deviceGroup.userData.deviceId);
     }
   }
 
@@ -2340,37 +2361,18 @@ class TopologyViewer {
     const rect = this.renderer.domElement.getBoundingClientRect();
     this.pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
-    this.raycaster.setFromCamera(this.pointer, this.camera);
-
-    const pickables = [
-      ...Array.from(this.deviceGroups.values()).flatMap((group) => group.children),
-      ...Array.from(this.linkGroups.values()).flatMap((group) => group.children),
-    ];
-    const intersects = this.raycaster.intersectObjects(pickables, true);
-    const hit = intersects.find((intersection) => {
-      const object = intersection.object;
-      return (
-        object.userData.role === 'device-mesh' ||
-        object.userData.role === 'link-hit' ||
-        object.parent?.userData.kind === 'device'
-      );
-    });
-
-    if (!hit) {
+    const hits = this.collectScenePointerHits();
+    if (!hits.meshDeviceId) {
       return;
     }
 
-    const object = hit.object;
-    const deviceGroup = this.findAncestorByKind(object, 'device');
-    if (deviceGroup?.userData?.deviceId) {
-      const deviceId = deviceGroup.userData.deviceId;
-      const entryId =
-        this.selectedDeviceId === deviceId && this.selectedEntryId
-          ? this.selectedEntryId
-          : this.preferredEntryForDevice(deviceId);
-      if (entryId) {
-        this.selectEntry(entryId, { reveal: true, source: 'scene' });
-      }
+    const deviceId = hits.meshDeviceId;
+    const entryId =
+      this.selectedDeviceId === deviceId && this.selectedEntryId
+        ? this.selectedEntryId
+        : this.preferredEntryForDevice(deviceId);
+    if (entryId) {
+      this.selectEntry(entryId, { reveal: true, source: 'scene' });
     }
   }
 
