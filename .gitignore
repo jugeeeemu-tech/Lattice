@@ -1,2 +1,5 @@
 /target
 /config/lattice.yaml
+/config/lattice.proxmox.env
+/.tools/
+scripts
