@@ -1,7 +1,8 @@
 use std::{cmp::Ordering, collections::HashMap};
 
 use lattice_core::{
-    Device, DeviceKind, DiscoveryTree, DiscoveryTreeNode, IdentityKeys, Link, Topology,
+    DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode, IdentityKeys, Link,
+    Topology,
 };
 use serde::{Deserialize, Serialize};
 
@@ -56,12 +57,13 @@ pub struct ViewDevice {
     pub id: String,
     pub label: String,
     pub depth: u32,
-    pub device_kind: DeviceKind,
+    pub device_role: DeviceRole,
+    pub deployment_type: DeploymentType,
     pub identity_keys: IdentityKeys,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uplink_interface: Option<String>,
+    pub upstream_interface: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -155,10 +157,11 @@ fn build_devices(
             id: device.id.clone(),
             label: device_label(device),
             depth: min_depth_by_device.get(&device.id).copied().unwrap_or(0),
-            device_kind: device.device_kind.clone(),
+            device_role: device.device_role.clone(),
+            deployment_type: device.deployment_type.clone(),
             identity_keys: device.identity_keys.clone(),
             host_label: device.host_label.clone(),
-            uplink_interface: device.uplink_interface.clone(),
+            upstream_interface: device.upstream_interface.clone(),
         })
         .collect();
 
@@ -266,22 +269,32 @@ mod tests {
     use std::collections::HashMap;
 
     use chrono::{TimeZone, Utc};
-    use lattice_core::{DeviceStatus, Interface, LinkProtocol, OperStatus};
+    use lattice_core::{
+        DeploymentType, DeviceRole, DeviceStatus, Interface, LinkProtocol, OperStatus,
+    };
 
     use super::*;
 
-    fn device(id: &str, sys_name: &str, kind: DeviceKind, host_label: Option<&str>) -> Device {
+    fn device(
+        id: &str,
+        sys_name: &str,
+        device_role: DeviceRole,
+        deployment_type: DeploymentType,
+        host_label: Option<&str>,
+    ) -> Device {
         Device {
             id: id.to_string(),
             identity_keys: IdentityKeys {
                 chassis_id: None,
                 sys_name: Some(sys_name.to_string()),
                 mgmt_ip: Some(format!("192.0.2.{}", id.chars().last().unwrap_or('1'))),
+                mac_addresses: Vec::new(),
             },
             sys_descr: sys_name.to_string(),
             vendor: "test".to_string(),
             model: None,
-            device_kind: kind,
+            device_role,
+            deployment_type,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),
@@ -295,7 +308,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: host_label.map(str::to_string),
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         }
     }
@@ -304,14 +317,21 @@ mod tests {
         let mut devices = HashMap::new();
         devices.insert(
             "router-1".to_string(),
-            device("router-1", "core", DeviceKind::Router, None),
+            device(
+                "router-1",
+                "core",
+                DeviceRole::Router,
+                DeploymentType::Unknown,
+                None,
+            ),
         );
         devices.insert(
             "proxmox:pve-1:bridge:vmbr0".to_string(),
             device(
                 "proxmox:pve-1:bridge:vmbr0",
                 "vmbr0",
-                DeviceKind::Bridge,
+                DeviceRole::Bridge,
+                DeploymentType::Virtual,
                 Some("pve-1"),
             ),
         );
@@ -320,7 +340,8 @@ mod tests {
             device(
                 "proxmox:pve-1:qemu:100",
                 "web",
-                DeviceKind::VirtualMachine,
+                DeviceRole::Server,
+                DeploymentType::Virtual,
                 Some("pve-1"),
             ),
         );
@@ -451,5 +472,36 @@ mod tests {
         );
         assert_eq!(snapshot.tree_edges.len(), 1);
         assert_eq!(snapshot.links[0].protocol, "proxmox_guest_link");
+    }
+
+    #[test]
+    fn snapshot_serializes_new_device_schema_fields() {
+        let mut topology = sample_topology();
+        if let Some(bridge) = topology.devices.get_mut("proxmox:pve-1:bridge:vmbr0") {
+            bridge.identity_keys.mac_addresses = vec!["aa:bb:cc:dd:ee:ff".to_string()];
+            bridge.upstream_interface = Some("eno1".to_string());
+        }
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+        );
+        let value = serde_json::to_value(&snapshot).unwrap();
+
+        let bridge = value["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|device| device["id"] == "proxmox:pve-1:bridge:vmbr0")
+            .unwrap();
+
+        assert_eq!(bridge["device_role"], "bridge");
+        assert_eq!(bridge["deployment_type"], "virtual");
+        assert_eq!(bridge["upstream_interface"], "eno1");
+        assert_eq!(
+            bridge["identity_keys"]["mac_addresses"],
+            serde_json::json!(["aa:bb:cc:dd:ee:ff"])
+        );
     }
 }

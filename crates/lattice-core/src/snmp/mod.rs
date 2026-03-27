@@ -21,6 +21,7 @@ pub mod oids {
     pub const LLDP_LOC_PORT_ID: &str = "1.0.8802.1.1.2.1.3.7.1.3";
 
     pub const IF_DESCR: &str = "1.3.6.1.2.1.2.2.1.2";
+    pub const IF_PHYS_ADDRESS: &str = "1.3.6.1.2.1.2.2.1.6";
     pub const IF_OPER_STATUS: &str = "1.3.6.1.2.1.2.2.1.8";
     pub const IF_HIGH_SPEED: &str = "1.3.6.1.2.1.31.1.1.1.15";
     pub const IF_NAME: &str = "1.3.6.1.2.1.31.1.1.1.1";
@@ -28,6 +29,8 @@ pub mod oids {
     pub const IP_AD_ENT_ADDR: &str = "1.3.6.1.2.1.4.20.1.1";
     pub const IP_AD_ENT_IF_IDX: &str = "1.3.6.1.2.1.4.20.1.2";
     pub const IP_AD_ENT_NET_MASK: &str = "1.3.6.1.2.1.4.20.1.3";
+    pub const IP_CIDR_ROUTE_IF_INDEX: &str = "1.3.6.1.2.1.4.24.4.1.5";
+    pub const IP_ROUTE_IF_INDEX: &str = "1.3.6.1.2.1.4.21.1.2";
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

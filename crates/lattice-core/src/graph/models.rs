@@ -5,23 +5,41 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum DeviceKind {
+pub enum DeviceRole {
     Router,
     Switch,
-    PhysicalServer,
     Bridge,
-    VirtualMachine,
-    Container,
+    Server,
     Unknown,
 }
 
-impl DeviceKind {
+impl Default for DeviceRole {
+    fn default() -> Self {
+        Self::Unknown
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentType {
+    Physical,
+    Virtual,
+    Unknown,
+}
+
+impl DeploymentType {
     pub fn is_virtual(&self) -> bool {
-        matches!(self, Self::Bridge | Self::VirtualMachine | Self::Container)
+        matches!(self, Self::Virtual)
     }
 
     pub fn is_physical(&self) -> bool {
-        matches!(self, Self::Router | Self::Switch | Self::PhysicalServer)
+        matches!(self, Self::Physical)
+    }
+}
+
+impl Default for DeploymentType {
+    fn default() -> Self {
+        Self::Unknown
     }
 }
 
@@ -80,6 +98,8 @@ pub struct IdentityKeys {
     pub chassis_id: Option<String>,
     pub sys_name: Option<String>,
     pub mgmt_ip: Option<String>,
+    #[serde(default)]
+    pub mac_addresses: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -89,7 +109,8 @@ pub struct Device {
     pub sys_descr: String,
     pub vendor: String,
     pub model: Option<String>,
-    pub device_kind: DeviceKind,
+    pub device_role: DeviceRole,
+    pub deployment_type: DeploymentType,
     pub interfaces: Vec<Interface>,
     pub status: DeviceStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -97,7 +118,7 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_mgmt_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub uplink_interface: Option<String>,
+    pub upstream_interface: Option<String>,
     pub last_seen: DateTime<Utc>,
 }
 
@@ -109,12 +130,13 @@ impl Device {
             sys_descr: String::new(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::Unknown,
+            device_role: DeviceRole::Unknown,
+            deployment_type: DeploymentType::Unknown,
             interfaces: Vec::new(),
             status: DeviceStatus::Unknown,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         }
     }
@@ -184,11 +206,13 @@ mod tests {
                     chassis_id: Some("00:11:22:33:44:55".to_string()),
                     sys_name: Some("core-sw".to_string()),
                     mgmt_ip: Some("192.0.2.10".to_string()),
+                    mac_addresses: vec!["00:11:22:33:44:55".to_string()],
                 },
                 sys_descr: "VyOS 1.4".to_string(),
                 vendor: "vyos".to_string(),
                 model: Some("virtual".to_string()),
-                device_kind: DeviceKind::Bridge,
+                device_role: DeviceRole::Bridge,
+                deployment_type: DeploymentType::Virtual,
                 interfaces: vec![Interface {
                     if_index: 1,
                     if_name: "vmbr0".to_string(),
@@ -199,7 +223,7 @@ mod tests {
                 status: DeviceStatus::Up,
                 host_label: Some("pve-01".to_string()),
                 host_mgmt_ip: Some("192.0.2.10".to_string()),
-                uplink_interface: Some("eno1".to_string()),
+                upstream_interface: Some("eno1".to_string()),
                 last_seen: Utc::now(),
             },
         );
@@ -239,8 +263,15 @@ mod tests {
             Some("192.0.2.10")
         );
         assert_eq!(
-            round_trip.devices["device-1"].uplink_interface.as_deref(),
+            round_trip.devices["device-1"].upstream_interface.as_deref(),
             Some("eno1")
+        );
+        assert_eq!(
+            round_trip.devices["device-1"]
+                .identity_keys
+                .mac_addresses
+                .as_slice(),
+            ["00:11:22:33:44:55"]
         );
         assert_eq!(round_trip.links[0].protocol, LinkProtocol::ProxmoxGuestLink);
     }

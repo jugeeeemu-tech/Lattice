@@ -152,8 +152,8 @@ mod tests {
     use anyhow::{anyhow, Result};
     use chrono::{TimeZone, Utc};
     use lattice_core::{
-        Device, DeviceKind, DeviceStatus, DiscoveryTreeNode, IdentityKeys, Interface, Link,
-        LinkProtocol, OperStatus,
+        DeploymentType, Device, DeviceRole, DeviceStatus, DiscoveryTreeNode, IdentityKeys,
+        Interface, Link, LinkProtocol, OperStatus,
     };
     use tokio::sync::Mutex;
 
@@ -190,11 +190,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some(label.to_string()),
                 mgmt_ip: Some("192.0.2.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: label.to_string(),
             vendor: "test".to_string(),
             model: None,
-            device_kind: DeviceKind::Router,
+            device_role: DeviceRole::Router,
+            deployment_type: DeploymentType::Unknown,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),
@@ -205,7 +207,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         };
 

@@ -1,4 +1,6 @@
-use crate::collectors::{interfaces::InterfaceCollector, lldp::LldpCollector};
+use crate::collectors::{
+    interfaces::InterfaceCollector, lldp::LldpCollector, routes::RouteCollector,
+};
 
 use super::NetworkDriver;
 
@@ -16,6 +18,7 @@ impl NetworkDriver for GenericDriver {
         vec![
             Box::new(LldpCollector::new()),
             Box::new(InterfaceCollector::new()),
+            Box::new(RouteCollector::new()),
         ]
     }
 }

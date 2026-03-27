@@ -13,7 +13,7 @@ use crate::{
         },
         SnmpSession, SnmpValue,
     },
-    Device, DeviceKind, DeviceStatus, IdentityKeys, LinkProtocol,
+    DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, LinkProtocol,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -70,12 +70,13 @@ impl Collector for LldpCollector {
                 chassis_id: chassis_ids.get(&index).and_then(snmp_value_as_text),
                 sys_name: sys_names.get(&index).and_then(snmp_value_as_text),
                 mgmt_ip: mgmt_addrs.get(&index).and_then(snmp_value_as_ipv4_text),
+                mac_addresses: Vec::new(),
             };
             let sys_descr = sys_descs
                 .get(&index)
                 .and_then(snmp_value_as_text)
                 .unwrap_or_default();
-            let device_kind = infer_device_kind(identity.sys_name.as_deref(), Some(&sys_descr));
+            let device_role = infer_device_role(identity.sys_name.as_deref(), Some(&sys_descr));
 
             devices.push(Device {
                 id: String::new(),
@@ -92,12 +93,13 @@ impl Collector for LldpCollector {
                     })
                     .unwrap_or_else(|| "unknown".to_string()),
                 model: None,
-                device_kind,
+                device_role,
+                deployment_type: DeploymentType::Unknown,
                 interfaces: Vec::new(),
                 status: DeviceStatus::Unknown,
                 host_label: None,
                 host_mgmt_ip: None,
-                uplink_interface: None,
+                upstream_interface: None,
                 last_seen: Utc::now(),
             });
 
@@ -153,7 +155,7 @@ fn snmp_value_as_ipv4_text(value: &SnmpValue) -> Option<String> {
     value.as_ipv4().map(|ip| ip.to_string())
 }
 
-fn infer_device_kind(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceKind {
+fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
     let mut combined = String::new();
     if let Some(value) = sys_name {
         combined.push_str(value);
@@ -165,14 +167,14 @@ fn infer_device_kind(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceK
 
     let lowered = combined.to_lowercase();
     if lowered.contains("router") || lowered.contains("vyos") {
-        DeviceKind::Router
+        DeviceRole::Router
     } else if lowered.contains("proxmox") || lowered.contains("linux") || lowered.contains("server")
     {
-        DeviceKind::PhysicalServer
+        DeviceRole::Server
     } else if lowered.contains("switch") {
-        DeviceKind::Switch
+        DeviceRole::Switch
     } else {
-        DeviceKind::Unknown
+        DeviceRole::Unknown
     }
 }
 
@@ -191,14 +193,14 @@ mod tests {
     }
 
     #[test]
-    fn device_kind_defaults_to_unknown_when_no_keywords_are_present() {
+    fn device_role_defaults_to_unknown_when_no_keywords_are_present() {
         assert_eq!(
-            infer_device_kind(Some("core"), Some("edge"),),
-            DeviceKind::Unknown
+            infer_device_role(Some("core"), Some("edge"),),
+            DeviceRole::Unknown
         );
         assert_eq!(
-            infer_device_kind(Some("vyos"), Some("router os")),
-            DeviceKind::Router
+            infer_device_role(Some("vyos"), Some("router os")),
+            DeviceRole::Router
         );
     }
 

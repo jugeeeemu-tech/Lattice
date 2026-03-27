@@ -9,12 +9,12 @@ use crate::{
     snmp::{
         cidr_prefix_len,
         oids::{
-            IF_DESCR, IF_HIGH_SPEED, IF_NAME, IF_OPER_STATUS, IP_AD_ENT_ADDR, IP_AD_ENT_IF_IDX,
-            IP_AD_ENT_NET_MASK,
+            IF_DESCR, IF_HIGH_SPEED, IF_NAME, IF_OPER_STATUS, IF_PHYS_ADDRESS, IP_AD_ENT_ADDR,
+            IP_AD_ENT_IF_IDX, IP_AD_ENT_NET_MASK,
         },
         SnmpSession, SnmpValue,
     },
-    Device, DeviceKind, DeviceStatus, IdentityKeys, Interface, OperStatus,
+    DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, Interface, OperStatus,
 };
 
 #[derive(Debug, Default, Clone)]
@@ -41,6 +41,7 @@ impl Collector for InterfaceCollector {
         let if_descrs = table_by_index(session.walk(IF_DESCR).await?, IF_DESCR);
         let if_statuses = table_by_index(session.walk(IF_OPER_STATUS).await?, IF_OPER_STATUS);
         let if_speeds = table_by_index(session.walk(IF_HIGH_SPEED).await?, IF_HIGH_SPEED);
+        let if_macs = table_by_index(session.walk(IF_PHYS_ADDRESS).await?, IF_PHYS_ADDRESS);
         let ip_addrs = table_by_index(session.walk(IP_AD_ENT_ADDR).await?, IP_AD_ENT_ADDR);
         let ip_if_idxs = table_by_index(session.walk(IP_AD_ENT_IF_IDX).await?, IP_AD_ENT_IF_IDX);
         let ip_masks = table_by_index(session.walk(IP_AD_ENT_NET_MASK).await?, IP_AD_ENT_NET_MASK);
@@ -123,20 +124,25 @@ impl Collector for InterfaceCollector {
 
         let mut interfaces = interfaces_by_index.into_values().collect::<Vec<_>>();
         interfaces.sort_by_key(|interface| interface.if_index);
+        let mac_addresses = collect_mac_addresses(&if_macs);
 
         Ok(GraphPatch {
             devices: vec![Device {
                 id: ctx.local_device_id.clone(),
-                identity_keys: IdentityKeys::default(),
+                identity_keys: IdentityKeys {
+                    mac_addresses,
+                    ..IdentityKeys::default()
+                },
                 sys_descr: String::new(),
                 vendor: String::new(),
                 model: None,
-                device_kind: DeviceKind::Unknown,
+                device_role: DeviceRole::Unknown,
+                deployment_type: DeploymentType::Unknown,
                 interfaces,
                 status: DeviceStatus::Unknown,
                 host_label: None,
                 host_mgmt_ip: None,
-                uplink_interface: None,
+                upstream_interface: None,
                 last_seen: Utc::now(),
             }],
             observed_links: Vec::new(),
@@ -187,6 +193,31 @@ fn snmp_value_as_ipv4(value: &SnmpValue) -> Option<std::net::Ipv4Addr> {
     value.as_ipv4()
 }
 
+fn collect_mac_addresses(entries: &HashMap<String, SnmpValue>) -> Vec<String> {
+    let mut mac_addresses = entries
+        .values()
+        .filter_map(snmp_value_as_octets)
+        .filter_map(|value| normalize_mac_address(&value))
+        .collect::<Vec<_>>();
+    mac_addresses.sort();
+    mac_addresses.dedup();
+    mac_addresses
+}
+
+fn normalize_mac_address(value: &[u8]) -> Option<String> {
+    if value.len() != 6 || value.iter().all(|octet| *octet == 0) {
+        return None;
+    }
+
+    Some(
+        value
+            .iter()
+            .map(|octet| format!("{octet:02x}"))
+            .collect::<Vec<_>>()
+            .join(":"),
+    )
+}
+
 fn oper_status_from_snmp(value: u32) -> OperStatus {
     match value {
         1 => OperStatus::Up,
@@ -213,5 +244,26 @@ mod tests {
             Some("7")
         );
         assert_eq!(index_after_prefix("1.2.3", IF_NAME), None);
+    }
+
+    #[test]
+    fn normalizes_and_filters_mac_addresses() {
+        let entries = HashMap::from([
+            (
+                "1".to_string(),
+                SnmpValue::OctetString(vec![0, 0, 0, 0, 0, 0]),
+            ),
+            (
+                "2".to_string(),
+                SnmpValue::OctetString(vec![0, 26, 43, 60, 77, 94]),
+            ),
+            (
+                "3".to_string(),
+                SnmpValue::OctetString(vec![0, 26, 43, 60, 77, 94]),
+            ),
+            ("4".to_string(), SnmpValue::OctetString(vec![])),
+        ]);
+
+        assert_eq!(collect_mac_addresses(&entries), vec!["00:1a:2b:3c:4d:5e"]);
     }
 }

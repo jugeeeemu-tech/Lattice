@@ -1,41 +1,249 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use chrono::Utc;
 
-use crate::{graph::GraphStore, proxmox::attach_proxmox_uplinks};
+use crate::{
+    graph::{GraphStore, LinkProtocol, Topology},
+    proxmox::attach_proxmox_uplinks,
+};
 
-use super::{DiscoveryResult, DiscoveryTree, SourceResult};
+use super::{DiscoveryResult, DiscoveryTree, DiscoveryTreeNode, SourceResult};
 
 pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
     let mut store = GraphStore::default();
-    let mut seen_row_ids = HashSet::new();
-    let mut nodes = Vec::new();
 
     for result in results {
-        let id_map = store.absorb_topology(&result.topology);
-        let mut source_nodes = result.tree.nodes;
-        source_nodes.sort_by(|left, right| left.row_id.cmp(&right.row_id));
-
-        for mut node in source_nodes {
-            if let Some(mapped_id) = id_map.get(&node.device_id) {
-                node.device_id = mapped_id.clone();
-            }
-            if seen_row_ids.insert(node.row_id.clone()) {
-                nodes.push(node);
-            }
-        }
+        store.absorb_topology(&result.topology);
     }
-
-    nodes.sort_by(|left, right| left.row_id.cmp(&right.row_id));
 
     let mut topology = store.topology();
     attach_proxmox_uplinks(&mut topology);
+    let tree = build_internal_tree(&topology);
 
     DiscoveryResult {
         topology,
-        tree: DiscoveryTree { nodes },
+        tree,
         discovered_at: Utc::now(),
     }
+}
+
+fn build_internal_tree(topology: &Topology) -> DiscoveryTree {
+    let mut device_ids = topology
+        .devices
+        .keys()
+        .filter(|device_id| include_in_tree(topology, device_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    device_ids.sort_by(|left, right| {
+        device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+    });
+
+    let visible_device_ids = device_ids.iter().cloned().collect::<HashSet<_>>();
+    let parent_by_device = device_ids
+        .iter()
+        .filter_map(|device_id| {
+            determine_parent(topology, device_id).and_then(|parent_id| {
+                (visible_device_ids.contains(&parent_id) && parent_id != *device_id)
+                    .then_some((device_id.clone(), parent_id))
+            })
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
+    for (device_id, parent_id) in &parent_by_device {
+        children_by_parent
+            .entry(parent_id.clone())
+            .or_default()
+            .push(device_id.clone());
+    }
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|left, right| {
+            device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+        });
+    }
+
+    let roots = device_ids
+        .iter()
+        .filter(|device_id| !parent_by_device.contains_key(*device_id))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    let mut visited = HashSet::new();
+    let mut nodes = Vec::new();
+    for root_id in roots {
+        walk_tree(
+            topology,
+            &root_id,
+            None,
+            0,
+            &children_by_parent,
+            &mut visited,
+            &mut nodes,
+        );
+    }
+
+    for device_id in device_ids {
+        if !visited.contains(&device_id) {
+            walk_tree(
+                topology,
+                &device_id,
+                None,
+                0,
+                &children_by_parent,
+                &mut visited,
+                &mut nodes,
+            );
+        }
+    }
+
+    DiscoveryTree { nodes }
+}
+
+fn walk_tree(
+    topology: &Topology,
+    device_id: &str,
+    parent_row_id: Option<String>,
+    depth: u32,
+    children_by_parent: &HashMap<String, Vec<String>>,
+    visited: &mut HashSet<String>,
+    nodes: &mut Vec<DiscoveryTreeNode>,
+) {
+    if !visited.insert(device_id.to_string()) {
+        return;
+    }
+
+    nodes.push(DiscoveryTreeNode {
+        row_id: device_id.to_string(),
+        device_id: device_id.to_string(),
+        parent_row_id: parent_row_id.clone(),
+        label: topology.devices.get(device_id).map(|device| device.label()),
+        depth,
+    });
+
+    if let Some(children) = children_by_parent.get(device_id) {
+        for child_id in children {
+            walk_tree(
+                topology,
+                child_id,
+                Some(device_id.to_string()),
+                depth + 1,
+                children_by_parent,
+                visited,
+                nodes,
+            );
+        }
+    }
+}
+
+fn determine_parent(topology: &Topology, device_id: &str) -> Option<String> {
+    let device = topology.devices.get(device_id)?;
+    if is_proxmox_node(device_id) || device.device_role == crate::DeviceRole::Bridge {
+        return None;
+    }
+
+    if let Some(parent_id) = proxmox_bridge_parent(topology, device_id) {
+        return Some(parent_id);
+    }
+
+    let upstream_interface = device.upstream_interface.as_deref()?.trim();
+    if upstream_interface.is_empty() {
+        return None;
+    }
+
+    unique_parent_from_links(
+        topology,
+        device_id,
+        |link| link.protocol == LinkProtocol::Lldp,
+        |link, is_local| {
+            if is_local {
+                (link.local_interface == upstream_interface).then(|| link.remote_device_id.clone())
+            } else {
+                (link.remote_interface == upstream_interface).then(|| link.local_device_id.clone())
+            }
+        },
+    )
+}
+
+fn proxmox_bridge_parent(topology: &Topology, device_id: &str) -> Option<String> {
+    if !is_proxmox_guest(device_id) {
+        return None;
+    }
+
+    unique_parent_from_links(
+        topology,
+        device_id,
+        |link| link.protocol == LinkProtocol::ProxmoxGuestLink,
+        |link, is_local| {
+            let candidate_id = if is_local {
+                link.remote_device_id.clone()
+            } else {
+                link.local_device_id.clone()
+            };
+            topology
+                .devices
+                .get(&candidate_id)
+                .filter(|device| device.device_role == crate::DeviceRole::Bridge)
+                .map(|_| candidate_id)
+        },
+    )
+}
+
+fn unique_parent_from_links<F, G>(
+    topology: &Topology,
+    device_id: &str,
+    protocol_filter: F,
+    candidate_for_link: G,
+) -> Option<String>
+where
+    F: Fn(&crate::Link) -> bool,
+    G: Fn(&crate::Link, bool) -> Option<String>,
+{
+    let candidates = topology
+        .links
+        .iter()
+        .filter(|link| protocol_filter(link))
+        .filter_map(|link| {
+            if link.local_device_id == device_id {
+                candidate_for_link(link, true)
+            } else if link.remote_device_id == device_id {
+                candidate_for_link(link, false)
+            } else {
+                None
+            }
+        })
+        .filter(|candidate_id| include_in_tree(topology, candidate_id))
+        .collect::<HashSet<_>>();
+
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
+}
+
+fn include_in_tree(topology: &Topology, device_id: &str) -> bool {
+    topology
+        .devices
+        .get(device_id)
+        .is_some_and(|_| !is_proxmox_node(device_id))
+}
+
+fn is_proxmox_node(device_id: &str) -> bool {
+    device_id.starts_with("proxmox:") && device_id.ends_with(":node")
+}
+
+fn is_proxmox_guest(device_id: &str) -> bool {
+    device_id.starts_with("proxmox:")
+        && (device_id.contains(":qemu:") || device_id.contains(":lxc:"))
+}
+
+fn device_sort_key(topology: &Topology, device_id: &str) -> (String, String) {
+    let label = topology
+        .devices
+        .get(device_id)
+        .map(|device| device.label().to_ascii_lowercase())
+        .unwrap_or_else(|| device_id.to_ascii_lowercase());
+    (label, device_id.to_string())
 }
 
 #[cfg(test)]
@@ -46,22 +254,24 @@ mod tests {
 
     use super::*;
     use crate::graph::{
-        Device, DeviceKind, DeviceStatus, IdentityKeys, Interface, LinkProtocol, OperStatus,
-        Topology,
+        DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, Interface, Link,
+        LinkProtocol, OperStatus, Topology,
     };
 
-    fn device(id: &str, kind: DeviceKind) -> Device {
+    fn device(id: &str, role: DeviceRole, deployment_type: DeploymentType) -> Device {
         Device {
             id: id.to_string(),
             identity_keys: IdentityKeys {
                 chassis_id: None,
                 sys_name: Some(id.to_string()),
                 mgmt_ip: None,
+                mac_addresses: Vec::new(),
             },
             sys_descr: id.to_string(),
             vendor: "test".to_string(),
             model: None,
-            device_kind: kind,
+            device_role: role,
+            deployment_type,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),
@@ -72,8 +282,15 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
+        }
+    }
+
+    fn source_result(topology: Topology) -> SourceResult {
+        SourceResult {
+            topology,
+            tree: DiscoveryTree::default(),
         }
     }
 
@@ -83,7 +300,7 @@ mod tests {
             topology: Topology {
                 devices: HashMap::from([(
                     "router-1".to_string(),
-                    device("router-1", DeviceKind::Router),
+                    device("router-1", DeviceRole::Router, DeploymentType::Unknown),
                 )]),
                 links: Vec::new(),
                 updated_at: Utc::now(),
@@ -102,7 +319,11 @@ mod tests {
             topology: Topology {
                 devices: HashMap::from([(
                     "proxmox:pve-1:bridge:vmbr0".to_string(),
-                    device("proxmox:pve-1:bridge:vmbr0", DeviceKind::Bridge),
+                    device(
+                        "proxmox:pve-1:bridge:vmbr0",
+                        DeviceRole::Bridge,
+                        DeploymentType::Virtual,
+                    ),
                 )]),
                 links: Vec::new(),
                 updated_at: Utc::now(),
@@ -132,11 +353,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("vmbr0".to_string()),
                 mgmt_ip: Some("192.0.2.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![
                 Interface {
                     if_index: 0,
@@ -156,7 +379,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-1".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
-            uplink_interface: Some("eno1".to_string()),
+            upstream_interface: Some("eno1".to_string()),
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -165,11 +388,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("pve-1".to_string()),
                 mgmt_ip: Some("192.0.2.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eno1".to_string(),
@@ -180,7 +405,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 
@@ -208,5 +433,244 @@ mod tests {
             .links
             .iter()
             .any(|link| link.protocol == LinkProtocol::ProxmoxUplink));
+    }
+
+    #[test]
+    fn route_based_tree_uses_unique_lldp_neighbor_on_upstream_interface() {
+        let mut core = device("router-1", DeviceRole::Router, DeploymentType::Unknown);
+        core.identity_keys.sys_name = Some("core".to_string());
+        core.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth0".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+
+        let mut edge = device("router-2", DeviceRole::Router, DeploymentType::Unknown);
+        edge.identity_keys.sys_name = Some("edge".to_string());
+        edge.upstream_interface = Some("eth1".to_string());
+        edge.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth1".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+
+        let merged = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (core.id.clone(), core.clone()),
+                (edge.id.clone(), edge.clone()),
+            ]),
+            links: vec![Link {
+                id: "lldp-core-edge".to_string(),
+                local_device_id: edge.id.clone(),
+                local_interface: "eth1".to_string(),
+                local_ip: None,
+                remote_device_id: core.id.clone(),
+                remote_interface: "eth0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::Lldp,
+            }],
+            updated_at: Utc::now(),
+        })]);
+
+        let edge_node = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "router-2")
+            .unwrap();
+
+        assert_eq!(edge_node.parent_row_id.as_deref(), Some("router-1"));
+        assert_eq!(edge_node.depth, 1);
+    }
+
+    #[test]
+    fn upstream_interface_without_unique_lldp_parent_stays_root() {
+        let mut edge = device("router-2", DeviceRole::Router, DeploymentType::Unknown);
+        edge.upstream_interface = Some("eth1".to_string());
+        edge.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth1".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+        let mut core_a = device("router-a", DeviceRole::Router, DeploymentType::Unknown);
+        core_a.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth0".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+        let mut core_b = device("router-b", DeviceRole::Router, DeploymentType::Unknown);
+        core_b.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth0".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+
+        let merged = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (edge.id.clone(), edge.clone()),
+                (core_a.id.clone(), core_a.clone()),
+                (core_b.id.clone(), core_b.clone()),
+            ]),
+            links: vec![
+                Link {
+                    id: "lldp-a".to_string(),
+                    local_device_id: edge.id.clone(),
+                    local_interface: "eth1".to_string(),
+                    local_ip: None,
+                    remote_device_id: core_a.id.clone(),
+                    remote_interface: "eth0".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::Lldp,
+                },
+                Link {
+                    id: "lldp-b".to_string(),
+                    local_device_id: edge.id.clone(),
+                    local_interface: "eth1".to_string(),
+                    local_ip: None,
+                    remote_device_id: core_b.id.clone(),
+                    remote_interface: "eth0".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::Lldp,
+                },
+            ],
+            updated_at: Utc::now(),
+        })]);
+
+        let edge_node = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "router-2")
+            .unwrap();
+
+        assert!(edge_node.parent_row_id.is_none());
+        assert_eq!(edge_node.depth, 0);
+    }
+
+    #[test]
+    fn guest_becomes_bridge_child_only_when_guest_link_exists() {
+        let bridge = device(
+            "proxmox:pve-1:bridge:vmbr0",
+            DeviceRole::Bridge,
+            DeploymentType::Virtual,
+        );
+        let guest = device(
+            "proxmox:pve-1:qemu:100",
+            DeviceRole::Server,
+            DeploymentType::Virtual,
+        );
+
+        let with_link = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (bridge.id.clone(), bridge.clone()),
+                (guest.id.clone(), guest.clone()),
+            ]),
+            links: vec![Link {
+                id: "guest-link".to_string(),
+                local_device_id: bridge.id.clone(),
+                local_interface: "vmbr0".to_string(),
+                local_ip: None,
+                remote_device_id: guest.id.clone(),
+                remote_interface: "net0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+            }],
+            updated_at: Utc::now(),
+        })]);
+        let without_link = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (bridge.id.clone(), bridge.clone()),
+                (guest.id.clone(), guest.clone()),
+            ]),
+            links: Vec::new(),
+            updated_at: Utc::now(),
+        })]);
+
+        assert_eq!(
+            with_link
+                .tree
+                .nodes
+                .iter()
+                .find(|node| node.device_id == "proxmox:pve-1:qemu:100")
+                .and_then(|node| node.parent_row_id.as_deref()),
+            Some("proxmox:pve-1:bridge:vmbr0")
+        );
+        assert!(without_link
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "proxmox:pve-1:qemu:100")
+            .unwrap()
+            .parent_row_id
+            .is_none());
+    }
+
+    #[test]
+    fn tree_skips_proxmox_node_devices_and_keeps_devices_unique() {
+        let bridge = device(
+            "proxmox:pve-1:bridge:vmbr0",
+            DeviceRole::Bridge,
+            DeploymentType::Virtual,
+        );
+        let guest = device(
+            "proxmox:pve-1:qemu:100",
+            DeviceRole::Server,
+            DeploymentType::Virtual,
+        );
+        let node = device(
+            "proxmox:pve-1:node",
+            DeviceRole::Server,
+            DeploymentType::Physical,
+        );
+
+        let merged = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (bridge.id.clone(), bridge.clone()),
+                (guest.id.clone(), guest.clone()),
+                (node.id.clone(), node.clone()),
+            ]),
+            links: vec![Link {
+                id: "guest-link".to_string(),
+                local_device_id: bridge.id.clone(),
+                local_interface: "vmbr0".to_string(),
+                local_ip: None,
+                remote_device_id: guest.id.clone(),
+                remote_interface: "net0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+            }],
+            updated_at: Utc::now(),
+        })]);
+
+        assert_eq!(merged.tree.nodes.len(), 2);
+        assert!(merged
+            .tree
+            .nodes
+            .iter()
+            .all(|node| node.device_id != "proxmox:pve-1:node"));
+        assert_eq!(
+            merged
+                .tree
+                .nodes
+                .iter()
+                .filter(|node| node.device_id == "proxmox:pve-1:qemu:100")
+                .count(),
+            1
+        );
     }
 }

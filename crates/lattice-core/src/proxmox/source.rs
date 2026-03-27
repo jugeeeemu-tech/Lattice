@@ -8,10 +8,10 @@ use crate::{
     config::ProxmoxSourceConfig,
     discovery::{DiscoverySource, DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode},
     graph::{
-        Device, DeviceKind, DeviceStatus, IdentityKeys, Interface, Link, LinkProtocol, OperStatus,
-        Topology,
+        DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, Interface, Link,
+        LinkProtocol, OperStatus, Topology,
     },
-    proxmox::{ClusterResource, GuestConfig, ProxmoxApi, ProxmoxApiClient},
+    proxmox::{ClusterResource, GuestNetworkAttachment, ProxmoxApi, ProxmoxApiClient},
 };
 
 #[derive(Clone)]
@@ -64,6 +64,10 @@ impl DiscoverySource for ProxmoxDiscoverySource {
         let mut tree_nodes = Vec::new();
 
         for node in &node_names {
+            let node_resource = node_resource_by_name.get(node);
+            let node_device = build_node_device(node, node_resource);
+            topology_devices.insert(node_device.id.clone(), node_device);
+
             let networks = self
                 .api
                 .node_network(node)
@@ -108,8 +112,9 @@ impl DiscoverySource for ProxmoxDiscoverySource {
                 self.api.lxc_config(&node, vmid).await?
             };
 
-            let guest = build_guest_device(&resource, &config);
             let attachments = config.network_attachments();
+            let guest =
+                build_guest_device(&resource, &attachments, node_resource_by_name.get(&node));
             topology_devices.insert(guest.id.clone(), guest.clone());
 
             for attachment in attachments {
@@ -120,6 +125,7 @@ impl DiscoverySource for ProxmoxDiscoverySource {
                     &mut bridge_devices,
                     &node,
                     &attachment.bridge,
+                    node_resource_by_name.get(&node),
                 );
                 topology_links.push(Link {
                     id: format!(
@@ -208,38 +214,71 @@ fn build_bridge_device(
             chassis_id: None,
             sys_name: Some(bridge_name.to_string()),
             mgmt_ip: network.cidr_address().as_deref().map(strip_prefix_len),
+            mac_addresses: Vec::new(),
         },
         sys_descr: format!("Proxmox bridge {bridge_name}"),
         vendor: "proxmox".to_string(),
         model: None,
-        device_kind: DeviceKind::Bridge,
+        device_role: DeviceRole::Bridge,
+        deployment_type: DeploymentType::Virtual,
         interfaces,
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
-        uplink_interface: network.bridge_ports_list().into_iter().next(),
+        upstream_interface: network.bridge_ports_list().into_iter().next(),
         status: device_status_from_active(network.active),
         last_seen: Utc::now(),
     }
 }
 
-fn build_guest_device(resource: &ClusterResource, config: &GuestConfig) -> Device {
-    let kind = if resource.is_qemu() {
-        DeviceKind::VirtualMachine
-    } else {
-        DeviceKind::Container
-    };
-    let interfaces = config
-        .network_attachments()
+fn build_node_device(node: &str, node_resource: Option<&ClusterResource>) -> Device {
+    Device {
+        id: format!("proxmox:{node}:node"),
+        identity_keys: IdentityKeys {
+            chassis_id: None,
+            sys_name: Some(node.to_string()),
+            mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
+            mac_addresses: Vec::new(),
+        },
+        sys_descr: format!("Proxmox node {node}"),
+        vendor: "proxmox".to_string(),
+        model: None,
+        device_role: DeviceRole::Server,
+        deployment_type: DeploymentType::Physical,
+        interfaces: Vec::new(),
+        host_label: Some(node.to_string()),
+        host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
+        upstream_interface: None,
+        status: match node_resource.and_then(|resource| resource.status.as_deref()) {
+            Some("online") => DeviceStatus::Up,
+            Some("offline") => DeviceStatus::Down,
+            _ => DeviceStatus::Unknown,
+        },
+        last_seen: Utc::now(),
+    }
+}
+
+fn build_guest_device(
+    resource: &ClusterResource,
+    attachments: &[GuestNetworkAttachment],
+    node_resource: Option<&ClusterResource>,
+) -> Device {
+    let interfaces = attachments
         .into_iter()
         .enumerate()
         .map(|(index, attachment)| Interface {
             if_index: index as u32,
-            if_name: attachment.interface_name,
+            if_name: attachment.interface_name.clone(),
             ip_addresses: Vec::new(),
             speed_bps: None,
             oper_status: OperStatus::Up,
         })
         .collect();
+    let mut mac_addresses = attachments
+        .iter()
+        .filter_map(|attachment| attachment.mac_address.clone())
+        .collect::<Vec<_>>();
+    mac_addresses.sort();
+    mac_addresses.dedup();
     let node = resource.node.as_deref().unwrap_or("unknown");
     let vmid = resource.vmid.unwrap_or(0);
     let name = resource
@@ -253,15 +292,17 @@ fn build_guest_device(resource: &ClusterResource, config: &GuestConfig) -> Devic
             chassis_id: None,
             sys_name: Some(name.clone()),
             mgmt_ip: None,
+            mac_addresses,
         },
         sys_descr: format!("Proxmox {} {name}", resource.resource_type),
         vendor: "proxmox".to_string(),
         model: None,
-        device_kind: kind,
+        device_role: DeviceRole::Server,
+        deployment_type: DeploymentType::Virtual,
         interfaces,
         host_label: Some(node.to_string()),
-        host_mgmt_ip: None,
-        uplink_interface: None,
+        host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
+        upstream_interface: None,
         status: match resource.status.as_deref() {
             Some("running") => DeviceStatus::Up,
             Some("stopped") => DeviceStatus::Down,
@@ -278,6 +319,7 @@ fn ensure_bridge_device(
     bridge_devices: &mut HashMap<(String, String), Device>,
     node: &str,
     bridge_name: &str,
+    node_resource: Option<&ClusterResource>,
 ) -> Device {
     if let Some(device) = bridge_devices.get(&(node.to_string(), bridge_name.to_string())) {
         return device.clone();
@@ -289,11 +331,13 @@ fn ensure_bridge_device(
             chassis_id: None,
             sys_name: Some(bridge_name.to_string()),
             mgmt_ip: None,
+            mac_addresses: Vec::new(),
         },
         sys_descr: format!("Proxmox bridge {bridge_name}"),
         vendor: "proxmox".to_string(),
         model: None,
-        device_kind: DeviceKind::Bridge,
+        device_role: DeviceRole::Bridge,
+        deployment_type: DeploymentType::Virtual,
         interfaces: vec![Interface {
             if_index: 0,
             if_name: bridge_name.to_string(),
@@ -302,8 +346,8 @@ fn ensure_bridge_device(
             oper_status: OperStatus::Unknown,
         }],
         host_label: Some(node.to_string()),
-        host_mgmt_ip: None,
-        uplink_interface: None,
+        host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
+        upstream_interface: None,
         status: DeviceStatus::Unknown,
         last_seen: Utc::now(),
     };
@@ -356,7 +400,7 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::proxmox::{GuestNetworkAttachment, NodeNetworkInterface};
+    use crate::proxmox::{GuestConfig, GuestNetworkAttachment, NodeNetworkInterface};
 
     #[derive(Debug, Default)]
     struct FakeApi;
@@ -438,18 +482,37 @@ mod tests {
             .topology
             .devices
             .values()
-            .any(|device| device.device_kind == DeviceKind::Bridge
-                && device.host_label.as_deref() == Some("pve-1")));
+            .any(|device| device.device_role == DeviceRole::Bridge
+                && device.deployment_type == DeploymentType::Virtual
+                && device.host_label.as_deref() == Some("pve-1")
+                && device.host_mgmt_ip.as_deref() == Some("192.0.2.10")));
         assert!(result
             .topology
             .devices
             .values()
-            .any(|device| device.device_kind == DeviceKind::VirtualMachine));
-        assert!(result
-            .topology
-            .devices
-            .values()
-            .any(|device| device.device_kind == DeviceKind::Container));
+            .any(|device| device.device_role == DeviceRole::Server
+                && device.deployment_type == DeploymentType::Virtual
+                && device.identity_keys.mac_addresses.as_slice() == ["de:ad:be:ef:00:01"]
+                && device.host_mgmt_ip.as_deref() == Some("192.0.2.10")));
+        assert!(
+            result
+                .topology
+                .devices
+                .values()
+                .filter(|device| {
+                    device.device_role == DeviceRole::Server
+                        && device.deployment_type == DeploymentType::Virtual
+                })
+                .count()
+                >= 2
+        );
+        assert!(result.topology.devices.values().any(|device| {
+            device.id == "proxmox:pve-1:node"
+                && device.identity_keys.sys_name.as_deref() == Some("pve-1")
+                && device.identity_keys.mgmt_ip.as_deref() == Some("192.0.2.10")
+                && device.device_role == DeviceRole::Server
+                && device.deployment_type == DeploymentType::Physical
+        }));
         assert!(result
             .topology
             .links
@@ -475,10 +538,30 @@ mod tests {
             "net0"
         );
         assert_eq!(
-            GuestNetworkAttachment::parse("net1", "name=eth1,bridge=vmbr1,type=veth")
+            GuestNetworkAttachment::parse("net0", "virtio=DE:AD:BE:EF:00:01,bridge=vmbr0")
                 .unwrap()
-                .bridge,
+                .mac_address
+                .as_deref(),
+            Some("de:ad:be:ef:00:01")
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse(
+                "net1",
+                "name=eth1,bridge=vmbr1,type=veth,hwaddr=AA:BB:CC:DD:EE:FF"
+            )
+            .unwrap()
+            .bridge,
             "vmbr1"
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse(
+                "net1",
+                "name=eth1,bridge=vmbr1,type=veth,hwaddr=AA:BB:CC:DD:EE:FF"
+            )
+            .unwrap()
+            .mac_address
+            .as_deref(),
+            Some("aa:bb:cc:dd:ee:ff")
         );
     }
 }

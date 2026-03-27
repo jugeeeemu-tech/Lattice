@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use anyhow::{anyhow, Result};
 use chrono::Utc;
@@ -6,7 +6,8 @@ use chrono::Utc;
 use crate::{
     collectors::ObservedLink,
     graph::{
-        Device, DeviceKind, DeviceStatus, IdentityKeys, Interface, Link, LinkProtocol, Topology,
+        DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, Interface, Link,
+        LinkProtocol, Topology,
     },
 };
 
@@ -14,9 +15,10 @@ use crate::{
 pub struct GraphStore {
     devices: HashMap<String, Device>,
     links: HashMap<String, Link>,
-    by_chassis_id: HashMap<String, String>,
-    by_mgmt_ip: HashMap<String, String>,
-    by_sys_name: HashMap<String, String>,
+    by_chassis_id: HashMap<String, BTreeSet<String>>,
+    by_mac_address: HashMap<String, BTreeSet<String>>,
+    by_mgmt_ip: HashMap<String, BTreeSet<String>>,
+    by_sys_name: HashMap<String, BTreeSet<String>>,
     next_device_number: u64,
 }
 
@@ -194,66 +196,69 @@ impl GraphStore {
     }
 
     fn match_device_id(&self, device: &Device) -> Option<String> {
-        self.resolve_explicit_id(&device.id)
-            .or_else(|| self.match_identity(device))
+        self.resolve_explicit_id(&device.id).or_else(|| {
+            let candidate_id = self.match_identity(&device.identity_keys)?;
+            let existing = self.devices.get(&candidate_id)?;
+            device_roles_are_compatible(existing, device).then_some(candidate_id)
+        })
     }
 
-    fn match_identity(&self, device: &Device) -> Option<String> {
-        let identity = &device.identity_keys;
-
-        if let Some(chassis_id) = identity.chassis_id.as_ref() {
-            if let Some(id) = self.by_chassis_id.get(chassis_id) {
-                let existing = self.devices.get(id)?;
-                if can_merge_identity(existing, device) {
-                    return Some(id.clone());
-                }
-            }
+    fn match_identity(&self, identity: &IdentityKeys) -> Option<String> {
+        if let Some(candidate_id) = identity
+            .chassis_id
+            .as_ref()
+            .and_then(|value| self.unique_index_match(&self.by_chassis_id, value))
+        {
+            return self
+                .candidate_is_consistent(&candidate_id, identity)
+                .then_some(candidate_id);
         }
-
-        if let Some(mgmt_ip) = identity.mgmt_ip.as_ref() {
-            if let Some(id) = self.by_mgmt_ip.get(mgmt_ip) {
-                let existing = self.devices.get(id)?;
-                if can_merge_identity(existing, device) {
-                    return Some(id.clone());
-                }
-            }
-        }
-
-        let sys_name = identity.sys_name.as_ref()?;
-        let candidate = self.by_sys_name.get(sys_name)?.clone();
-        let existing = self.devices.get(&candidate)?;
-
-        if !can_merge_identity(existing, device)
-            || conflicts_with_strong_identity(existing, identity)
+        if identity
+            .chassis_id
+            .as_ref()
+            .is_some_and(|value| self.is_ambiguous_match(&self.by_chassis_id, value))
         {
             return None;
         }
 
-        Some(candidate)
-    }
-
-    fn match_identity_for_observed_link(&self, identity: &IdentityKeys) -> Option<String> {
-        if let Some(chassis_id) = identity.chassis_id.as_ref() {
-            if let Some(id) = self.by_chassis_id.get(chassis_id) {
-                return Some(id.clone());
+        match self.unique_mac_match(&identity.mac_addresses) {
+            CandidateMatch::Unique(candidate_id) => {
+                if self.candidate_is_consistent(&candidate_id, identity) {
+                    return Some(candidate_id);
+                }
+                return None;
             }
+            CandidateMatch::Ambiguous => return None,
+            CandidateMatch::None => {}
         }
 
-        if let Some(mgmt_ip) = identity.mgmt_ip.as_ref() {
-            if let Some(id) = self.by_mgmt_ip.get(mgmt_ip) {
-                return Some(id.clone());
-            }
+        if let Some(candidate_id) = identity
+            .mgmt_ip
+            .as_ref()
+            .and_then(|value| self.unique_index_match(&self.by_mgmt_ip, value))
+        {
+            return self
+                .candidate_is_consistent(&candidate_id, identity)
+                .then_some(candidate_id);
         }
-
-        let sys_name = identity.sys_name.as_ref()?;
-        let candidate = self.by_sys_name.get(sys_name)?.clone();
-        let existing = self.devices.get(&candidate)?;
-
-        if conflicts_with_strong_identity(existing, identity) {
+        if identity
+            .mgmt_ip
+            .as_ref()
+            .is_some_and(|value| self.is_ambiguous_match(&self.by_mgmt_ip, value))
+        {
             return None;
         }
 
-        Some(candidate)
+        let candidate_id = identity
+            .sys_name
+            .as_ref()
+            .and_then(|value| self.unique_index_match(&self.by_sys_name, value))?;
+        self.candidate_is_consistent(&candidate_id, identity)
+            .then_some(candidate_id)
+    }
+
+    fn match_identity_for_observed_link(&self, identity: &IdentityKeys) -> Option<String> {
+        self.match_identity(identity)
     }
 
     fn merge_device(&self, mut current: Device, incoming: Device) -> Device {
@@ -269,7 +274,9 @@ impl GraphStore {
         if current.model.is_none() && incoming.model.is_some() {
             current.model = incoming.model;
         }
-        current.device_kind = merge_device_kind(current.device_kind.clone(), incoming.device_kind);
+        current.device_role = merge_device_role(current.device_role.clone(), incoming.device_role);
+        current.deployment_type =
+            merge_deployment_type(current.deployment_type.clone(), incoming.deployment_type);
         if !incoming.interfaces.is_empty() {
             current.interfaces = merge_interfaces(&current.interfaces, &incoming.interfaces);
         }
@@ -278,8 +285,8 @@ impl GraphStore {
         }
         current.host_label = merge_optional_stable(&current.host_label, &incoming.host_label);
         current.host_mgmt_ip = merge_optional_stable(&current.host_mgmt_ip, &incoming.host_mgmt_ip);
-        current.uplink_interface =
-            merge_optional_stable(&current.uplink_interface, &incoming.uplink_interface);
+        current.upstream_interface =
+            merge_optional_stable(&current.upstream_interface, &incoming.upstream_interface);
         current.last_seen = incoming.last_seen;
         current
     }
@@ -287,14 +294,101 @@ impl GraphStore {
     fn index_device(&mut self, device: &Device) {
         if let Some(chassis_id) = device.identity_keys.chassis_id.as_ref() {
             self.by_chassis_id
-                .insert(chassis_id.clone(), device.id.clone());
+                .entry(chassis_id.clone())
+                .or_default()
+                .insert(device.id.clone());
+        }
+        for mac_address in &device.identity_keys.mac_addresses {
+            self.by_mac_address
+                .entry(mac_address.clone())
+                .or_default()
+                .insert(device.id.clone());
         }
         if let Some(mgmt_ip) = device.identity_keys.mgmt_ip.as_ref() {
-            self.by_mgmt_ip.insert(mgmt_ip.clone(), device.id.clone());
+            self.by_mgmt_ip
+                .entry(mgmt_ip.clone())
+                .or_default()
+                .insert(device.id.clone());
         }
         if let Some(sys_name) = device.identity_keys.sys_name.as_ref() {
-            self.by_sys_name.insert(sys_name.clone(), device.id.clone());
+            self.by_sys_name
+                .entry(sys_name.clone())
+                .or_default()
+                .insert(device.id.clone());
         }
+    }
+
+    fn unique_index_match(
+        &self,
+        index: &HashMap<String, BTreeSet<String>>,
+        value: &str,
+    ) -> Option<String> {
+        let candidates = index.get(value)?;
+        if candidates.len() == 1 {
+            candidates.iter().next().cloned()
+        } else {
+            None
+        }
+    }
+
+    fn is_ambiguous_match(&self, index: &HashMap<String, BTreeSet<String>>, value: &str) -> bool {
+        index
+            .get(value)
+            .is_some_and(|candidates| candidates.len() > 1)
+    }
+
+    fn unique_mac_match(&self, mac_addresses: &[String]) -> CandidateMatch {
+        let candidate_ids = mac_addresses
+            .iter()
+            .filter_map(|mac_address| self.by_mac_address.get(mac_address))
+            .flat_map(|device_ids| device_ids.iter().cloned())
+            .collect::<BTreeSet<_>>();
+
+        match candidate_ids.len() {
+            0 => CandidateMatch::None,
+            1 => CandidateMatch::Unique(
+                candidate_ids
+                    .into_iter()
+                    .next()
+                    .expect("unique candidate exists"),
+            ),
+            _ => CandidateMatch::Ambiguous,
+        }
+    }
+
+    fn candidate_is_consistent(&self, candidate_id: &str, identity: &IdentityKeys) -> bool {
+        let Some(existing) = self.devices.get(candidate_id) else {
+            return false;
+        };
+
+        if conflicts_with_strong_identity(existing, identity) {
+            return false;
+        }
+
+        !self.identity_points_to_other_device(candidate_id, identity)
+    }
+
+    fn identity_points_to_other_device(&self, candidate_id: &str, identity: &IdentityKeys) -> bool {
+        identity.chassis_id.as_ref().is_some_and(|value| {
+            self.index_points_elsewhere(&self.by_chassis_id, value, candidate_id)
+        }) || identity
+            .mac_addresses
+            .iter()
+            .any(|value| self.index_points_elsewhere(&self.by_mac_address, value, candidate_id))
+            || identity.mgmt_ip.as_ref().is_some_and(|value| {
+                self.index_points_elsewhere(&self.by_mgmt_ip, value, candidate_id)
+            })
+    }
+
+    fn index_points_elsewhere(
+        &self,
+        index: &HashMap<String, BTreeSet<String>>,
+        value: &str,
+        candidate_id: &str,
+    ) -> bool {
+        index
+            .get(value)
+            .is_some_and(|device_ids| device_ids.iter().any(|device_id| device_id != candidate_id))
     }
 
     fn refresh_links_for_device(&mut self, device_id: &str) {
@@ -343,6 +437,13 @@ impl GraphStore {
 struct Endpoint {
     device_id: String,
     interface: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CandidateMatch {
+    None,
+    Unique(String),
+    Ambiguous,
 }
 
 fn endpoint_key(device_id: &str, interface: &str) -> String {
@@ -395,15 +496,35 @@ fn conflicts_with_strong_identity(existing: &Device, incoming: &IdentityKeys) ->
         }
     }
 
+    if !existing.identity_keys.mac_addresses.is_empty() && !incoming.mac_addresses.is_empty() {
+        let overlaps = incoming
+            .mac_addresses
+            .iter()
+            .any(|incoming_mac| existing.identity_keys.mac_addresses.contains(incoming_mac));
+        if !overlaps {
+            return true;
+        }
+    }
+
     false
 }
 
-fn can_merge_identity(existing: &Device, incoming: &Device) -> bool {
-    !((existing.device_kind.is_virtual() && incoming.device_kind.is_physical())
-        || (existing.device_kind.is_physical() && incoming.device_kind.is_virtual()))
+fn device_roles_are_compatible(existing: &Device, incoming: &Device) -> bool {
+    if existing.device_role == DeviceRole::Bridge || incoming.device_role == DeviceRole::Bridge {
+        existing.device_role == incoming.device_role
+    } else {
+        true
+    }
 }
 
 fn merge_identity_keys(current: &IdentityKeys, incoming: &IdentityKeys) -> IdentityKeys {
+    let mut mac_addresses = current.mac_addresses.clone();
+    for mac in &incoming.mac_addresses {
+        if !mac_addresses.contains(mac) {
+            mac_addresses.push(mac.clone());
+        }
+    }
+
     IdentityKeys {
         chassis_id: incoming
             .chassis_id
@@ -414,15 +535,41 @@ fn merge_identity_keys(current: &IdentityKeys, incoming: &IdentityKeys) -> Ident
             .clone()
             .or_else(|| current.sys_name.clone()),
         mgmt_ip: incoming.mgmt_ip.clone().or_else(|| current.mgmt_ip.clone()),
+        mac_addresses,
     }
 }
 
-fn merge_device_kind(current: DeviceKind, incoming: DeviceKind) -> DeviceKind {
-    match (current, incoming) {
-        (DeviceKind::Unknown, next) => next,
-        (current, DeviceKind::Unknown) => current,
-        (current, incoming) if current == incoming => current,
-        (current, _) => current,
+fn merge_device_role(current: DeviceRole, incoming: DeviceRole) -> DeviceRole {
+    if device_role_priority(incoming.clone()) > device_role_priority(current.clone()) {
+        incoming
+    } else {
+        current
+    }
+}
+
+fn merge_deployment_type(current: DeploymentType, incoming: DeploymentType) -> DeploymentType {
+    if deployment_type_priority(incoming.clone()) > deployment_type_priority(current.clone()) {
+        incoming
+    } else {
+        current
+    }
+}
+
+fn device_role_priority(role: DeviceRole) -> u8 {
+    match role {
+        DeviceRole::Router => 4,
+        DeviceRole::Switch => 3,
+        DeviceRole::Bridge => 2,
+        DeviceRole::Server => 1,
+        DeviceRole::Unknown => 0,
+    }
+}
+
+fn deployment_type_priority(deployment_type: DeploymentType) -> u8 {
+    match deployment_type {
+        DeploymentType::Virtual => 2,
+        DeploymentType::Physical => 1,
+        DeploymentType::Unknown => 0,
     }
 }
 
@@ -468,7 +615,7 @@ pub fn synthesize_proxmox_uplinks(topology: &Topology) -> Vec<Link> {
     for bridge in topology
         .devices
         .values()
-        .filter(|device| device.device_kind == DeviceKind::Bridge)
+        .filter(|device| device.device_role == DeviceRole::Bridge)
     {
         let already_connected = topology.links.iter().any(|link| {
             link.protocol == LinkProtocol::ProxmoxUplink
@@ -486,7 +633,7 @@ pub fn synthesize_proxmox_uplinks(topology: &Topology) -> Vec<Link> {
             id: String::new(),
             local_device_id: bridge.id.clone(),
             local_interface: bridge
-                .uplink_interface
+                .upstream_interface
                 .clone()
                 .unwrap_or_else(|| bridge.label()),
             local_ip: None,
@@ -522,7 +669,7 @@ fn collect_physical_interfaces(topology: &Topology) -> Vec<PhysicalInterfaceCand
     topology
         .devices
         .values()
-        .filter(|device| device.device_kind.is_physical())
+        .filter(|device| device.deployment_type.is_physical())
         .flat_map(|device| {
             device
                 .interfaces
@@ -542,7 +689,7 @@ fn choose_uplink_candidate<'a>(
     physical_interfaces: &'a [PhysicalInterfaceCandidate],
 ) -> Option<&'a PhysicalInterfaceCandidate> {
     if let Some(uplink) = bridge
-        .uplink_interface
+        .upstream_interface
         .as_ref()
         .map(|value| value.trim())
         .filter(|value| !value.is_empty())
@@ -682,18 +829,28 @@ mod tests {
                 chassis_id: chassis_id.map(str::to_string),
                 sys_name: sys_name.map(str::to_string),
                 mgmt_ip: mgmt_ip.map(str::to_string),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Generic device".to_string(),
             vendor: "vendor".to_string(),
             model: None,
-            device_kind: DeviceKind::Unknown,
+            device_role: DeviceRole::Unknown,
+            deployment_type: DeploymentType::Unknown,
             interfaces: Vec::new(),
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         }
+    }
+
+    fn with_mac_addresses(mut device: Device, mac_addresses: &[&str]) -> Device {
+        device.identity_keys.mac_addresses = mac_addresses
+            .iter()
+            .map(|value| value.to_string())
+            .collect();
+        device
     }
 
     #[test]
@@ -709,7 +866,7 @@ mod tests {
             "device-b",
             Some("aa:bb"),
             Some("core-b"),
-            Some("192.0.2.11"),
+            Some("192.0.2.10"),
         );
 
         let first_id = store.upsert_device(first);
@@ -752,6 +909,106 @@ mod tests {
     }
 
     #[test]
+    fn merges_unique_mac_match_and_keeps_router_virtual_priority() {
+        let mut store = GraphStore::default();
+        let mut proxmox_guest = with_mac_addresses(
+            sample_device("proxmox:pve-1:qemu:100", None, Some("web"), None),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+        proxmox_guest.device_role = DeviceRole::Server;
+        proxmox_guest.deployment_type = DeploymentType::Virtual;
+
+        let mut snmp_router = with_mac_addresses(
+            sample_device("device-router", None, Some("vyos"), Some("192.0.2.10")),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+        snmp_router.device_role = DeviceRole::Router;
+        snmp_router.deployment_type = DeploymentType::Unknown;
+
+        let first_id = store.upsert_device(proxmox_guest);
+        let second_id = store.upsert_device(snmp_router);
+
+        assert_eq!(first_id, second_id);
+        assert_eq!(store.topology().devices.len(), 1);
+        assert_eq!(
+            store.topology().devices[&first_id].device_role,
+            DeviceRole::Router
+        );
+        assert_eq!(
+            store.topology().devices[&first_id].deployment_type,
+            DeploymentType::Virtual
+        );
+    }
+
+    #[test]
+    fn does_not_merge_when_mac_candidate_is_ambiguous() {
+        let mut store = GraphStore::default();
+        let first = with_mac_addresses(
+            sample_device("device-a", Some("aa:aa"), Some("host-a"), None),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+        let second = with_mac_addresses(
+            sample_device("device-b", Some("bb:bb"), Some("host-b"), None),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+        let third = with_mac_addresses(
+            sample_device("device-c", None, Some("host-c"), None),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+
+        let first_id = store.upsert_device(first);
+        let second_id = store.upsert_device(second);
+        let third_id = store.upsert_device(third);
+
+        assert_ne!(first_id, second_id);
+        assert_ne!(third_id, first_id);
+        assert_ne!(third_id, second_id);
+        assert_eq!(store.topology().devices.len(), 3);
+    }
+
+    #[test]
+    fn does_not_merge_when_strong_identifiers_conflict() {
+        let mut store = GraphStore::default();
+        let first = with_mac_addresses(
+            sample_device("device-a", Some("aa:aa"), Some("core"), Some("192.0.2.10")),
+            &["aa:bb:cc:dd:ee:ff"],
+        );
+        let second = with_mac_addresses(
+            sample_device("device-b", Some("aa:aa"), Some("core"), Some("192.0.2.20")),
+            &["11:22:33:44:55:66"],
+        );
+
+        let first_id = store.upsert_device(first);
+        let second_id = store.upsert_device(second);
+
+        assert_ne!(first_id, second_id);
+        assert_eq!(store.topology().devices.len(), 2);
+    }
+
+    #[test]
+    fn node_and_host_can_merge_when_strong_identifiers_agree() {
+        let mut store = GraphStore::default();
+        let mut node = sample_device(
+            "proxmox:pve-1:node",
+            None,
+            Some("pve-1"),
+            Some("192.0.2.10"),
+        );
+        node.device_role = DeviceRole::Server;
+        node.deployment_type = DeploymentType::Physical;
+
+        let mut host = sample_device("snmp-host", None, Some("pve-1"), Some("192.0.2.10"));
+        host.device_role = DeviceRole::Server;
+        host.deployment_type = DeploymentType::Unknown;
+
+        let node_id = store.upsert_device(node);
+        let host_id = store.upsert_device(host);
+
+        assert_eq!(node_id, host_id);
+        assert_eq!(store.topology().devices.len(), 1);
+    }
+
+    #[test]
     fn canonicalizes_reverse_link_observations() {
         let mut store = GraphStore::default();
         let left_id = store.upsert_device(sample_device("device-1", None, Some("left"), None));
@@ -764,6 +1021,7 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("left".to_string()),
                 mgmt_ip: None,
+                mac_addresses: Vec::new(),
             },
             remote_interface: "ge-0/0/0".to_string(),
             remote_sys_descr: None,
@@ -778,6 +1036,7 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("right".to_string()),
                 mgmt_ip: None,
+                mac_addresses: Vec::new(),
             },
             remote_interface: "ge-0/0/1".to_string(),
             remote_sys_descr: None,
@@ -796,12 +1055,14 @@ mod tests {
     fn host_label_prefers_existing_non_empty_value() {
         let mut store = GraphStore::default();
         let mut first = sample_device("device-1", None, Some("vm-101"), None);
-        first.device_kind = DeviceKind::VirtualMachine;
+        first.device_role = DeviceRole::Server;
+        first.deployment_type = DeploymentType::Virtual;
         first.host_label = Some("pve-a".to_string());
         let id = store.upsert_device(first);
 
         let mut second = sample_device(&id, None, Some("vm-101"), None);
-        second.device_kind = DeviceKind::VirtualMachine;
+        second.device_role = DeviceRole::Server;
+        second.deployment_type = DeploymentType::Virtual;
         second.host_label = Some("pve-b".to_string());
         store.upsert_device(second);
 
@@ -819,7 +1080,8 @@ mod tests {
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -830,7 +1092,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
-            uplink_interface: Some("eno1".to_string()),
+            upstream_interface: Some("eno1".to_string()),
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -839,11 +1101,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-a".to_string()),
                 mgmt_ip: Some("192.0.2.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno1".to_string(),
@@ -854,7 +1118,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 
@@ -879,7 +1143,8 @@ mod tests {
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -890,7 +1155,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -899,11 +1164,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-a".to_string()),
                 mgmt_ip: Some("192.0.2.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno9".to_string(),
@@ -914,7 +1181,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 
@@ -939,7 +1206,8 @@ mod tests {
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![
                 Interface {
                     if_index: 1,
@@ -959,7 +1227,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -968,11 +1236,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-a".to_string()),
                 mgmt_ip: Some("198.51.100.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "enp3s0".to_string(),
@@ -983,7 +1253,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 
@@ -1007,7 +1277,8 @@ mod tests {
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1018,7 +1289,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -1027,11 +1298,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-a".to_string()),
                 mgmt_ip: Some("198.51.100.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno7".to_string(),
@@ -1042,7 +1315,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 
@@ -1066,7 +1339,8 @@ mod tests {
             sys_descr: "Proxmox bridge".to_string(),
             vendor: "proxmox".to_string(),
             model: None,
-            device_kind: DeviceKind::Bridge,
+            device_role: DeviceRole::Bridge,
+            deployment_type: DeploymentType::Virtual,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1077,7 +1351,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
-            uplink_interface: Some("eno1".to_string()),
+            upstream_interface: Some("eno1".to_string()),
             last_seen: Utc::now(),
         };
         let left = Device {
@@ -1086,11 +1360,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-a".to_string()),
                 mgmt_ip: Some("198.51.100.10".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno1".to_string(),
@@ -1101,7 +1377,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
         let right = Device {
@@ -1110,11 +1386,13 @@ mod tests {
                 chassis_id: None,
                 sys_name: Some("host-b".to_string()),
                 mgmt_ip: Some("198.51.100.11".to_string()),
+                mac_addresses: Vec::new(),
             },
             sys_descr: "Linux host".to_string(),
             vendor: "generic".to_string(),
             model: None,
-            device_kind: DeviceKind::PhysicalServer,
+            device_role: DeviceRole::Server,
+            deployment_type: DeploymentType::Physical,
             interfaces: vec![Interface {
                 if_index: 3,
                 if_name: "eno1".to_string(),
@@ -1125,7 +1403,7 @@ mod tests {
             status: DeviceStatus::Up,
             host_label: None,
             host_mgmt_ip: None,
-            uplink_interface: None,
+            upstream_interface: None,
             last_seen: Utc::now(),
         };
 

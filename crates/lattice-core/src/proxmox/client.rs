@@ -212,6 +212,7 @@ pub struct GuestNetworkAttachment {
     pub entry_key: String,
     pub interface_name: String,
     pub bridge: String,
+    pub mac_address: Option<String>,
 }
 
 impl GuestNetworkAttachment {
@@ -232,13 +233,31 @@ impl GuestNetworkAttachment {
             .get("name")
             .cloned()
             .unwrap_or_else(|| key.to_string());
+        let mac_address = fields
+            .values()
+            .find_map(|field_value| normalize_mac_address(field_value));
 
         Some(Self {
             entry_key: key.to_string(),
             interface_name,
             bridge,
+            mac_address,
         })
     }
+}
+
+fn normalize_mac_address(value: &str) -> Option<String> {
+    let normalized = value.trim().replace('-', ":").to_ascii_lowercase();
+    let parts = normalized.split(':').collect::<Vec<_>>();
+    if parts.len() != 6
+        || parts
+            .iter()
+            .any(|part| part.len() != 2 || !part.chars().all(|ch| ch.is_ascii_hexdigit()))
+    {
+        return None;
+    }
+
+    Some(parts.join(":"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -360,6 +379,10 @@ mod tests {
         assert_eq!(networks[0].bridge_ports_list(), vec!["eno1".to_string()]);
         assert_eq!(networks[0].cidr_address().as_deref(), Some("192.0.2.10/24"));
         assert_eq!(vm.network_attachments()[0].bridge, "vmbr0");
+        assert_eq!(
+            vm.network_attachments()[0].mac_address.as_deref(),
+            Some("de:ad:be:ef:00:01")
+        );
         assert_eq!(ct.network_attachments()[0].interface_name, "eth0");
         assert_eq!(
             state.headers.lock().await[0],

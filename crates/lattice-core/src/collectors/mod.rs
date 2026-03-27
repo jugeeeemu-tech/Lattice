@@ -5,6 +5,7 @@ use crate::{graph::LinkProtocol, snmp::SnmpSession, Device, IdentityKeys};
 
 pub mod interfaces;
 pub mod lldp;
+pub mod routes;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CollectorContext {

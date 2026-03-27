@@ -10,7 +10,7 @@ use crate::{
     config::{DiscoveryConfig, SnmpSourceConfig},
     discovery::{DiscoverySource, DiscoveryTree, DiscoveryTreeNode, SourceResult},
     drivers::{detect_vendor, get_driver},
-    graph::{Device, DeviceKind, DeviceStatus, GraphStore},
+    graph::{DeploymentType, Device, DeviceRole, DeviceStatus, GraphStore},
     snmp::{oids, SnmpConfig, SnmpSession},
 };
 
@@ -100,7 +100,8 @@ impl DiscoverySource for SnmpDiscoverySource {
             local_device.identity_keys.mgmt_ip = Some(item.target_ip.clone());
             local_device.sys_descr = sys_descr.clone();
             local_device.vendor = detect_vendor(&sys_descr).to_string();
-            local_device.device_kind = infer_device_kind(&sys_descr);
+            local_device.device_role = infer_device_role(&sys_descr);
+            local_device.deployment_type = DeploymentType::Unknown;
             local_device.status = DeviceStatus::Up;
             local_device.last_seen = Utc::now();
 
@@ -193,17 +194,17 @@ fn next_row_id(
     }
 }
 
-fn infer_device_kind(sys_descr: &str) -> DeviceKind {
+fn infer_device_role(sys_descr: &str) -> DeviceRole {
     let lowered = sys_descr.to_ascii_lowercase();
     if lowered.contains("router") || lowered.contains("vyos") {
-        DeviceKind::Router
+        DeviceRole::Router
     } else if lowered.contains("switch") {
-        DeviceKind::Switch
+        DeviceRole::Switch
     } else if lowered.contains("proxmox") || lowered.contains("linux") || lowered.contains("server")
     {
-        DeviceKind::PhysicalServer
+        DeviceRole::Server
     } else {
-        DeviceKind::Unknown
+        DeviceRole::Unknown
     }
 }
 
@@ -237,24 +238,24 @@ mod tests {
 
     #[test]
     fn infers_router_from_vyos() {
-        assert_eq!(infer_device_kind("VyOS 1.4 rolling"), DeviceKind::Router);
+        assert_eq!(infer_device_role("VyOS 1.4 rolling"), DeviceRole::Router);
     }
 
     #[test]
     fn infers_switch_from_description() {
-        assert_eq!(infer_device_kind("Layer 2 Switch"), DeviceKind::Switch);
+        assert_eq!(infer_device_role("Layer 2 Switch"), DeviceRole::Switch);
     }
 
     #[test]
     fn infers_physical_server_from_linux_text() {
         assert_eq!(
-            infer_device_kind("Linux 6.8.0-2-pve Proxmox VE"),
-            DeviceKind::PhysicalServer
+            infer_device_role("Linux 6.8.0-2-pve Proxmox VE"),
+            DeviceRole::Server
         );
     }
 
     #[test]
     fn keeps_unknown_for_unrecognized_text() {
-        assert_eq!(infer_device_kind("appliance"), DeviceKind::Unknown);
+        assert_eq!(infer_device_role("appliance"), DeviceRole::Unknown);
     }
 }
