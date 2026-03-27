@@ -160,6 +160,15 @@ pub struct Interface {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GuestAttachment {
+    pub bridge_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan_tag: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trunk_vlans: Vec<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Link {
     pub id: String,
     pub local_device_id: String,
@@ -170,6 +179,8 @@ pub struct Link {
     pub remote_ip: Option<String>,
     pub speed_bps: Option<u64>,
     pub protocol: LinkProtocol,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_attachment: Option<GuestAttachment>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -240,6 +251,11 @@ mod tests {
                 remote_ip: None,
                 speed_bps: Some(1_000_000_000),
                 protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: Some(20),
+                    trunk_vlans: vec![20, 30],
+                }),
             }],
             updated_at: Utc::now(),
         };
@@ -272,6 +288,14 @@ mod tests {
                 .mac_addresses
                 .as_slice(),
             ["00:11:22:33:44:55"]
+        );
+        assert_eq!(
+            round_trip.links[0].guest_attachment,
+            Some(GuestAttachment {
+                bridge_name: "vmbr0".to_string(),
+                vlan_tag: Some(20),
+                trunk_vlans: vec![20, 30],
+            })
         );
         assert_eq!(round_trip.links[0].protocol, LinkProtocol::ProxmoxGuestLink);
     }

@@ -131,6 +131,7 @@ impl GraphStore {
             remote_ip: self.lookup_interface_ip(&right.device_id, &right.interface),
             speed_bps: link.speed_bps,
             protocol: link.protocol,
+            guest_attachment: None,
         };
 
         self.links.insert(link_id.clone(), stored);
@@ -166,6 +167,7 @@ impl GraphStore {
             remote_ip: self.lookup_interface_ip(&right.device_id, &right.interface),
             speed_bps: link.speed_bps,
             protocol: link.protocol,
+            guest_attachment: link.guest_attachment,
         };
 
         self.links.insert(link_id.clone(), stored);
@@ -642,6 +644,7 @@ pub fn synthesize_proxmox_uplinks(topology: &Topology) -> Vec<Link> {
             remote_ip: None,
             speed_bps: candidate.interface.speed_bps,
             protocol: LinkProtocol::ProxmoxUplink,
+            guest_attachment: None,
         });
     }
 

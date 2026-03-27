@@ -224,6 +224,7 @@ mod tests {
                     remote_ip: None,
                     speed_bps: None,
                     protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
                 }],
                 updated_at: Utc::now(),
             },

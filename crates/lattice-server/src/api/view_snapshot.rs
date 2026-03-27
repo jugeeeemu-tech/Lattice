@@ -1,8 +1,8 @@
 use std::{cmp::Ordering, collections::HashMap};
 
 use lattice_core::{
-    DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode, IdentityKeys, Link,
-    Topology,
+    DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode,
+    GuestAttachment as CoreGuestAttachment, IdentityKeys, Link, Topology,
 };
 use serde::{Deserialize, Serialize};
 
@@ -77,6 +77,17 @@ pub struct ViewLink {
     pub remote_ip: Option<String>,
     pub speed_bps: Option<u64>,
     pub protocol: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_attachment: Option<ViewGuestAttachment>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ViewGuestAttachment {
+    pub bridge_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vlan_tag: Option<u16>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trunk_vlans: Vec<u16>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -186,6 +197,7 @@ fn build_links(links: &[Link]) -> Vec<ViewLink> {
             remote_ip: link.remote_ip.clone(),
             speed_bps: link.speed_bps,
             protocol: link.protocol.as_str().to_string(),
+            guest_attachment: link.guest_attachment.as_ref().map(view_guest_attachment),
         })
         .collect();
     view_links.sort_by(|left, right| left.id.cmp(&right.id));
@@ -264,13 +276,22 @@ fn device_label_by_id(topology: &Topology, device_id: &str) -> String {
         .unwrap_or_else(|| "Unknown".to_string())
 }
 
+fn view_guest_attachment(attachment: &CoreGuestAttachment) -> ViewGuestAttachment {
+    ViewGuestAttachment {
+        bridge_name: attachment.bridge_name.clone(),
+        vlan_tag: attachment.vlan_tag,
+        trunk_vlans: attachment.trunk_vlans.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
 
     use chrono::{TimeZone, Utc};
     use lattice_core::{
-        DeploymentType, DeviceRole, DeviceStatus, Interface, LinkProtocol, OperStatus,
+        DeploymentType, DeviceRole, DeviceStatus, GuestAttachment, Interface, LinkProtocol,
+        OperStatus,
     };
 
     use super::*;
@@ -358,6 +379,11 @@ mod tests {
                 remote_ip: None,
                 speed_bps: None,
                 protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: Some(20),
+                    trunk_vlans: Vec::new(),
+                }),
             }],
             updated_at: Utc::now(),
         }
@@ -472,6 +498,14 @@ mod tests {
         );
         assert_eq!(snapshot.tree_edges.len(), 1);
         assert_eq!(snapshot.links[0].protocol, "proxmox_guest_link");
+        assert_eq!(
+            snapshot.links[0].guest_attachment,
+            Some(ViewGuestAttachment {
+                bridge_name: "vmbr0".to_string(),
+                vlan_tag: Some(20),
+                trunk_vlans: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -503,5 +537,216 @@ mod tests {
             bridge["identity_keys"]["mac_addresses"],
             serde_json::json!(["aa:bb:cc:dd:ee:ff"])
         );
+    }
+
+    #[test]
+    fn snapshot_represents_zero_router_candidate_case() {
+        let bridge_id = "proxmox:pve-1:bridge:vmbr0";
+        let guest_id = "proxmox:pve-1:qemu:100";
+
+        let mut topology = sample_topology();
+        topology.devices.insert(
+            guest_id.to_string(),
+            device(
+                guest_id,
+                "mc01",
+                DeviceRole::Server,
+                DeploymentType::Virtual,
+                Some("pve-1"),
+            ),
+        );
+        topology.links = vec![Link {
+            id: "mc01-access".to_string(),
+            local_device_id: bridge_id.to_string(),
+            local_interface: "vmbr0".to_string(),
+            local_ip: Some("192.0.2.10/24".to_string()),
+            remote_device_id: guest_id.to_string(),
+            remote_interface: "net0".to_string(),
+            remote_ip: None,
+            speed_bps: None,
+            protocol: LinkProtocol::ProxmoxGuestLink,
+            guest_attachment: Some(GuestAttachment {
+                bridge_name: "vmbr0".to_string(),
+                vlan_tag: Some(20),
+                trunk_vlans: Vec::new(),
+            }),
+        }];
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+        );
+
+        assert_eq!(snapshot.links.len(), 1);
+        assert_eq!(
+            snapshot.links[0].guest_attachment,
+            Some(ViewGuestAttachment {
+                bridge_name: "vmbr0".to_string(),
+                vlan_tag: Some(20),
+                trunk_vlans: Vec::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn snapshot_represents_ambiguous_router_candidate_case() {
+        let bridge_id = "proxmox:pve-1:bridge:vmbr0".to_string();
+        let guest_id = "proxmox:pve-1:qemu:100".to_string();
+        let router_a_id = "proxmox:pve-1:qemu:200".to_string();
+        let router_b_id = "proxmox:pve-1:qemu:300".to_string();
+
+        let mut topology = sample_topology();
+        topology.devices.insert(
+            guest_id.clone(),
+            device(
+                &guest_id,
+                "mc01",
+                DeviceRole::Server,
+                DeploymentType::Virtual,
+                Some("pve-1"),
+            ),
+        );
+        topology.devices.insert(
+            router_a_id.clone(),
+            device(
+                &router_a_id,
+                "vyos01",
+                DeviceRole::Router,
+                DeploymentType::Virtual,
+                Some("pve-1"),
+            ),
+        );
+        topology.devices.insert(
+            router_b_id.clone(),
+            device(
+                &router_b_id,
+                "vyos02",
+                DeviceRole::Router,
+                DeploymentType::Virtual,
+                Some("pve-1"),
+            ),
+        );
+        topology.links = vec![
+            Link {
+                id: "mc01-access".to_string(),
+                local_device_id: bridge_id.clone(),
+                local_interface: "vmbr0".to_string(),
+                local_ip: Some("192.0.2.10/24".to_string()),
+                remote_device_id: guest_id,
+                remote_interface: "net0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: Some(20),
+                    trunk_vlans: Vec::new(),
+                }),
+            },
+            Link {
+                id: "vyos01-trunk".to_string(),
+                local_device_id: bridge_id.clone(),
+                local_interface: "vmbr0".to_string(),
+                local_ip: Some("192.0.2.10/24".to_string()),
+                remote_device_id: router_a_id,
+                remote_interface: "net0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: None,
+                    trunk_vlans: vec![20, 30],
+                }),
+            },
+            Link {
+                id: "vyos02-trunk".to_string(),
+                local_device_id: bridge_id,
+                local_interface: "vmbr0".to_string(),
+                local_ip: Some("192.0.2.10/24".to_string()),
+                remote_device_id: router_b_id,
+                remote_interface: "net0".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: None,
+                    trunk_vlans: vec![20, 30],
+                }),
+            },
+        ];
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+        );
+
+        assert_eq!(
+            snapshot
+                .links
+                .iter()
+                .filter(|link| {
+                    link.guest_attachment.as_ref().is_some_and(|attachment| {
+                        attachment.bridge_name == "vmbr0"
+                            && attachment.trunk_vlans.as_slice() == [20, 30]
+                    })
+                })
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn snapshot_leaves_non_proxmox_guest_attachment_empty() {
+        let topology = Topology {
+            devices: HashMap::from([
+                (
+                    "router-1".to_string(),
+                    device(
+                        "router-1",
+                        "core",
+                        DeviceRole::Router,
+                        DeploymentType::Physical,
+                        None,
+                    ),
+                ),
+                (
+                    "router-2".to_string(),
+                    device(
+                        "router-2",
+                        "edge",
+                        DeviceRole::Router,
+                        DeploymentType::Physical,
+                        None,
+                    ),
+                ),
+            ]),
+            links: vec![Link {
+                id: "lldp-core-edge".to_string(),
+                local_device_id: "router-1".to_string(),
+                local_interface: "eth0".to_string(),
+                local_ip: Some("198.51.100.1/24".to_string()),
+                remote_device_id: "router-2".to_string(),
+                remote_interface: "eth1".to_string(),
+                remote_ip: Some("198.51.100.2/24".to_string()),
+                speed_bps: Some(1_000_000_000),
+                protocol: LinkProtocol::Lldp,
+                guest_attachment: None,
+            }],
+            updated_at: Utc::now(),
+        };
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+        );
+
+        assert_eq!(snapshot.links.len(), 1);
+        assert_eq!(snapshot.links[0].protocol, "lldp");
+        assert_eq!(snapshot.links[0].guest_attachment, None);
     }
 }

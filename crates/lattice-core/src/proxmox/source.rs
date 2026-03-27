@@ -8,8 +8,8 @@ use crate::{
     config::ProxmoxSourceConfig,
     discovery::{DiscoverySource, DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode},
     graph::{
-        DeploymentType, Device, DeviceRole, DeviceStatus, IdentityKeys, Interface, Link,
-        LinkProtocol, OperStatus, Topology,
+        DeploymentType, Device, DeviceRole, DeviceStatus, GuestAttachment, IdentityKeys, Interface,
+        Link, LinkProtocol, OperStatus, Topology,
     },
     proxmox::{ClusterResource, GuestNetworkAttachment, ProxmoxApi, ProxmoxApiClient},
 };
@@ -144,6 +144,11 @@ impl DiscoverySource for ProxmoxDiscoverySource {
                     remote_ip: None,
                     speed_bps: None,
                     protocol: LinkProtocol::ProxmoxGuestLink,
+                    guest_attachment: Some(GuestAttachment {
+                        bridge_name: attachment.bridge.clone(),
+                        vlan_tag: attachment.vlan_tag,
+                        trunk_vlans: attachment.trunk_vlans.clone(),
+                    }),
                 });
                 tree_nodes.push(DiscoveryTreeNode {
                     row_id: guest_row_id(
@@ -457,7 +462,9 @@ mod tests {
             Ok(GuestConfig {
                 entries: HashMap::from([(
                     "net0".to_string(),
-                    serde_json::Value::String("virtio=DE:AD:BE:EF:00:01,bridge=vmbr0".to_string()),
+                    serde_json::Value::String(
+                        "virtio=DE:AD:BE:EF:00:01,bridge=vmbr0,tag=20".to_string(),
+                    ),
                 )]),
             })
         }
@@ -466,7 +473,9 @@ mod tests {
             Ok(GuestConfig {
                 entries: HashMap::from([(
                     "net0".to_string(),
-                    serde_json::Value::String("name=eth0,bridge=vmbr0,type=veth".to_string()),
+                    serde_json::Value::String(
+                        "name=eth0,bridge=vmbr0,trunks=30;20;30,type=veth".to_string(),
+                    ),
                 )]),
             })
         }
@@ -518,6 +527,24 @@ mod tests {
             .links
             .iter()
             .all(|link| link.protocol == LinkProtocol::ProxmoxGuestLink));
+        assert!(result.topology.links.iter().any(|link| {
+            link.remote_device_id == "proxmox:pve-1:qemu:100"
+                && link.guest_attachment
+                    == Some(GuestAttachment {
+                        bridge_name: "vmbr0".to_string(),
+                        vlan_tag: Some(20),
+                        trunk_vlans: Vec::new(),
+                    })
+        }));
+        assert!(result.topology.links.iter().any(|link| {
+            link.remote_device_id == "proxmox:pve-1:lxc:200"
+                && link.guest_attachment
+                    == Some(GuestAttachment {
+                        bridge_name: "vmbr0".to_string(),
+                        vlan_tag: None,
+                        trunk_vlans: vec![20, 30],
+                    })
+        }));
         assert!(result
             .tree
             .nodes
@@ -536,6 +563,18 @@ mod tests {
                 .unwrap()
                 .interface_name,
             "net0"
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse("net0", "virtio=aa:bb,bridge=vmbr0")
+                .unwrap()
+                .vlan_tag,
+            None
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse("net0", "virtio=aa:bb,bridge=vmbr0")
+                .unwrap()
+                .trunk_vlans,
+            Vec::<u16>::new()
         );
         assert_eq!(
             GuestNetworkAttachment::parse("net0", "virtio=DE:AD:BE:EF:00:01,bridge=vmbr0")
@@ -562,6 +601,33 @@ mod tests {
             .mac_address
             .as_deref(),
             Some("aa:bb:cc:dd:ee:ff")
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse("net0", "virtio=aa:bb,bridge=vmbr0,tag=20")
+                .unwrap()
+                .vlan_tag,
+            Some(20)
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse("net0", "virtio=aa:bb,bridge=vmbr0,trunks=20;30")
+                .unwrap()
+                .trunk_vlans,
+            vec![20, 30]
+        );
+        assert_eq!(
+            GuestNetworkAttachment::parse(
+                "net0",
+                "virtio=aa:bb,bridge=vmbr0,tag=20,trunks=30;20;20"
+            )
+            .unwrap(),
+            GuestNetworkAttachment {
+                entry_key: "net0".to_string(),
+                interface_name: "net0".to_string(),
+                bridge: "vmbr0".to_string(),
+                mac_address: None,
+                vlan_tag: Some(20),
+                trunk_vlans: vec![20, 30],
+            }
         );
     }
 }

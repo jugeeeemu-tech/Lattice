@@ -213,6 +213,8 @@ pub struct GuestNetworkAttachment {
     pub interface_name: String,
     pub bridge: String,
     pub mac_address: Option<String>,
+    pub vlan_tag: Option<u16>,
+    pub trunk_vlans: Vec<u16>,
 }
 
 impl GuestNetworkAttachment {
@@ -236,12 +238,19 @@ impl GuestNetworkAttachment {
         let mac_address = fields
             .values()
             .find_map(|field_value| normalize_mac_address(field_value));
+        let vlan_tag = fields.get("tag").and_then(|value| parse_vlan_id(value));
+        let trunk_vlans = fields
+            .get("trunks")
+            .map(|value| parse_vlan_list(value))
+            .unwrap_or_default();
 
         Some(Self {
             entry_key: key.to_string(),
             interface_name,
             bridge,
             mac_address,
+            vlan_tag,
+            trunk_vlans,
         })
     }
 }
@@ -258,6 +267,20 @@ fn normalize_mac_address(value: &str) -> Option<String> {
     }
 
     Some(parts.join(":"))
+}
+
+fn parse_vlan_id(value: &str) -> Option<u16> {
+    value.trim().parse::<u16>().ok()
+}
+
+fn parse_vlan_list(value: &str) -> Vec<u16> {
+    let mut vlans = value
+        .split(';')
+        .filter_map(parse_vlan_id)
+        .collect::<Vec<_>>();
+    vlans.sort_unstable();
+    vlans.dedup();
+    vlans
 }
 
 #[derive(Debug, Deserialize)]

@@ -165,10 +165,6 @@ fn determine_parent(topology: &Topology, device_id: &str) -> Option<String> {
 }
 
 fn proxmox_bridge_parent(topology: &Topology, device_id: &str) -> Option<String> {
-    if !is_proxmox_guest(device_id) {
-        return None;
-    }
-
     unique_parent_from_links(
         topology,
         device_id,
@@ -230,11 +226,6 @@ fn include_in_tree(topology: &Topology, device_id: &str) -> bool {
 
 fn is_proxmox_node(device_id: &str) -> bool {
     device_id.starts_with("proxmox:") && device_id.ends_with(":node")
-}
-
-fn is_proxmox_guest(device_id: &str) -> bool {
-    device_id.starts_with("proxmox:")
-        && (device_id.contains(":qemu:") || device_id.contains(":lxc:"))
 }
 
 fn device_sort_key(topology: &Topology, device_id: &str) -> (String, String) {
@@ -473,6 +464,7 @@ mod tests {
                 remote_ip: None,
                 speed_bps: None,
                 protocol: LinkProtocol::Lldp,
+                guest_attachment: None,
             }],
             updated_at: Utc::now(),
         })]);
@@ -533,6 +525,7 @@ mod tests {
                     remote_ip: None,
                     speed_bps: None,
                     protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
                 },
                 Link {
                     id: "lldp-b".to_string(),
@@ -544,6 +537,7 @@ mod tests {
                     remote_ip: None,
                     speed_bps: None,
                     protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
                 },
             ],
             updated_at: Utc::now(),
@@ -558,6 +552,102 @@ mod tests {
 
         assert!(edge_node.parent_row_id.is_none());
         assert_eq!(edge_node.depth, 0);
+    }
+
+    #[test]
+    fn merged_virtual_router_prefers_unique_bridge_parent_over_route_parent() {
+        let bridge = device(
+            "proxmox:pve-1:bridge:vmbr0",
+            DeviceRole::Bridge,
+            DeploymentType::Virtual,
+        );
+        let upstream = device("router-1", DeviceRole::Router, DeploymentType::Physical);
+        let mut guest = device("device-1", DeviceRole::Router, DeploymentType::Virtual);
+        guest.host_label = Some("pve-1".to_string());
+        guest.upstream_interface = Some("eth1".to_string());
+        guest.interfaces = vec![
+            Interface {
+                if_index: 1,
+                if_name: "eth1".to_string(),
+                ip_addresses: Vec::new(),
+                speed_bps: None,
+                oper_status: OperStatus::Up,
+            },
+            Interface {
+                if_index: 2,
+                if_name: "net0".to_string(),
+                ip_addresses: Vec::new(),
+                speed_bps: None,
+                oper_status: OperStatus::Up,
+            },
+            Interface {
+                if_index: 3,
+                if_name: "net1".to_string(),
+                ip_addresses: Vec::new(),
+                speed_bps: None,
+                oper_status: OperStatus::Up,
+            },
+        ];
+
+        let merged = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (bridge.id.clone(), bridge.clone()),
+                (upstream.id.clone(), upstream.clone()),
+                (guest.id.clone(), guest.clone()),
+            ]),
+            links: vec![
+                Link {
+                    id: "guest-link-a".to_string(),
+                    local_device_id: bridge.id.clone(),
+                    local_interface: "vmbr0".to_string(),
+                    local_ip: None,
+                    remote_device_id: guest.id.clone(),
+                    remote_interface: "net0".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::ProxmoxGuestLink,
+                    guest_attachment: None,
+                },
+                Link {
+                    id: "guest-link-b".to_string(),
+                    local_device_id: bridge.id.clone(),
+                    local_interface: "vmbr0".to_string(),
+                    local_ip: None,
+                    remote_device_id: guest.id.clone(),
+                    remote_interface: "net1".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::ProxmoxGuestLink,
+                    guest_attachment: None,
+                },
+                Link {
+                    id: "lldp-upstream".to_string(),
+                    local_device_id: guest.id.clone(),
+                    local_interface: "eth1".to_string(),
+                    local_ip: None,
+                    remote_device_id: upstream.id.clone(),
+                    remote_interface: "eth0".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
+                },
+            ],
+            updated_at: Utc::now(),
+        })]);
+
+        let guest_node = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == guest.id)
+            .unwrap();
+
+        assert_eq!(
+            guest_node.parent_row_id.as_deref(),
+            Some(bridge.id.as_str())
+        );
+        assert_eq!(guest_node.depth, 1);
     }
 
     #[test]
@@ -588,6 +678,7 @@ mod tests {
                 remote_ip: None,
                 speed_bps: None,
                 protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: None,
             }],
             updated_at: Utc::now(),
         })]);
@@ -653,6 +744,7 @@ mod tests {
                 remote_ip: None,
                 speed_bps: None,
                 protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: None,
             }],
             updated_at: Utc::now(),
         })]);
