@@ -263,6 +263,16 @@ function hash01(input) {
   return ((hash >>> 0) % 100000) / 100000;
 }
 
+function guestAttachmentNetworkColor(attachment) {
+  if (!attachment?.bridge_name || attachment?.vlan_tag === null || attachment?.vlan_tag === undefined) {
+    return null;
+  }
+
+  const color = new THREE.Color();
+  color.setHSL(hash01(`${attachment.bridge_name}:${attachment.vlan_tag}`), 0.68, 0.56);
+  return color.getHex();
+}
+
 function clampMagnitude(value, limit) {
   return Math.max(-limit, Math.min(value, limit));
 }
@@ -1535,7 +1545,7 @@ class TopologyViewer {
     return null;
   }
 
-  preferredGuestLinkForDevice(deviceId) {
+  preferredAccessGuestLinkForDevice(deviceId) {
     const guestLinks = this.connectedLinksForDevice(deviceId).filter(
       (link) =>
         link.protocol === 'proxmox_guest_link' &&
@@ -1548,9 +1558,6 @@ class TopologyViewer {
 
     if (taggedGuestLinks.length === 1) {
       return taggedGuestLinks[0];
-    }
-    if (guestLinks.length === 1) {
-      return guestLinks[0];
     }
     return null;
   }
@@ -1576,6 +1583,9 @@ class TopologyViewer {
         return false;
       }
       if (candidate.guest_attachment.bridge_name !== attachment.bridge_name) {
+        return false;
+      }
+      if (candidate.guest_attachment.vlan_tag !== null) {
         return false;
       }
       if (!candidate.guest_attachment.trunk_vlans.includes(attachment.vlan_tag)) {
@@ -1646,21 +1656,27 @@ class TopologyViewer {
   computeUpstreamPath(deviceId) {
     const deviceIds = new Set();
     const linkIds = new Set();
+    let guestHighlight = null;
     if (!deviceId) {
-      return { deviceIds, linkIds };
+      return { deviceIds, linkIds, guestHighlight };
     }
 
     deviceIds.add(deviceId);
 
-    const guestLink = this.preferredGuestLinkForDevice(deviceId);
+    const guestLink = this.preferredAccessGuestLinkForDevice(deviceId);
     if (!guestLink) {
       const continuation = this.physicalUpstreamPathFrom(deviceId);
       continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
       continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-      return { deviceIds, linkIds };
+      return { deviceIds, linkIds, guestHighlight };
     }
 
     linkIds.add(guestLink.id);
+    guestHighlight = {
+      accessLinkId: guestLink.id,
+      trunkLinkId: null,
+      color: guestAttachmentNetworkColor(guestLink.guest_attachment),
+    };
     const bridgeDeviceId = this.bridgeDeviceIdForLink(guestLink);
     if (bridgeDeviceId) {
       deviceIds.add(bridgeDeviceId);
@@ -1668,16 +1684,20 @@ class TopologyViewer {
 
     const routerLink = this.routerCandidateLinkForGuestLink(guestLink);
     if (!routerLink) {
-      return { deviceIds, linkIds };
+      return { deviceIds, linkIds, guestHighlight };
     }
 
     const routerDeviceId = this.guestDeviceIdForLink(routerLink);
     if (!routerDeviceId) {
-      return { deviceIds, linkIds };
+      return { deviceIds, linkIds, guestHighlight };
     }
 
     linkIds.add(routerLink.id);
     deviceIds.add(routerDeviceId);
+    guestHighlight = {
+      ...guestHighlight,
+      trunkLinkId: routerLink.id,
+    };
 
     const continuation = this.physicalUpstreamPathFrom(
       routerDeviceId,
@@ -1686,7 +1706,7 @@ class TopologyViewer {
     );
     continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
     continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-    return { deviceIds, linkIds };
+    return { deviceIds, linkIds, guestHighlight };
   }
 
   deviceSummary(device) {
@@ -2128,43 +2148,151 @@ class TopologyViewer {
     }
   }
 
+  isGuestAccessLink(link) {
+    return (
+      link.protocol === 'proxmox_guest_link' &&
+      link.guest_attachment?.vlan_tag !== null &&
+      link.guest_attachment?.vlan_tag !== undefined
+    );
+  }
+
   isGuestTrunkLink(link) {
     return (
       link.protocol === 'proxmox_guest_link' &&
+      link.guest_attachment?.vlan_tag === null &&
       Array.isArray(link.guest_attachment?.trunk_vlans) &&
       link.guest_attachment.trunk_vlans.length > 0
     );
   }
 
-  baseLinkTone(link) {
+  baseLinkStyle(link) {
+    if (this.isGuestAccessLink(link)) {
+      return {
+        color: guestAttachmentNetworkColor(link.guest_attachment) ?? 0x64748b,
+        opacity: 0.94,
+        dashed: false,
+        renderOrder: 2,
+      };
+    }
     if (this.isGuestTrunkLink(link)) {
-      return { color: 0x4b5563, opacity: 0.9 };
+      return { color: 0x4b5563, opacity: 0.9, dashed: false, renderOrder: 1 };
     }
     if (link.protocol === 'proxmox_guest_link') {
-      return { color: 0x64748b, opacity: 0.82 };
+      return { color: 0x64748b, opacity: 0.82, dashed: false, renderOrder: 1 };
     }
     if (link.protocol === 'proxmox_uplink') {
-      return { color: 0x43556d, opacity: 0.76 };
+      return { color: 0x43556d, opacity: 0.76, dashed: false, renderOrder: 1 };
     }
-    return { color: 0x4b5563, opacity: 0.76 };
+    return { color: 0x4b5563, opacity: 0.76, dashed: false, renderOrder: 1 };
   }
 
-  createBaseLinkMaterial(link) {
-    const tone = this.baseLinkTone(link);
-    if (this.isGuestTrunkLink(link)) {
+  createLineMaterial(style) {
+    if (style.dashed) {
       return new THREE.LineDashedMaterial({
-        color: tone.color,
+        color: style.color,
         transparent: true,
-        opacity: tone.opacity,
-        dashSize: 1.1,
-        gapSize: 0.65,
+        opacity: style.opacity,
+        dashSize: 0.55,
+        gapSize: 0.325,
+        depthWrite: false,
       });
     }
     return new THREE.LineBasicMaterial({
-      color: tone.color,
+      color: style.color,
       transparent: true,
-      opacity: tone.opacity,
+      opacity: style.opacity,
+      depthWrite: false,
     });
+  }
+
+  createBaseLinkMaterial(link) {
+    return this.createLineMaterial(this.baseLinkStyle(link));
+  }
+
+  ensureLinkMaterial(group, style) {
+    const line = group.userData.line;
+    const currentMaterial = line.material;
+    const shouldBeDashed = Boolean(style.dashed);
+    const isDashed = currentMaterial?.isLineDashedMaterial === true;
+
+    if (!currentMaterial || isDashed !== shouldBeDashed) {
+      currentMaterial?.dispose?.();
+      line.material = this.createLineMaterial(style);
+    }
+
+    line.material.color.setHex(style.color);
+    line.material.opacity = style.opacity;
+    line.material.depthWrite = false;
+    line.renderOrder = style.renderOrder;
+  }
+
+  guestHighlightStyleForLink(link, pathState) {
+    const highlight = pathState?.guestHighlight;
+    if (!highlight) {
+      return null;
+    }
+    if (link.id === highlight.accessLinkId) {
+      return {
+        color: highlight.color,
+        opacity: 1,
+        dashed: false,
+        renderOrder: 2,
+      };
+    }
+    if (highlight.trunkLinkId && link.id === highlight.trunkLinkId) {
+      return {
+        color: highlight.color,
+        opacity: 0.98,
+        dashed: true,
+        renderOrder: 1,
+      };
+    }
+    return null;
+  }
+
+  devicePairKeyForLink(link) {
+    return pairKey(link.local_device_id, link.remote_device_id);
+  }
+
+  suppressedParallelGuestLinkIds(...pathStates) {
+    const highlightedLinkIds = new Set();
+    const highlightedPairKeys = new Set();
+
+    for (const pathState of pathStates) {
+      const highlight = pathState?.guestHighlight;
+      if (!highlight) {
+        continue;
+      }
+
+      for (const linkId of [highlight.accessLinkId, highlight.trunkLinkId]) {
+        if (!linkId) {
+          continue;
+        }
+
+        const link = this.snapshot.links.find((candidate) => candidate.id === linkId);
+        if (!link || link.protocol !== 'proxmox_guest_link') {
+          continue;
+        }
+
+        highlightedLinkIds.add(link.id);
+        highlightedPairKeys.add(this.devicePairKeyForLink(link));
+      }
+    }
+
+    if (!highlightedPairKeys.size) {
+      return new Set();
+    }
+
+    return new Set(
+      this.snapshot.links
+        .filter(
+          (link) =>
+            link.protocol === 'proxmox_guest_link' &&
+            !highlightedLinkIds.has(link.id) &&
+            highlightedPairKeys.has(this.devicePairKeyForLink(link))
+        )
+        .map((link) => link.id)
+    );
   }
 
   createLinkGroup(link) {
@@ -2216,6 +2344,7 @@ class TopologyViewer {
   updateObjectStyles() {
     const selectedPath = this.computeUpstreamPath(this.selectedDeviceId);
     const hoveredPath = this.computeUpstreamPath(this.hoveredDeviceId);
+    const suppressedLinkIds = this.suppressedParallelGuestLinkIds(hoveredPath, selectedPath);
 
     for (const [deviceId, group] of this.deviceGroups.entries()) {
       const isSelected = deviceId === this.selectedDeviceId;
@@ -2236,18 +2365,38 @@ class TopologyViewer {
     }
 
     for (const group of this.linkGroups.values()) {
-      this.applyLinkStyle(group, selectedPath.linkIds, hoveredPath.linkIds);
+      this.applyLinkStyle(group, selectedPath, hoveredPath, suppressedLinkIds);
     }
   }
 
-  applyLinkStyle(group, selectedPathLinks, hoveredPathLinks) {
+  applyLinkStyle(group, selectedPath, hoveredPath, suppressedLinkIds = new Set()) {
     const link = group.userData.link;
-    const tone = this.baseLinkTone(link);
-    group.userData.line.material.color.setHex(tone.color);
-    group.userData.line.material.opacity = tone.opacity;
     const isHovered = link.id === this.hoveredLinkId;
-    const isOnHoveredPath = !isHovered && hoveredPathLinks.has(link.id);
-    const isOnSelectedPath = !isHovered && !isOnHoveredPath && selectedPathLinks.has(link.id);
+    const guestHighlightStyle =
+      this.guestHighlightStyleForLink(link, hoveredPath) ||
+      this.guestHighlightStyleForLink(link, selectedPath);
+    const baseStyle = guestHighlightStyle || this.baseLinkStyle(link);
+    const style = isHovered
+      ? {
+          ...baseStyle,
+          color: 0xd97706,
+          opacity: Math.max(baseStyle.opacity, 0.98),
+          renderOrder: baseStyle.renderOrder,
+        }
+      : baseStyle;
+    this.ensureLinkMaterial(group, style);
+    const isSuppressed = suppressedLinkIds.has(link.id);
+    group.userData.line.visible = !isSuppressed;
+    group.userData.hitMesh.visible = !isSuppressed;
+    if (isSuppressed) {
+      group.userData.overlayMesh.material.opacity = 0.0;
+      group.userData.overlayMesh.visible = false;
+      return;
+    }
+    const suppressPathOverlay = Boolean(guestHighlightStyle);
+    const isOnHoveredPath = !isHovered && !suppressPathOverlay && hoveredPath.linkIds.has(link.id);
+    const isOnSelectedPath =
+      !isHovered && !isOnHoveredPath && !suppressPathOverlay && selectedPath.linkIds.has(link.id);
     const overlayMaterial = group.userData.overlayMesh.material;
     overlayMaterial.color.setHex(isHovered || isOnHoveredPath ? 0xd97706 : 0x0f62fe);
     overlayMaterial.opacity = isHovered ? 0.92 : isOnHoveredPath ? 0.72 : isOnSelectedPath ? 0.66 : 0.0;
@@ -2257,7 +2406,9 @@ class TopologyViewer {
   scenePickables() {
     return [
       ...Array.from(this.deviceGroups.values()).map((group) => group.userData.mesh),
-      ...Array.from(this.linkGroups.values()).map((group) => group.userData.hitMesh),
+      ...Array.from(this.linkGroups.values())
+        .map((group) => group.userData.hitMesh)
+        .filter((mesh) => mesh.visible),
     ];
   }
 
