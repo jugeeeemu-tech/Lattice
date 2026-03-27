@@ -18,15 +18,6 @@
           </div>
         </div>
         <div class="chrome__actions">
-          <button
-            type="button"
-            class="action"
-            data-action="toggle-legend"
-            aria-expanded="false"
-            aria-controls="legend-card"
-          >
-            凡例
-          </button>
           <button type="button" class="action action--primary" data-action="discover">
             再探索
           </button>
@@ -51,12 +42,21 @@
         </div>
       </section>
 
-      <main class="workspace">
+      <div class="workspace">
         <aside class="sidebar">
           <section class="panel panel--info">
-            <h2>案内ツリー</h2>
-            <p class="panel__hint">枝をたたみながら、3D 表示と同じ構成をたどれます。</p>
-            <div id="tree" class="tree" role="tree" aria-label="network navigation tree"></div>
+            <div class="panel__header">
+              <h2>操作</h2>
+              <button
+                type="button"
+                class="action action--ghost action--small"
+                data-action="show-all"
+                hidden
+              >
+                すべて表示
+              </button>
+            </div>
+            <div id="tree" class="tree" role="tree" aria-label="scene navigation"></div>
           </section>
         </aside>
 
@@ -66,26 +66,16 @@
             <div class="empty-card">
               <p class="empty-card__title">Topology is warming up</p>
               <p class="empty-card__body">
-                初回探索の結果を待っています。完了後に 3D 構成図と案内ツリーへ切り替わります。
+                初回探索の結果を待っています。完了後に 3D 構成図と操作ペインへ切り替わります。
               </p>
             </div>
-          </div>
-          <div
-            id="legend-card"
-            class="legend-card"
-            data-role="legend-card"
-            hidden
-            aria-label="shape and color legend"
-          >
-            <p class="legend-card__title">形は役割、色は物理 / 仮想を示します</p>
-            <div class="legend-card__list" data-role="legend-list"></div>
           </div>
           <div class="hover-card" data-role="hover-card" hidden>
             <div class="hover-card__title" data-role="hover-title"></div>
             <div class="hover-card__body" data-role="hover-body"></div>
           </div>
         </section>
-      </main>
+      </div>
     </main>
     <script type="module" src="./app.js"></script>
   </body>
