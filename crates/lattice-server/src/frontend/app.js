@@ -43,8 +43,6 @@ const EMPTY_SNAPSHOT = Object.freeze({
   discovery_status: { kind: 'loading', message: 'initializing' },
 });
 
-const SIDEBAR_MAIN_SECTION_ID = 'section:main';
-
 const appRoot = document.getElementById('app');
 const dom = {
   viewport: document.querySelector('.viewport'),
@@ -59,7 +57,6 @@ const dom = {
   hoverBody: document.querySelector('[data-role="hover-body"]'),
   discoverButton: document.querySelector('[data-action="discover"]'),
   reloadButton: document.querySelector('[data-action="reload"]'),
-  showAllButton: document.querySelector('[data-action="show-all"]'),
 };
 
 if (!appRoot || !dom.viewport || !dom.sceneHost || !dom.tree) {
@@ -151,6 +148,7 @@ function normalizeLink(link) {
       .map((part) => normalizeText(part, ''))
       .join('|')
   );
+  const guestAttachment = normalizeGuestAttachment(entry.guest_attachment);
 
   return {
     id: canonicalId,
@@ -165,6 +163,38 @@ function normalizeLink(link) {
         ? null
         : Math.max(0, toNumber(entry.speed_bps, 0)),
     protocol: normalizeText(entry.protocol, 'lldp').toLowerCase(),
+    guest_attachment: guestAttachment,
+  };
+}
+
+function normalizeGuestAttachment(rawAttachment) {
+  const attachment = asObject(rawAttachment);
+  const bridgeName = normalizeText(attachment.bridge_name, '');
+  if (!bridgeName) {
+    return null;
+  }
+
+  const trunkVlans = Array.isArray(attachment.trunk_vlans)
+    ? Array.from(
+        new Set(
+          attachment.trunk_vlans
+            .map((value) => Number(value))
+            .filter((value) => Number.isInteger(value) && value >= 0)
+        )
+      ).sort((left, right) => left - right)
+    : [];
+  const vlanTagNumber = Number(attachment.vlan_tag);
+
+  return {
+    bridge_name: bridgeName,
+    vlan_tag:
+      attachment.vlan_tag === null ||
+      attachment.vlan_tag === undefined ||
+      !Number.isInteger(vlanTagNumber) ||
+      vlanTagNumber < 0
+        ? null
+        : vlanTagNumber,
+    trunk_vlans: trunkVlans,
   };
 }
 
@@ -231,6 +261,29 @@ function hash01(input) {
     hash = Math.imul(hash, 16777619);
   }
   return ((hash >>> 0) % 100000) / 100000;
+}
+
+function clampMagnitude(value, limit) {
+  return Math.max(-limit, Math.min(value, limit));
+}
+
+function pairKey(left, right) {
+  return left < right ? `${left}::${right}` : `${right}::${left}`;
+}
+
+function layoutRadiusForDevice(device) {
+  switch (device?.device_role) {
+    case 'bridge':
+      return 1.7;
+    case 'router':
+      return 1.5;
+    case 'switch':
+      return 1.45;
+    case 'server':
+      return 1.3;
+    default:
+      return 1.35;
+  }
 }
 
 function formatSpeed(speedBps) {
@@ -300,15 +353,16 @@ class TopologyViewer {
     this.primaryParentDeviceById = new Map();
     this.primaryChildrenByDeviceId = new Map();
     this.renderableDeviceIds = new Set();
+    this.visibleRowIds = new Set();
+    this.visibleLinkIds = new Set();
 
-    this.sidebarSections = [];
+    this.treeRootEntryIds = [];
     this.sidebarEntryById = new Map();
     this.sidebarChildrenById = new Map();
     this.entryIdsByDeviceId = new Map();
     this.primaryEntryByDevice = new Map();
     this.treeEntryIdByRowId = new Map();
 
-    this.hiddenDeviceIds = new Set();
     this.collapsedIds = new Set();
 
     this.sceneDeviceIds = new Set();
@@ -366,19 +420,6 @@ class TopologyViewer {
     this.dom.reloadButton?.addEventListener('click', () => {
       window.location.reload();
     });
-
-    this.dom.showAllButton?.addEventListener('click', () => {
-      if (!this.hiddenDeviceIds.size) {
-        return;
-      }
-      this.hiddenDeviceIds.clear();
-      this.refreshSceneVisibility();
-      this.renderStatusStrip();
-      this.renderTree();
-      this.syncScene();
-      this.syncSelectionAfterSnapshot();
-      this.renderHoverCard();
-    });
   }
 
   installDomBindings() {
@@ -389,28 +430,6 @@ class TopologyViewer {
     this.treeBindingInstalled = true;
 
     this.dom.tree.addEventListener('click', (event) => {
-      const visibilityButton = event.target.closest('[data-role="visibility-toggle"]');
-      if (visibilityButton) {
-        event.preventDefault();
-        event.stopPropagation();
-        const deviceId = visibilityButton.getAttribute('data-device-id');
-        if (deviceId) {
-          this.toggleDeviceVisibility(deviceId);
-        }
-        return;
-      }
-
-      const sectionToggle = event.target.closest('[data-role="section-toggle"]');
-      if (sectionToggle) {
-        event.preventDefault();
-        event.stopPropagation();
-        const sectionId = sectionToggle.getAttribute('data-section-id');
-        if (sectionId) {
-          this.toggleCollapse(sectionId);
-        }
-        return;
-      }
-
       const entryToggle = event.target.closest('[data-role="entry-toggle"]');
       if (entryToggle) {
         event.preventDefault();
@@ -460,7 +479,6 @@ class TopologyViewer {
 
     this.scene = new THREE.Scene();
     this.scene.background = new THREE.Color(0xf7f9fc);
-    this.scene.fog = new THREE.Fog(0xf7f9fc, 24, 130);
 
     this.camera = new THREE.PerspectiveCamera(42, 1, 0.1, 400);
     this.camera.position.set(0, 18, 34);
@@ -712,8 +730,8 @@ class TopologyViewer {
     this.buildRowModel();
     this.buildPrimaryDeviceTree();
     this.buildSidebarModel();
-    this.pruneUiState();
     this.refreshSceneVisibility();
+    this.pruneUiState();
   }
 
   buildRowModel() {
@@ -828,7 +846,7 @@ class TopologyViewer {
   }
 
   buildSidebarModel() {
-    this.sidebarSections = [];
+    this.treeRootEntryIds = [];
     this.sidebarEntryById = new Map();
     this.sidebarChildrenById = new Map();
     this.entryIdsByDeviceId = new Map();
@@ -839,14 +857,11 @@ class TopologyViewer {
       const roots = this.snapshot.tree_rows
         .filter((row) => !this.rowParentById.has(row.id))
         .sort((left, right) => compareByLabel(left, right));
-      const entryIds = roots.map((row) => this.registerTreeEntry(row.id, null));
-      this.sidebarSections.push({
-        id: SIDEBAR_MAIN_SECTION_ID,
-        label: '構成順',
-        entry_ids: entryIds,
-      });
+      this.treeRootEntryIds = roots
+        .map((row) => this.registerTreeEntry(row.id, null))
+        .filter(Boolean);
     } else if (this.renderableDeviceIds.size) {
-      const entryIds = this.snapshot.devices
+      this.treeRootEntryIds = this.snapshot.devices
         .filter((device) => this.renderableDeviceIds.has(device.id))
         .sort((left, right) => compareByLabel(left, right))
         .map((device) =>
@@ -856,63 +871,10 @@ class TopologyViewer {
             label: device.label || 'Unknown',
             tree_row_id: this.primaryRowForDevice(device.id),
             source: 'flat',
-            section_id: SIDEBAR_MAIN_SECTION_ID,
             host_label: device.host_label,
           })
-        );
-      this.sidebarSections.push({
-        id: SIDEBAR_MAIN_SECTION_ID,
-        label: '構成順',
-        entry_ids: entryIds,
-      });
-    }
-
-    const devicesByHost = new Map();
-    for (const device of this.snapshot.devices) {
-      if (!this.renderableDeviceIds.has(device.id) || !device.host_label) {
-        continue;
-      }
-      const list = devicesByHost.get(device.host_label) || [];
-      list.push(device);
-      devicesByHost.set(device.host_label, list);
-    }
-
-    for (const hostLabel of Array.from(devicesByHost.keys()).sort((left, right) => left.localeCompare(right))) {
-      const sectionId = `section:host:${hostLabel}`;
-      const entryIds = devicesByHost
-        .get(hostLabel)
-        .slice()
-        .sort((left, right) => compareByLabel(left, right))
-        .map((device) =>
-          this.registerSidebarEntry({
-            id: `host:${hostLabel}:${device.id}`,
-            device_id: device.id,
-            label: device.label || 'Unknown',
-            tree_row_id: this.primaryRowForDevice(device.id),
-            source: 'host',
-            section_id: sectionId,
-            host_label: hostLabel,
-          })
-        );
-
-      this.sidebarSections.push({
-        id: sectionId,
-        label: `${hostLabel} 上`,
-        entry_ids: entryIds,
-      });
-    }
-
-    for (const section of this.sidebarSections) {
-      if (!section.entry_ids.length) {
-        continue;
-      }
-      for (const entryId of section.entry_ids) {
-        const entry = this.sidebarEntryById.get(entryId);
-        if (!entry || this.primaryEntryByDevice.has(entry.device_id)) {
-          continue;
-        }
-        this.primaryEntryByDevice.set(entry.device_id, entryId);
-      }
+        )
+        .filter(Boolean);
     }
   }
 
@@ -929,7 +891,6 @@ class TopologyViewer {
       label: row.label || this.findDevice(row.device_id)?.label || 'Unknown',
       tree_row_id: row.id,
       source: 'tree',
-      section_id: SIDEBAR_MAIN_SECTION_ID,
       host_label: this.findDevice(row.device_id)?.host_label || null,
     };
 
@@ -953,6 +914,9 @@ class TopologyViewer {
     const entryIds = this.entryIdsByDeviceId.get(entry.device_id) || [];
     entryIds.push(entry.id);
     this.entryIdsByDeviceId.set(entry.device_id, entryIds);
+    if (!this.primaryEntryByDevice.has(entry.device_id)) {
+      this.primaryEntryByDevice.set(entry.device_id, entry.id);
+    }
 
     if (parentEntryId) {
       const childIds = this.sidebarChildrenById.get(parentEntryId) || [];
@@ -968,12 +932,11 @@ class TopologyViewer {
   }
 
   pruneUiState() {
-    const validCollapsedIds = new Set([
-      ...this.sidebarSections.map((section) => section.id),
-      ...Array.from(this.sidebarChildrenById.entries())
+    const validCollapsedIds = new Set(
+      Array.from(this.sidebarChildrenById.entries())
         .filter(([, childIds]) => childIds.length)
-        .map(([entryId]) => entryId),
-    ]);
+        .map(([entryId]) => entryId)
+    );
 
     for (const id of Array.from(this.collapsedIds)) {
       if (!validCollapsedIds.has(id)) {
@@ -982,12 +945,6 @@ class TopologyViewer {
     }
 
     const validDeviceIds = this.renderableDeviceIds;
-    for (const deviceId of Array.from(this.hiddenDeviceIds)) {
-      if (!validDeviceIds.has(deviceId)) {
-        this.hiddenDeviceIds.delete(deviceId);
-      }
-    }
-
     if (this.selectedDeviceId && !validDeviceIds.has(this.selectedDeviceId)) {
       this.selectedDeviceId = null;
       this.selectedEntryId = null;
@@ -995,12 +952,28 @@ class TopologyViewer {
     } else if (this.selectedDeviceId) {
       const entryIds = this.entryIdsByDeviceId.get(this.selectedDeviceId) || [];
       if (!entryIds.includes(this.selectedEntryId)) {
-        this.selectedEntryId = this.primaryEntryByDevice.get(this.selectedDeviceId) || entryIds[0] || null;
+        this.selectedEntryId = this.preferredEntryForDevice(this.selectedDeviceId);
       }
       this.selectedRowId =
-        this.sidebarEntryById.get(this.selectedEntryId)?.tree_row_id ||
-        this.primaryRowForDevice(this.selectedDeviceId) ||
-        null;
+        this.preferredRowForDevice(this.selectedDeviceId);
+    }
+    if (this.selectedRowId && !this.visibleRowIds.has(this.selectedRowId)) {
+      const visibleAncestorRowId = this.nearestVisibleAncestorRowId(this.selectedRowId);
+      if (visibleAncestorRowId) {
+        const visibleAncestor = this.rowById.get(visibleAncestorRowId);
+        this.selectedRowId = visibleAncestorRowId;
+        this.selectedEntryId = this.treeEntryIdByRowId.get(visibleAncestorRowId) || null;
+        this.selectedDeviceId = visibleAncestor?.device_id || null;
+        this.hoverSource = null;
+        this.hoveredEntryId = null;
+        this.hoveredRowId = null;
+        this.hoveredDeviceId = null;
+        this.hoveredLinkId = null;
+      } else {
+        this.selectedDeviceId = null;
+        this.selectedEntryId = null;
+        this.selectedRowId = null;
+      }
     }
 
     if (this.hoveredDeviceId && !validDeviceIds.has(this.hoveredDeviceId)) {
@@ -1015,20 +988,84 @@ class TopologyViewer {
         this.hoveredEntryId = null;
       }
       this.hoveredRowId =
-        this.sidebarEntryById.get(this.hoveredEntryId)?.tree_row_id ||
-        this.primaryRowForDevice(this.hoveredDeviceId) ||
-        null;
+        this.preferredRowForDevice(this.hoveredDeviceId);
+    }
+    if (this.hoveredRowId && !this.visibleRowIds.has(this.hoveredRowId)) {
+      this.hoverSource = null;
+      this.hoveredEntryId = null;
+      this.hoveredRowId = null;
+      this.hoveredDeviceId = null;
+      this.hoveredLinkId = null;
     }
 
-    if (this.hoveredLinkId && !this.snapshot.links.some((link) => link.id === this.hoveredLinkId)) {
+    if (
+      this.hoveredLinkId &&
+      (!this.snapshot.links.some((link) => link.id === this.hoveredLinkId) ||
+        !this.visibleLinkIds.has(this.hoveredLinkId))
+    ) {
       this.hoveredLinkId = null;
     }
   }
 
   refreshSceneVisibility() {
+    this.visibleRowIds = this.computeVisibleRowIds();
     this.sceneDeviceIds = new Set(
-      Array.from(this.renderableDeviceIds).filter((deviceId) => !this.hiddenDeviceIds.has(deviceId))
+      this.visibleRowIds.size
+        ? Array.from(this.visibleRowIds)
+            .map((rowId) => this.rowById.get(rowId)?.device_id || null)
+            .filter(Boolean)
+        : Array.from(this.renderableDeviceIds)
     );
+    this.visibleLinkIds = new Set(
+      this.snapshot.links
+        .filter(
+          (link) =>
+            this.sceneDeviceIds.has(link.local_device_id) &&
+            this.sceneDeviceIds.has(link.remote_device_id)
+        )
+        .map((link) => link.id)
+    );
+  }
+
+  computeVisibleRowIds() {
+    if (!this.snapshot.tree_rows.length) {
+      return new Set();
+    }
+
+    const visibleRowIds = new Set();
+    const roots = this.snapshot.tree_rows
+      .filter((row) => !this.rowParentById.has(row.id))
+      .sort((left, right) => compareByLabel(left, right));
+    const visit = (rowId) => {
+      if (!this.rowById.has(rowId) || visibleRowIds.has(rowId)) {
+        return;
+      }
+      visibleRowIds.add(rowId);
+      const entryId = this.treeEntryIdByRowId.get(rowId);
+      if (entryId && this.collapsedIds.has(entryId)) {
+        return;
+      }
+      for (const childRowId of this.rowChildrenById.get(rowId) || []) {
+        visit(childRowId);
+      }
+    };
+
+    for (const root of roots) {
+      visit(root.id);
+    }
+
+    return visibleRowIds;
+  }
+
+  nearestVisibleAncestorRowId(rowId) {
+    const path = findRowPath(rowId, this.rowParentById);
+    for (let index = path.length - 1; index >= 0; index -= 1) {
+      const candidateRowId = path[index];
+      if (this.visibleRowIds.has(candidateRowId)) {
+        return candidateRowId;
+      }
+    }
+    return null;
   }
 
   renderStatusStrip() {
@@ -1050,18 +1087,12 @@ class TopologyViewer {
       }[status.kind] || '状態を取得中');
 
     this.dom.statusMessage.textContent = message;
-    this.dom.summary.textContent = `${this.renderableDeviceIds.size} scene devices / ${this.snapshot.links.length} links`;
+    this.dom.summary.textContent = `${this.sceneDeviceIds.size} scene devices / ${this.visibleLinkIds.size} visible links`;
 
     if (this.dom.discoverButton) {
       const isDiscovering = status.kind === 'discovering';
       this.dom.discoverButton.disabled = isDiscovering;
       this.dom.discoverButton.textContent = isDiscovering ? '探索中' : '再探索';
-    }
-
-    if (this.dom.showAllButton) {
-      const hiddenCount = this.hiddenDeviceIds.size;
-      this.dom.showAllButton.hidden = hiddenCount === 0;
-      this.dom.showAllButton.textContent = hiddenCount > 0 ? `すべて表示 (${hiddenCount})` : 'すべて表示';
     }
   }
 
@@ -1069,47 +1100,8 @@ class TopologyViewer {
     const fragment = document.createDocumentFragment();
     let renderedEntryCount = 0;
 
-    for (const section of this.sidebarSections) {
-      if (!section.entry_ids.length) {
-        continue;
-      }
-
-      const wrapper = document.createElement('section');
-      wrapper.className = 'tree-section';
-
-      const header = document.createElement('button');
-      header.type = 'button';
-      header.className = 'tree-section__header';
-      header.dataset.role = 'section-toggle';
-      header.dataset.sectionId = section.id;
-
-      const toggle = document.createElement('span');
-      toggle.className = 'tree-toggle';
-      if (!this.collapsedIds.has(section.id)) {
-        toggle.classList.add('is-open');
-      }
-
-      const title = document.createElement('span');
-      title.className = 'tree-section__title';
-      title.textContent = section.label;
-
-      const count = document.createElement('span');
-      count.className = 'tree-section__count';
-      count.textContent = `${this.countSectionEntries(section.entry_ids)}`;
-
-      header.append(toggle, title, count);
-      wrapper.append(header);
-
-      if (!this.collapsedIds.has(section.id)) {
-        const body = document.createElement('div');
-        body.className = 'tree-section__body';
-        for (const entryId of section.entry_ids) {
-          renderedEntryCount += this.appendSidebarEntry(entryId, 0, body);
-        }
-        wrapper.append(body);
-      }
-
-      fragment.append(wrapper);
+    for (const entryId of this.treeRootEntryIds) {
+      renderedEntryCount += this.appendSidebarEntry(entryId, 0, fragment);
     }
 
     this.dom.tree.replaceChildren(fragment);
@@ -1141,20 +1133,23 @@ class TopologyViewer {
     rowEl.dataset.entryId = entry.id;
     rowEl.dataset.deviceId = entry.device_id;
     rowEl.setAttribute('role', 'treeitem');
+    rowEl.setAttribute('aria-expanded', hasChildren ? String(expanded) : 'false');
     rowEl.style.paddingInlineStart = `${0.4 + depth * 1.05}rem`;
 
     const toggle = document.createElement('button');
     toggle.type = 'button';
     toggle.className = 'tree-toggle';
-    toggle.dataset.role = 'entry-toggle';
-    toggle.dataset.entryId = entry.id;
     toggle.setAttribute('aria-label', hasChildren ? (expanded ? '折りたたむ' : '展開する') : 'leaf');
     if (hasChildren) {
+      toggle.dataset.role = 'entry-toggle';
+      toggle.dataset.entryId = entry.id;
       if (expanded) {
         toggle.classList.add('is-open');
       }
     } else {
       toggle.classList.add('tree-toggle--leaf');
+      toggle.disabled = true;
+      toggle.tabIndex = -1;
     }
 
     const labelButton = document.createElement('button');
@@ -1180,18 +1175,7 @@ class TopologyViewer {
     copy.append(name, meta);
     labelButton.append(mark, copy);
 
-    const visibilityButton = document.createElement('button');
-    visibilityButton.type = 'button';
-    visibilityButton.className = 'tree-row__visibility';
-    visibilityButton.dataset.role = 'visibility-toggle';
-    visibilityButton.dataset.deviceId = entry.device_id;
-    const hidden = this.hiddenDeviceIds.has(entry.device_id);
-    if (hidden) {
-      visibilityButton.classList.add('is-hidden');
-    }
-    visibilityButton.textContent = hidden ? '表示' : '隠す';
-
-    rowEl.append(toggle, labelButton, visibilityButton);
+    rowEl.append(toggle, labelButton);
     container.append(rowEl);
 
     if (hasChildren && expanded) {
@@ -1203,34 +1187,19 @@ class TopologyViewer {
     return renderedCount;
   }
 
-  countSectionEntries(entryIds) {
-    let count = 0;
-    const stack = [...entryIds];
-    while (stack.length) {
-      const entryId = stack.pop();
-      if (!entryId || !this.sidebarEntryById.has(entryId)) {
-        continue;
-      }
-      count += 1;
-      for (const childId of this.sidebarChildrenById.get(entryId) || []) {
-        stack.push(childId);
-      }
-    }
-    return count;
-  }
-
   entryMetaText(entry) {
-    const entryIds = this.entryIdsByDeviceId.get(entry.device_id) || [];
-    if (this.selectedDeviceId === entry.device_id && this.selectedEntryId && this.selectedEntryId !== entry.id && entryIds.length > 1) {
-      return '同じ機器';
+    const device = this.findDevice(entry.device_id);
+    if (!device) {
+      return '';
     }
-    if (this.hiddenDeviceIds.has(entry.device_id)) {
-      return '非表示';
+    const fragments = [];
+    if (device.device_role !== 'unknown') {
+      fragments.push(roleLabel(device.device_role));
     }
-    if (entry.source === 'host') {
-      return '別入口';
+    if (device.host_label) {
+      fragments.push(`${device.host_label} 上`);
     }
-    return '';
+    return fragments.join(' · ');
   }
 
   applyTreeHighlights() {
@@ -1249,13 +1218,11 @@ class TopologyViewer {
         (this.hoverSource === 'scene' && hoveredEntryPeers.has(entryId));
       const isAncestor = selectedPathEntryIds.has(entryId) && !isSelected;
       const isPeer = selectedEntryPeers.has(entryId) && !isSelected;
-      const isHidden = this.hiddenDeviceIds.has(deviceId);
 
       rowEl.classList.toggle('is-selected', isSelected);
       rowEl.classList.toggle('is-hovered', isHovered);
       rowEl.classList.toggle('is-ancestor', isAncestor);
       rowEl.classList.toggle('is-peer', isPeer);
-      rowEl.classList.toggle('is-hidden', isHidden);
     }
   }
 
@@ -1264,22 +1231,6 @@ class TopologyViewer {
       this.collapsedIds.delete(id);
     } else {
       this.collapsedIds.add(id);
-    }
-
-    this.renderTree();
-    this.syncScene();
-    this.syncSelectionAfterSnapshot();
-  }
-
-  toggleDeviceVisibility(deviceId) {
-    if (!this.renderableDeviceIds.has(deviceId)) {
-      return;
-    }
-
-    if (this.hiddenDeviceIds.has(deviceId)) {
-      this.hiddenDeviceIds.delete(deviceId);
-    } else {
-      this.hiddenDeviceIds.add(deviceId);
     }
 
     this.refreshSceneVisibility();
@@ -1295,9 +1246,6 @@ class TopologyViewer {
     if (!entry) {
       return;
     }
-
-    this.hiddenDeviceIds.delete(entry.device_id);
-    this.refreshSceneVisibility();
 
     this.selectedEntryId = entry.id;
     this.selectedDeviceId = entry.device_id;
@@ -1326,10 +1274,6 @@ class TopologyViewer {
       return;
     }
 
-    if (entry.section_id) {
-      this.collapsedIds.delete(entry.section_id);
-    }
-
     if (entry.tree_row_id) {
       for (const rowId of findRowPath(entry.tree_row_id, this.rowParentById)) {
         const pathEntryId = this.treeEntryIdByRowId.get(rowId);
@@ -1337,7 +1281,7 @@ class TopologyViewer {
           this.collapsedIds.delete(pathEntryId);
         }
       }
-      this.collapsedIds.delete(SIDEBAR_MAIN_SECTION_ID);
+      this.refreshSceneVisibility();
     }
   }
 
@@ -1364,8 +1308,8 @@ class TopologyViewer {
     this.hoverSource = 'scene';
     this.hoveredDeviceId = deviceId;
     this.hoveredLinkId = linkId;
-    this.hoveredEntryId = deviceId ? this.primaryEntryByDevice.get(deviceId) || null : null;
-    this.hoveredRowId = deviceId ? this.primaryRowForDevice(deviceId) : null;
+    this.hoveredEntryId = deviceId ? this.preferredEntryForDevice(deviceId) : null;
+    this.hoveredRowId = deviceId ? this.preferredRowForDevice(deviceId) : null;
     this.renderHoverCard();
     this.applyTreeHighlights();
     this.updateObjectStyles();
@@ -1390,21 +1334,36 @@ class TopologyViewer {
   }
 
   syncSelectionAfterSnapshot() {
-    if (this.selectedDeviceId && !this.sceneDeviceIds.has(this.selectedDeviceId) && !this.hiddenDeviceIds.has(this.selectedDeviceId)) {
-      this.selectedDeviceId = null;
-      this.selectedEntryId = null;
-      this.selectedRowId = null;
-    }
-
     if (this.selectedDeviceId) {
       const entryIds = this.entryIdsByDeviceId.get(this.selectedDeviceId) || [];
       if (!entryIds.includes(this.selectedEntryId)) {
-        this.selectedEntryId = this.primaryEntryByDevice.get(this.selectedDeviceId) || entryIds[0] || null;
+        this.selectedEntryId = this.preferredEntryForDevice(this.selectedDeviceId);
       }
       this.selectedRowId =
-        this.sidebarEntryById.get(this.selectedEntryId)?.tree_row_id ||
-        this.primaryRowForDevice(this.selectedDeviceId) ||
-        null;
+        this.preferredRowForDevice(this.selectedDeviceId);
+    }
+    if (this.selectedRowId && !this.visibleRowIds.has(this.selectedRowId)) {
+      const visibleAncestorRowId = this.nearestVisibleAncestorRowId(this.selectedRowId);
+      if (visibleAncestorRowId) {
+        const visibleAncestor = this.rowById.get(visibleAncestorRowId);
+        this.selectedRowId = visibleAncestorRowId;
+        this.selectedEntryId = this.treeEntryIdByRowId.get(visibleAncestorRowId) || null;
+        this.selectedDeviceId = visibleAncestor?.device_id || null;
+        this.hoverSource = null;
+        this.hoveredEntryId = null;
+        this.hoveredRowId = null;
+        this.hoveredDeviceId = null;
+        this.hoveredLinkId = null;
+      } else {
+        this.selectedDeviceId = null;
+        this.selectedEntryId = null;
+        this.selectedRowId = null;
+      }
+    }
+    if (this.selectedDeviceId && !this.sceneDeviceIds.has(this.selectedDeviceId)) {
+      this.selectedDeviceId = null;
+      this.selectedEntryId = null;
+      this.selectedRowId = null;
     }
 
     if (this.hoveredDeviceId) {
@@ -1413,9 +1372,17 @@ class TopologyViewer {
         this.hoveredEntryId = null;
       }
       this.hoveredRowId =
-        this.sidebarEntryById.get(this.hoveredEntryId)?.tree_row_id ||
-        this.primaryRowForDevice(this.hoveredDeviceId) ||
-        null;
+        this.preferredRowForDevice(this.hoveredDeviceId);
+    }
+    if (this.hoveredRowId && !this.visibleRowIds.has(this.hoveredRowId)) {
+      this.hoverSource = null;
+      this.hoveredEntryId = null;
+      this.hoveredRowId = null;
+      this.hoveredDeviceId = null;
+      this.hoveredLinkId = null;
+    }
+    if (this.hoveredLinkId && !this.visibleLinkIds.has(this.hoveredLinkId)) {
+      this.hoveredLinkId = null;
     }
 
     this.applyTreeHighlights();
@@ -1432,7 +1399,6 @@ class TopologyViewer {
       return;
     }
 
-    const hiddenAll = this.renderableDeviceIds.size > 0 && this.hiddenDeviceIds.size >= this.renderableDeviceIds.size;
     const status = this.snapshot.discovery_status || { kind: 'loading', message: '' };
 
     const titleByStatus = {
@@ -1454,12 +1420,10 @@ class TopologyViewer {
     card.className = 'empty-card';
     const title = document.createElement('p');
     title.className = 'empty-card__title';
-    title.textContent = hiddenAll ? 'すべて非表示です' : titleByStatus[status.kind] || titleByStatus.loading;
+    title.textContent = titleByStatus[status.kind] || titleByStatus.loading;
     const body = document.createElement('p');
     body.className = 'empty-card__body';
-    body.textContent = hiddenAll
-      ? '左ペインの「表示」または「すべて表示」で scene に戻せます。'
-      : bodyByStatus[status.kind] || bodyByStatus.loading;
+    body.textContent = bodyByStatus[status.kind] || bodyByStatus.loading;
     card.append(title, body);
     this.dom.emptyState.appendChild(card);
   }
@@ -1477,6 +1441,24 @@ class TopologyViewer {
     return this.primaryRowByDevice.get(deviceId) || (this.rowIdsByDeviceId.get(deviceId) || [null])[0] || null;
   }
 
+  preferredEntryForDevice(deviceId) {
+    const entryIds = this.entryIdsByDeviceId.get(deviceId) || [];
+    const visibleEntryId = entryIds.find((entryId) => {
+      const rowId = this.sidebarEntryById.get(entryId)?.tree_row_id;
+      return !rowId || this.visibleRowIds.has(rowId);
+    });
+    return visibleEntryId || this.primaryEntryByDevice.get(deviceId) || entryIds[0] || null;
+  }
+
+  preferredRowForDevice(deviceId) {
+    const preferredEntryId = this.preferredEntryForDevice(deviceId);
+    return (
+      this.sidebarEntryById.get(preferredEntryId)?.tree_row_id ||
+      this.primaryRowForDevice(deviceId) ||
+      null
+    );
+  }
+
   pathEntryIdsForRow(rowId) {
     const entryIds = new Set();
     if (!rowId) {
@@ -1491,77 +1473,63 @@ class TopologyViewer {
     return entryIds;
   }
 
-  pathDeviceIdsForRow(rowId) {
-    const deviceIds = new Set();
-    if (!rowId) {
-      return deviceIds;
-    }
-    for (const pathRowId of findRowPath(rowId, this.rowParentById)) {
-      const row = this.rowById.get(pathRowId);
-      if (row?.device_id) {
-        deviceIds.add(row.device_id);
+  connectedLinksForDevice(deviceId, { visibleOnly = true, excludeLinkIds = null } = {}) {
+    return this.snapshot.links.filter((link) => {
+      if (
+        link.local_device_id !== deviceId &&
+        link.remote_device_id !== deviceId
+      ) {
+        return false;
       }
-    }
-    return deviceIds;
-  }
-
-  pathLinkIdsForRow(rowId) {
-    const linkIds = new Set();
-    if (!rowId) {
-      return linkIds;
-    }
-
-    const path = findRowPath(rowId, this.rowParentById);
-    for (let index = 1; index < path.length; index += 1) {
-      const parentDeviceId = this.rowById.get(path[index - 1])?.device_id;
-      const childDeviceId = this.rowById.get(path[index])?.device_id;
-      if (!parentDeviceId || !childDeviceId || parentDeviceId === childDeviceId) {
-        continue;
+      if (visibleOnly && !this.visibleLinkIds.has(link.id)) {
+        return false;
       }
-      const link = this.findPreferredPathLink(parentDeviceId, childDeviceId);
-      if (link) {
-        linkIds.add(link.id);
+      if (excludeLinkIds?.has(link.id)) {
+        return false;
       }
-    }
-    return linkIds;
-  }
-
-  findPreferredPathLink(parentDeviceId, childDeviceId) {
-    const childDevice = this.findDevice(childDeviceId);
-    const matches = this.snapshot.links.filter((link) => {
-      return (
-        (link.local_device_id === parentDeviceId && link.remote_device_id === childDeviceId) ||
-        (link.local_device_id === childDeviceId && link.remote_device_id === parentDeviceId)
-      );
+      return true;
     });
+  }
 
-    if (!matches.length) {
+  otherDeviceId(link, deviceId) {
+    if (link.local_device_id === deviceId) {
+      return link.remote_device_id;
+    }
+    if (link.remote_device_id === deviceId) {
+      return link.local_device_id;
+    }
+    return null;
+  }
+
+  guestDeviceIdForLink(link) {
+    if (link.protocol !== 'proxmox_guest_link' || !link.guest_attachment) {
       return null;
     }
 
-    if (childDevice?.upstream_interface) {
-      const upstreamMatches = matches.filter(
-        (link) => this.interfaceForDevice(link, childDeviceId) === childDevice.upstream_interface
-      );
-      if (upstreamMatches.length === 1) {
-        return upstreamMatches[0];
-      }
-      if (upstreamMatches.length > 1) {
-        return upstreamMatches.sort((left, right) => left.id.localeCompare(right.id))[0];
-      }
+    const localIsBridgeSide = link.local_interface === link.guest_attachment.bridge_name;
+    const remoteIsBridgeSide = link.remote_interface === link.guest_attachment.bridge_name;
+    if (localIsBridgeSide !== remoteIsBridgeSide) {
+      return localIsBridgeSide ? link.remote_device_id : link.local_device_id;
     }
 
-    const proxmoxMatch = matches.find((link) => link.protocol === 'proxmox_guest_link');
-    if (proxmoxMatch) {
-      return proxmoxMatch;
+    const localDevice = this.findDevice(link.local_device_id);
+    const remoteDevice = this.findDevice(link.remote_device_id);
+    if (localDevice?.device_role === 'bridge' && remoteDevice?.device_role !== 'bridge') {
+      return link.remote_device_id;
+    }
+    if (remoteDevice?.device_role === 'bridge' && localDevice?.device_role !== 'bridge') {
+      return link.local_device_id;
+    }
+    return link.local_device_id;
+  }
+
+  bridgeDeviceIdForLink(link) {
+    if (link.protocol !== 'proxmox_guest_link' || !link.guest_attachment) {
+      return null;
     }
 
-    const uplinkMatch = matches.find((link) => link.protocol === 'proxmox_uplink');
-    if (uplinkMatch) {
-      return uplinkMatch;
-    }
-
-    return matches.slice().sort((left, right) => left.id.localeCompare(right.id))[0];
+    const guestDeviceId = this.guestDeviceIdForLink(link);
+    return guestDeviceId ? this.otherDeviceId(link, guestDeviceId) : null;
   }
 
   interfaceForDevice(link, deviceId) {
@@ -1572,6 +1540,160 @@ class TopologyViewer {
       return link.remote_interface;
     }
     return null;
+  }
+
+  preferredGuestLinkForDevice(deviceId) {
+    const guestLinks = this.connectedLinksForDevice(deviceId).filter(
+      (link) =>
+        link.protocol === 'proxmox_guest_link' &&
+        link.guest_attachment &&
+        this.guestDeviceIdForLink(link) === deviceId
+    );
+    const taggedGuestLinks = guestLinks.filter(
+      (link) => link.guest_attachment?.vlan_tag !== null
+    );
+
+    if (taggedGuestLinks.length === 1) {
+      return taggedGuestLinks[0];
+    }
+    if (guestLinks.length === 1) {
+      return guestLinks[0];
+    }
+    return null;
+  }
+
+  routerCandidateLinkForGuestLink(link) {
+    const attachment = link.guest_attachment;
+    if (
+      link.protocol !== 'proxmox_guest_link' ||
+      !attachment ||
+      attachment.vlan_tag === null
+    ) {
+      return null;
+    }
+
+    const bridgeDeviceId = this.bridgeDeviceIdForLink(link);
+    const candidates = this.snapshot.links.filter((candidate) => {
+      if (
+        candidate.id === link.id ||
+        candidate.protocol !== 'proxmox_guest_link' ||
+        !candidate.guest_attachment ||
+        !this.visibleLinkIds.has(candidate.id)
+      ) {
+        return false;
+      }
+      if (candidate.guest_attachment.bridge_name !== attachment.bridge_name) {
+        return false;
+      }
+      if (!candidate.guest_attachment.trunk_vlans.includes(attachment.vlan_tag)) {
+        return false;
+      }
+      if (
+        bridgeDeviceId &&
+        this.bridgeDeviceIdForLink(candidate) &&
+        this.bridgeDeviceIdForLink(candidate) !== bridgeDeviceId
+      ) {
+        return false;
+      }
+      const guestDeviceId = this.guestDeviceIdForLink(candidate);
+      return this.findDevice(guestDeviceId)?.device_role === 'router';
+    });
+
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  physicalUpstreamPathFrom(deviceId, excludeLinkIds = new Set(), seenDeviceIds = new Set()) {
+    const deviceIds = new Set();
+    const linkIds = new Set();
+    let currentDeviceId = deviceId;
+    const visitedDeviceIds = new Set(seenDeviceIds);
+
+    while (currentDeviceId && !visitedDeviceIds.has(currentDeviceId)) {
+      visitedDeviceIds.add(currentDeviceId);
+      const currentDevice = this.findDevice(currentDeviceId);
+      const candidates = this.connectedLinksForDevice(currentDeviceId, {
+        excludeLinkIds,
+      }).filter((link) => link.protocol !== 'proxmox_guest_link');
+
+      if (!candidates.length) {
+        break;
+      }
+
+      let chosenLink = null;
+      if (currentDevice?.upstream_interface) {
+        const upstreamMatches = candidates.filter(
+          (link) =>
+            this.interfaceForDevice(link, currentDeviceId) ===
+            currentDevice.upstream_interface
+        );
+        if (upstreamMatches.length !== 1) {
+          break;
+        }
+        chosenLink = upstreamMatches[0];
+      } else if (candidates.length === 1) {
+        chosenLink = candidates[0];
+      } else {
+        break;
+      }
+
+      const nextDeviceId = this.otherDeviceId(chosenLink, currentDeviceId);
+      if (!nextDeviceId || visitedDeviceIds.has(nextDeviceId)) {
+        break;
+      }
+
+      linkIds.add(chosenLink.id);
+      deviceIds.add(nextDeviceId);
+      excludeLinkIds.add(chosenLink.id);
+      currentDeviceId = nextDeviceId;
+    }
+
+    return { deviceIds, linkIds };
+  }
+
+  computeUpstreamPath(deviceId) {
+    const deviceIds = new Set();
+    const linkIds = new Set();
+    if (!deviceId) {
+      return { deviceIds, linkIds };
+    }
+
+    deviceIds.add(deviceId);
+
+    const guestLink = this.preferredGuestLinkForDevice(deviceId);
+    if (!guestLink) {
+      const continuation = this.physicalUpstreamPathFrom(deviceId);
+      continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
+      continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
+      return { deviceIds, linkIds };
+    }
+
+    linkIds.add(guestLink.id);
+    const bridgeDeviceId = this.bridgeDeviceIdForLink(guestLink);
+    if (bridgeDeviceId) {
+      deviceIds.add(bridgeDeviceId);
+    }
+
+    const routerLink = this.routerCandidateLinkForGuestLink(guestLink);
+    if (!routerLink) {
+      return { deviceIds, linkIds };
+    }
+
+    const routerDeviceId = this.guestDeviceIdForLink(routerLink);
+    if (!routerDeviceId) {
+      return { deviceIds, linkIds };
+    }
+
+    linkIds.add(routerLink.id);
+    deviceIds.add(routerDeviceId);
+
+    const continuation = this.physicalUpstreamPathFrom(
+      routerDeviceId,
+      new Set([guestLink.id, routerLink.id]),
+      new Set(deviceIds)
+    );
+    continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
+    continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
+    return { deviceIds, linkIds };
   }
 
   deviceSummary(device) {
@@ -1638,11 +1760,17 @@ class TopologyViewer {
     const remote = this.findDevice(link.remote_device_id);
     this.dom.hoverCard.hidden = false;
     this.dom.hoverTitle.textContent = `${local?.label || link.local_interface} ↔ ${remote?.label || link.remote_interface}`;
+    const attachment = link.guest_attachment;
     const details = [
       `${link.local_interface}${link.local_ip ? ` · ${link.local_ip}` : ''}`,
       `${link.remote_interface}${link.remote_ip ? ` · ${link.remote_ip}` : ''}`,
       formatSpeed(link.speed_bps),
       protocolLabel(link.protocol),
+      attachment?.bridge_name ? `bridge ${attachment.bridge_name}` : null,
+      attachment?.vlan_tag !== null && attachment?.vlan_tag !== undefined
+        ? `VLAN ${attachment.vlan_tag}`
+        : null,
+      attachment?.trunk_vlans?.length ? `trunk ${attachment.trunk_vlans.join(', ')}` : null,
     ].filter(Boolean);
     this.dom.hoverBody.textContent = details.join(' · ');
     this.positionHoverCard(this.dom.hoverCard, this.hoverPointer.x + 18, this.hoverPointer.y + 18);
@@ -1666,9 +1794,17 @@ class TopologyViewer {
     if (!this.framedScene && visibleDevices.length) {
       const centroid = this.computeCentroid(targetByDeviceId);
       const bounds = this.computeBounds(targetByDeviceId);
-      const span = Math.max(bounds.max.x - bounds.min.x, bounds.max.y - bounds.min.y, 18);
+      const spanX = bounds.max.x - bounds.min.x;
+      const spanY = bounds.max.y - bounds.min.y;
+      const spanZ = bounds.max.z - bounds.min.z;
+      const planarSpan = Math.max(spanX, spanZ, 14);
+      const verticalSpan = Math.max(spanY, 8);
       this.controls.target.copy(centroid);
-      this.camera.position.set(centroid.x, centroid.y + 12, centroid.z + Math.max(30, span * 1.2));
+      this.camera.position.set(
+        centroid.x + planarSpan * 0.42,
+        centroid.y + Math.max(10, verticalSpan * 0.8 + 4),
+        centroid.z + planarSpan * 0.86
+      );
       this.camera.lookAt(centroid);
       this.framedScene = true;
     }
@@ -1697,10 +1833,7 @@ class TopologyViewer {
       }
     }
 
-    const visibleLinks = this.snapshot.links.filter(
-      (link) => visibleDeviceSet.has(link.local_device_id) && visibleDeviceSet.has(link.remote_device_id)
-    );
-    const visibleLinkIds = new Set(visibleLinks.map((link) => link.id));
+    const visibleLinks = this.snapshot.links.filter((link) => this.visibleLinkIds.has(link.id));
 
     for (const link of visibleLinks) {
       let group = this.linkGroups.get(link.id);
@@ -1708,12 +1841,15 @@ class TopologyViewer {
         group = this.createLinkGroup(link);
         this.linkGroups.set(link.id, group);
         this.linkRoot.add(group);
+      } else if (group.userData.line?.material) {
+        group.userData.line.material.dispose?.();
+        group.userData.line.material = this.createBaseLinkMaterial(link);
       }
       group.userData.link = link;
     }
 
     for (const [linkId, group] of Array.from(this.linkGroups.entries())) {
-      if (!visibleLinkIds.has(linkId)) {
+      if (!this.visibleLinkIds.has(linkId)) {
         this.linkRoot.remove(group);
         this.linkGroups.delete(linkId);
       }
@@ -1729,8 +1865,10 @@ class TopologyViewer {
     }
 
     const visibleIds = new Set(devices.map((device) => device.id));
+    const deviceById = new Map(devices.map((device) => [device.id, device]));
     const childrenByDeviceId = new Map(Array.from(visibleIds, (deviceId) => [deviceId, []]));
     const roots = [];
+    const rootSet = new Set();
 
     for (const device of devices) {
       const parentId = this.primaryParentDeviceById.get(device.id);
@@ -1748,64 +1886,170 @@ class TopologyViewer {
       childrenByDeviceId.set(deviceId, childIds);
     }
     roots.sort((leftId, rightId) => compareByLabel(this.findDevice(leftId), this.findDevice(rightId)));
+    roots.forEach((deviceId) => rootSet.add(deviceId));
 
-    const widthCache = new Map();
-    const branchGap = 0.42;
-    const xSpacing = 6.4;
-    const ySpacing = 7.8;
+    const depthSpacing = 5.6;
+    const childRingStart = 4.2;
+    const childRingStep = 2.6;
+    const rootRingStart = 10.0;
+    const rootRingStep = 6.0;
+    const slotSpacing = 2.8;
+    const childClusterPadding = 0.8;
+    const relaxIterations = 8;
+    const maxStep = 0.22;
+    const anchorByDeviceId = new Map();
 
-    const subtreeWidth = (deviceId) => {
-      if (widthCache.has(deviceId)) {
-        return widthCache.get(deviceId);
+    const placeConcentricGroup = (deviceIds, center, targetY, seedKey, innerRadius, radiusStep) => {
+      let cursor = 0;
+      let ringIndex = 0;
+
+      while (cursor < deviceIds.length) {
+        const baseRadius = innerRadius + ringIndex * radiusStep;
+        const capacity = Math.max(6, Math.floor((Math.PI * 2 * baseRadius) / slotSpacing));
+        const ringIds = deviceIds.slice(cursor, cursor + capacity);
+        const startAngle = hash01(`${seedKey}:ring:${ringIndex}`) * Math.PI * 2;
+        const angleStep = ringIds.length > 0 ? (Math.PI * 2) / ringIds.length : 0;
+
+        for (let index = 0; index < ringIds.length; index += 1) {
+          const deviceId = ringIds[index];
+          const childIds = childrenByDeviceId.get(deviceId) || [];
+          const radius = baseRadius + (childIds.length ? childClusterPadding : 0);
+          const angle = startAngle + index * angleStep;
+          anchorByDeviceId.set(
+            deviceId,
+            new THREE.Vector3(
+              center.x + Math.cos(angle) * radius,
+              targetY,
+              center.z + Math.sin(angle) * radius
+            )
+          );
+        }
+
+        cursor += ringIds.length;
+        ringIndex += 1;
+      }
+    };
+
+    const placeSubtree = (deviceId) => {
+      const anchor = anchorByDeviceId.get(deviceId);
+      if (!anchor) {
+        return;
       }
       const childIds = childrenByDeviceId.get(deviceId) || [];
       if (!childIds.length) {
-        widthCache.set(deviceId, 1);
-        return 1;
+        return;
       }
-      const totalWidth =
-        childIds.reduce((sum, childId) => sum + subtreeWidth(childId), 0) +
-        Math.max(0, childIds.length - 1) * branchGap;
-      widthCache.set(deviceId, totalWidth);
-      return totalWidth;
-    };
-
-    const totalWidth =
-      roots.reduce((sum, deviceId) => sum + subtreeWidth(deviceId), 0) +
-      Math.max(0, roots.length - 1) * 1.2;
-    const targetByDeviceId = new Map();
-
-    const place = (deviceId, left, depth) => {
-      const width = subtreeWidth(deviceId);
-      const center = left + width / 2;
-      const device = this.findDevice(deviceId);
-      const deploymentOffset =
-        device?.deployment_type === 'virtual'
-          ? 2.2
-          : device?.deployment_type === 'physical'
-            ? -1.0
-            : 0;
-      const hostOffset = device?.host_label ? (hash01(`host:${device.host_label}`) - 0.5) * 1.8 : 0;
-      const z = deploymentOffset + hostOffset + (hash01(`z:${deviceId}`) - 0.5) * 1.1;
-      targetByDeviceId.set(
+      placeConcentricGroup(
+        childIds,
+        anchor,
+        anchor.y - depthSpacing,
         deviceId,
-        new THREE.Vector3((center - totalWidth / 2) * xSpacing, -depth * ySpacing, z)
+        childRingStart,
+        childRingStep
       );
-
-      let childLeft = left;
-      for (const childId of childrenByDeviceId.get(deviceId) || []) {
-        place(childId, childLeft, depth + 1);
-        childLeft += subtreeWidth(childId) + branchGap;
+      for (const childId of childIds) {
+        placeSubtree(childId);
       }
     };
 
-    let left = 0;
-    for (const rootId of roots) {
-      place(rootId, left, 0);
-      left += subtreeWidth(rootId) + 1.2;
+    if (roots.length === 1) {
+      anchorByDeviceId.set(roots[0], new THREE.Vector3(0, 0, 0));
+    } else if (roots.length > 1) {
+      placeConcentricGroup(
+        roots,
+        new THREE.Vector3(0, 0, 0),
+        0,
+        'roots',
+        rootRingStart,
+        rootRingStep
+      );
     }
 
-    return targetByDeviceId;
+    for (const rootId of roots) {
+      placeSubtree(rootId);
+    }
+
+    const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
+    const positions = new Map(
+      Array.from(anchorByDeviceId.entries(), ([deviceId, anchor]) => [deviceId, anchor.clone()])
+    );
+
+    for (let iteration = 0; iteration < relaxIterations; iteration += 1) {
+      const forces = new Map(orderedIds.map((deviceId) => [deviceId, { x: 0, z: 0 }]));
+
+      for (let leftIndex = 0; leftIndex < orderedIds.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < orderedIds.length; rightIndex += 1) {
+          const leftId = orderedIds[leftIndex];
+          const rightId = orderedIds[rightIndex];
+          const leftPosition = positions.get(leftId);
+          const rightPosition = positions.get(rightId);
+          if (!leftPosition || !rightPosition) {
+            continue;
+          }
+
+          let dx = rightPosition.x - leftPosition.x;
+          let dz = rightPosition.z - leftPosition.z;
+          let distance = Math.hypot(dx, dz);
+          if (distance < 0.0001) {
+            const angle = hash01(`layout:${pairKey(leftId, rightId)}`) * Math.PI * 2;
+            dx = Math.cos(angle) * 0.001;
+            dz = Math.sin(angle) * 0.001;
+            distance = 0.001;
+          }
+
+          const minDistance =
+            layoutRadiusForDevice(deviceById.get(leftId)) +
+            layoutRadiusForDevice(deviceById.get(rightId)) +
+            0.55;
+          if (distance >= minDistance) {
+            continue;
+          }
+
+          const normalized = (minDistance - distance) / minDistance;
+          const strength = 0.18 * normalized;
+          const unitX = dx / distance;
+          const unitZ = dz / distance;
+          const leftForce = forces.get(leftId);
+          const rightForce = forces.get(rightId);
+          if (!leftForce || !rightForce) {
+            continue;
+          }
+          leftForce.x -= unitX * strength;
+          leftForce.z -= unitZ * strength;
+          rightForce.x += unitX * strength;
+          rightForce.z += unitZ * strength;
+        }
+      }
+
+      for (const deviceId of orderedIds) {
+        const anchor = anchorByDeviceId.get(deviceId);
+        const position = positions.get(deviceId);
+        const force = forces.get(deviceId);
+        if (!anchor || !position || !force) {
+          continue;
+        }
+        const anchorStrength = rootSet.has(deviceId) ? 0.2 : 0.16;
+        force.x += (anchor.x - position.x) * anchorStrength;
+        force.z += (anchor.z - position.z) * anchorStrength;
+      }
+
+      for (const deviceId of orderedIds) {
+        const position = positions.get(deviceId);
+        const force = forces.get(deviceId);
+        if (!position || !force) {
+          continue;
+        }
+        position.x += clampMagnitude(force.x, maxStep);
+        position.z += clampMagnitude(force.z, maxStep);
+      }
+    }
+
+    return new Map(
+      Array.from(positions.entries(), ([deviceId, position]) => {
+        const anchor = anchorByDeviceId.get(deviceId) || position;
+        return [deviceId, new THREE.Vector3(position.x, anchor.y, position.z)];
+      })
+    );
   }
 
   computeCentroid(targetByDeviceId) {
@@ -1903,6 +2147,45 @@ class TopologyViewer {
     }
   }
 
+  isGuestTrunkLink(link) {
+    return (
+      link.protocol === 'proxmox_guest_link' &&
+      Array.isArray(link.guest_attachment?.trunk_vlans) &&
+      link.guest_attachment.trunk_vlans.length > 0
+    );
+  }
+
+  baseLinkTone(link) {
+    if (this.isGuestTrunkLink(link)) {
+      return { color: 0x4b5563, opacity: 0.9 };
+    }
+    if (link.protocol === 'proxmox_guest_link') {
+      return { color: 0x64748b, opacity: 0.82 };
+    }
+    if (link.protocol === 'proxmox_uplink') {
+      return { color: 0x43556d, opacity: 0.76 };
+    }
+    return { color: 0x4b5563, opacity: 0.76 };
+  }
+
+  createBaseLinkMaterial(link) {
+    const tone = this.baseLinkTone(link);
+    if (this.isGuestTrunkLink(link)) {
+      return new THREE.LineDashedMaterial({
+        color: tone.color,
+        transparent: true,
+        opacity: tone.opacity,
+        dashSize: 1.1,
+        gapSize: 0.65,
+      });
+    }
+    return new THREE.LineBasicMaterial({
+      color: tone.color,
+      transparent: true,
+      opacity: tone.opacity,
+    });
+  }
+
   createLinkGroup(link) {
     const group = new THREE.Group();
     group.userData = {
@@ -1913,16 +2196,24 @@ class TopologyViewer {
 
     const lineGeometry = new THREE.BufferGeometry();
     lineGeometry.setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
-    const line = new THREE.Line(
-      lineGeometry,
-      new THREE.LineBasicMaterial({
-        color: 0x4b5563,
+    const line = new THREE.Line(lineGeometry, this.createBaseLinkMaterial(link));
+    line.userData.role = 'link-line';
+    line.renderOrder = 1;
+    group.add(line);
+
+    const overlayMesh = new THREE.Mesh(
+      new THREE.CylinderGeometry(0.12, 0.12, 1, 16, 1, true),
+      new THREE.MeshBasicMaterial({
+        color: 0x0f62fe,
         transparent: true,
-        opacity: 0.76,
+        opacity: 0.0,
+        depthWrite: false,
+        side: THREE.DoubleSide,
       })
     );
-    line.userData.role = 'link-line';
-    group.add(line);
+    overlayMesh.userData.role = 'link-overlay';
+    overlayMesh.renderOrder = 2;
+    group.add(overlayMesh);
 
     const hitMaterial = new THREE.MeshBasicMaterial({
       color: 0xffffff,
@@ -1936,20 +2227,20 @@ class TopologyViewer {
     group.add(hitMesh);
 
     group.userData.line = line;
+    group.userData.overlayMesh = overlayMesh;
     group.userData.hitMesh = hitMesh;
     return group;
   }
 
   updateObjectStyles() {
-    const selectedPathDevices = this.pathDeviceIdsForRow(this.selectedRowId);
-    const hoveredPathDevices = this.pathDeviceIdsForRow(this.hoveredRowId);
-    const selectedPathLinks = this.pathLinkIdsForRow(this.selectedRowId);
+    const selectedPath = this.computeUpstreamPath(this.selectedDeviceId);
+    const hoveredPath = this.computeUpstreamPath(this.hoveredDeviceId);
 
     for (const [deviceId, group] of this.deviceGroups.entries()) {
       const isSelected = deviceId === this.selectedDeviceId;
       const isHovered = deviceId === this.hoveredDeviceId;
-      const onSelectedPath = selectedPathDevices.has(deviceId) && !isSelected;
-      const onHoveredPath = hoveredPathDevices.has(deviceId) && !isSelected && !isHovered;
+      const onSelectedPath = selectedPath.deviceIds.has(deviceId) && !isSelected;
+      const onHoveredPath = hoveredPath.deviceIds.has(deviceId) && !isSelected && !isHovered;
 
       const scale = isSelected ? 1.16 : isHovered ? 1.1 : onSelectedPath ? 1.06 : onHoveredPath ? 1.03 : 1;
       group.scale.setScalar(scale);
@@ -1968,18 +2259,22 @@ class TopologyViewer {
     }
 
     for (const group of this.linkGroups.values()) {
-      this.applyLinkStyle(group, selectedPathLinks);
+      this.applyLinkStyle(group, selectedPath.linkIds, hoveredPath.linkIds);
     }
   }
 
-  applyLinkStyle(group, selectedPathLinks) {
+  applyLinkStyle(group, selectedPathLinks, hoveredPathLinks) {
     const link = group.userData.link;
+    const tone = this.baseLinkTone(link);
+    group.userData.line.material.color.setHex(tone.color);
+    group.userData.line.material.opacity = tone.opacity;
     const isHovered = link.id === this.hoveredLinkId;
-    const isOnSelectedPath = selectedPathLinks.has(link.id);
-    group.userData.line.material.color.setHex(
-      isHovered ? 0xd97706 : isOnSelectedPath ? 0x0f62fe : 0x4b5563
-    );
-    group.userData.line.material.opacity = isHovered ? 1 : isOnSelectedPath ? 0.96 : 0.76;
+    const isOnHoveredPath = !isHovered && hoveredPathLinks.has(link.id);
+    const isOnSelectedPath = !isHovered && !isOnHoveredPath && selectedPathLinks.has(link.id);
+    const overlayMaterial = group.userData.overlayMesh.material;
+    overlayMaterial.color.setHex(isHovered || isOnHoveredPath ? 0xd97706 : 0x0f62fe);
+    overlayMaterial.opacity = isHovered ? 0.92 : isOnHoveredPath ? 0.72 : isOnSelectedPath ? 0.66 : 0.0;
+    group.userData.overlayMesh.visible = overlayMaterial.opacity > 0;
   }
 
   handlePointerMove(event) {
@@ -2072,7 +2367,7 @@ class TopologyViewer {
       const entryId =
         this.selectedDeviceId === deviceId && this.selectedEntryId
           ? this.selectedEntryId
-          : this.primaryEntryByDevice.get(deviceId) || (this.entryIdsByDeviceId.get(deviceId) || [null])[0];
+          : this.preferredEntryForDevice(deviceId);
       if (entryId) {
         this.selectEntry(entryId, { reveal: true, source: 'scene' });
       }
@@ -2117,7 +2412,6 @@ class TopologyViewer {
   }
 
   updateLinkGeometry() {
-    const selectedPathLinks = this.pathLinkIdsForRow(this.selectedRowId);
     for (const group of this.linkGroups.values()) {
       const link = group.userData.link;
       const local = this.deviceGroups.get(link.local_device_id);
@@ -2133,7 +2427,16 @@ class TopologyViewer {
 
       group.userData.line.geometry.setFromPoints([start, end]);
       group.userData.line.geometry.computeBoundingSphere();
-      this.applyLinkStyle(group, selectedPathLinks);
+      if (typeof group.userData.line.computeLineDistances === 'function') {
+        group.userData.line.computeLineDistances();
+      }
+
+      group.userData.overlayMesh.position.copy(start.clone().add(end).multiplyScalar(0.5));
+      group.userData.overlayMesh.quaternion.setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        delta.lengthSq() > 0 ? delta.clone().normalize() : new THREE.Vector3(0, 1, 0)
+      );
+      group.userData.overlayMesh.scale.set(1, length, 1);
 
       group.userData.hitMesh.position.copy(start.clone().add(end).multiplyScalar(0.5));
       const direction = delta.lengthSq() > 0 ? delta.clone().normalize() : new THREE.Vector3(0, 1, 0);
