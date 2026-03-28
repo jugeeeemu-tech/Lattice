@@ -1,0 +1,106 @@
+{
+  "devices": [
+    {
+      "id": "router-core",
+      "label": "vyos-core",
+      "depth": 0,
+      "device_role": "router",
+      "deployment_type": "physical",
+      "identity_keys": {
+        "sys_name": "vyos-core",
+        "mgmt_ip": "192.0.2.1",
+        "mac_addresses": ["00:11:22:33:44:55"]
+      }
+    },
+    {
+      "id": "proxmox-host",
+      "label": "pve-01",
+      "depth": 1,
+      "device_role": "server",
+      "deployment_type": "physical",
+      "identity_keys": {
+        "sys_name": "pve-01",
+        "mgmt_ip": "192.0.2.11",
+        "mac_addresses": ["00:11:22:33:44:66"]
+      },
+      "host_label": "rack-a"
+    },
+    {
+      "id": "guest-app",
+      "label": "vm-app-01",
+      "depth": 2,
+      "device_role": "server",
+      "deployment_type": "virtual",
+      "identity_keys": {
+        "sys_name": "vm-app-01",
+        "mgmt_ip": "192.0.2.101",
+        "mac_addresses": ["00:11:22:33:44:77"]
+      },
+      "host_label": "pve-01",
+      "upstream_interface": "vmbr0"
+    }
+  ],
+  "links": [
+    {
+      "id": "link-core-pve",
+      "local_device_id": "router-core",
+      "local_interface": "ge-0/0/1",
+      "local_ip": "192.0.2.1/24",
+      "remote_device_id": "proxmox-host",
+      "remote_interface": "eno1",
+      "remote_ip": "192.0.2.11/24",
+      "speed_bps": 1000000000,
+      "protocol": "lldp"
+    },
+    {
+      "id": "link-pve-guest",
+      "local_device_id": "proxmox-host",
+      "local_interface": "vmbr0",
+      "remote_device_id": "guest-app",
+      "remote_interface": "eth0",
+      "speed_bps": 1000000000,
+      "protocol": "proxmox_guest_link",
+      "guest_attachment": {
+        "bridge_name": "vmbr0",
+        "vlan_tag": 120,
+        "trunk_vlans": [120, 130]
+      }
+    }
+  ],
+  "tree_rows": [
+    {
+      "id": "seed:192.0.2.1/router-core#1",
+      "device_id": "router-core",
+      "label": "vyos-core"
+    },
+    {
+      "id": "seed:192.0.2.1/proxmox-host#1",
+      "device_id": "proxmox-host",
+      "label": "pve-01"
+    },
+    {
+      "id": "seed:192.0.2.1/guest-app#1",
+      "device_id": "guest-app",
+      "label": "vm-app-01"
+    }
+  ],
+  "tree_edges": [
+    {
+      "parent_row_id": "seed:192.0.2.1/router-core#1",
+      "child_row_id": "seed:192.0.2.1/proxmox-host#1"
+    },
+    {
+      "parent_row_id": "seed:192.0.2.1/proxmox-host#1",
+      "child_row_id": "seed:192.0.2.1/guest-app#1"
+    }
+  ],
+  "primary_row_by_device": {
+    "router-core": "seed:192.0.2.1/router-core#1",
+    "proxmox-host": "seed:192.0.2.1/proxmox-host#1",
+    "guest-app": "seed:192.0.2.1/guest-app#1"
+  },
+  "discovery_status": {
+    "state": "ready",
+    "message": "fixture snapshot loaded"
+  }
+}

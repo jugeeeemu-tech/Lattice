@@ -1,0 +1,10 @@
+{
+  "devices": [],
+  "links": [],
+  "tree_rows": [],
+  "tree_edges": [],
+  "primary_row_by_device": {},
+  "discovery_status": {
+    "state": "loading"
+  }
+}
