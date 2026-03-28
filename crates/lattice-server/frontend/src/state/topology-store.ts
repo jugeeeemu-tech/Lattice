@@ -14,6 +14,7 @@ import {
   pathEntryIdsForRow,
   preferredEntryForDevice,
   preferredRowForDevice,
+  type SidebarEntry,
   statusLabel,
   STATUS_THEME,
   type DerivedTopologyModel,
@@ -130,11 +131,7 @@ export class TopologyStore {
   }
 
   toggleCollapse(entryId: string): void {
-    if (this.#collapsedEntryIds.has(entryId)) {
-      this.#collapsedEntryIds.delete(entryId);
-    } else {
-      this.#collapsedEntryIds.add(entryId);
-    }
+    this.#toggleCollapsedEntry(entryId);
     this.#rebuildModel();
     this.#syncSelectionAfterSnapshot();
     this.#emit();
@@ -153,16 +150,32 @@ export class TopologyStore {
       this.#revealEntry(entry.id);
     }
 
-    this.#selectedEntryId = entry.id;
-    this.#selectedDeviceId = entry.device_id;
-    this.#selectedRowId =
-      entry.tree_row_id ?? preferredRowForDevice(this.#model, entry.device_id);
+    this.#setSelectionState(
+      this.#model.sidebarEntryById.get(entry.id) ?? entry,
+      options.source ?? 'tree'
+    );
+    this.#emit();
+  }
 
-    this.#hoverSource = options.source ?? 'tree';
-    this.#hoveredEntryId = entry.id;
-    this.#hoveredDeviceId = entry.device_id;
-    this.#hoveredRowId = this.#selectedRowId;
-    this.#hoveredLinkId = null;
+  activateEntry(
+    entryId: string,
+    options: { source?: Exclude<HoverSource, null> } = {}
+  ): void {
+    const entry = this.#model.sidebarEntryById.get(entryId);
+    if (!entry) {
+      return;
+    }
+
+    const hasChildren = (this.#model.sidebarChildrenById.get(entry.id) ?? []).length > 0;
+    if (hasChildren) {
+      this.#toggleCollapsedEntry(entry.id);
+      this.#rebuildModel();
+    }
+
+    this.#setSelectionState(
+      this.#model.sidebarEntryById.get(entry.id) ?? entry,
+      options.source ?? 'tree'
+    );
     this.#emit();
   }
 
@@ -238,6 +251,27 @@ export class TopologyStore {
 
   #rebuildModel(): void {
     this.#model = buildTopologyModel(this.#snapshot, this.#collapsedEntryIds);
+  }
+
+  #setSelectionState(entry: SidebarEntry, source: Exclude<HoverSource, null>): void {
+    this.#selectedEntryId = entry.id;
+    this.#selectedDeviceId = entry.device_id;
+    this.#selectedRowId =
+      entry.tree_row_id ?? preferredRowForDevice(this.#model, entry.device_id);
+
+    this.#hoverSource = source;
+    this.#hoveredEntryId = entry.id;
+    this.#hoveredDeviceId = entry.device_id;
+    this.#hoveredRowId = this.#selectedRowId;
+    this.#hoveredLinkId = null;
+  }
+
+  #toggleCollapsedEntry(entryId: string): void {
+    if (this.#collapsedEntryIds.has(entryId)) {
+      this.#collapsedEntryIds.delete(entryId);
+    } else {
+      this.#collapsedEntryIds.add(entryId);
+    }
   }
 
   #revealEntry(entryId: string): void {

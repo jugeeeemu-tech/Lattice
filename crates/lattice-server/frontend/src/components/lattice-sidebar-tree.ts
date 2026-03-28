@@ -81,7 +81,7 @@ export class LatticeSidebarTree extends LitElement {
         <button
           type="button"
           class="tree-row__label"
-          @click=${() => this.#dispatch('entry-select', { entryId: entry.id })}
+          @click=${() => this.#dispatch('entry-primary-action', { entryId: entry.id })}
           @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
         >
           <span

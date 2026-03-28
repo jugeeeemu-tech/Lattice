@@ -182,9 +182,8 @@ export class LatticeApp extends LitElement {
                 .state=${this.state}
                 @entry-hover=${(event: CustomEvent<{ entryId: string }>) =>
                   this.#store.hoverEntry(event.detail.entryId)}
-                @entry-select=${(event: CustomEvent<{ entryId: string }>) =>
-                  this.#store.selectEntry(event.detail.entryId, {
-                    reveal: true,
+                @entry-primary-action=${(event: CustomEvent<{ entryId: string }>) =>
+                  this.#store.activateEntry(event.detail.entryId, {
                     source: 'tree',
                   })}
                 @entry-toggle=${(event: CustomEvent<{ entryId: string }>) =>

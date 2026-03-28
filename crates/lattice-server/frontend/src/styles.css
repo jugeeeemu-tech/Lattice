@@ -191,11 +191,13 @@ lattice-status-strip {
   display: grid;
   grid-template-columns: minmax(300px, 380px) minmax(0, 1fr);
   gap: 0.9rem;
+  height: max(calc(100vh - 190px), 620px);
   min-height: calc(100vh - 190px);
 }
 
 .sidebar {
   min-width: 0;
+  min-height: 0;
   display: grid;
   gap: 0.9rem;
 }
@@ -205,6 +207,23 @@ lattice-status-strip {
   padding: 1rem;
   display: grid;
   gap: 0.8rem;
+}
+
+.panel--info {
+  align-content: start;
+  block-size: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+  min-height: 0;
+}
+
+.panel--info .panel__header {
+  align-self: start;
+}
+
+.panel--info .tree {
+  align-self: stretch;
+  max-height: none;
+  min-height: 0;
 }
 
 .panel__header {
@@ -221,10 +240,11 @@ lattice-status-strip {
 
 .tree {
   min-height: 0;
-  max-height: calc(100vh - 270px);
   overflow: auto;
   display: grid;
+  align-content: start;
   gap: 0.18rem;
+  grid-auto-rows: max-content;
   padding-right: 0.2rem;
 }
 
@@ -234,6 +254,8 @@ lattice-status-strip {
 }
 
 .tree-toggle {
+  --toggle-stroke: 1.75px;
+  --toggle-glyph-size: 0.58rem;
   width: 1.2rem;
   height: 1.2rem;
   border-radius: 999px;
@@ -243,20 +265,42 @@ lattice-status-strip {
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
+  position: relative;
+}
+
+.tree-toggle::before,
+.tree-toggle::after {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  background: currentColor;
+  border-radius: 999px;
+  transform: translate(-50%, -50%);
 }
 
 .tree-toggle::before {
-  content: "+";
-  font-weight: 700;
-  line-height: 1;
+  width: var(--toggle-glyph-size);
+  height: var(--toggle-stroke);
 }
 
-.tree-toggle.is-open::before {
-  content: "−";
+.tree-toggle::after {
+  width: var(--toggle-stroke);
+  height: var(--toggle-glyph-size);
+  transition: opacity 140ms ease;
+}
+
+.tree-toggle.is-open::after {
+  opacity: 0;
 }
 
 .tree-toggle--leaf {
   visibility: hidden;
+}
+
+.tree-toggle--leaf::before,
+.tree-toggle--leaf::after {
+  content: none;
 }
 
 .tree-row {
@@ -461,9 +505,11 @@ lattice-status-strip {
 
   .workspace {
     grid-template-columns: 1fr;
+    height: auto;
   }
 
   .sidebar {
+    height: min(72vh, 700px);
     order: 2;
   }
 
