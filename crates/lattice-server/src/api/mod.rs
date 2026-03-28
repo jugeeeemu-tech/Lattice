@@ -1,4 +1,5 @@
 pub mod discovery_coordinator;
+pub mod frontend_assets;
 pub mod routes;
 pub mod view_snapshot;
 pub mod ws;

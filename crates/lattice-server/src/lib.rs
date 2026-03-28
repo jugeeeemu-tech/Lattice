@@ -4,9 +4,7 @@ pub mod cli;
 use std::path::{Path, PathBuf};
 
 pub fn frontend_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("src")
-        .join("frontend")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend")
 }
 
 #[cfg(test)]
@@ -22,7 +20,7 @@ mod tests {
 
     #[test]
     fn frontend_root_points_to_frontend_directory() {
-        assert!(frontend_root().ends_with(Path::new("src/frontend")));
+        assert!(frontend_root().ends_with(Path::new("frontend")));
     }
 
     #[test]

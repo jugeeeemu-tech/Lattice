@@ -766,6 +766,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "tokio",
+ "tower",
 ]
 
 [[package]]
