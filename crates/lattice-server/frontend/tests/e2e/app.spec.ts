@@ -17,7 +17,8 @@ async function installTestHooks(page: Page) {
       constructor(url: string) {
         super();
         this.url = url;
-        const sockets = ((window as Window & { __latticeMockSockets?: MockWebSocket[] }).__latticeMockSockets ??= []);
+        const sockets = ((window as Window & { __latticeMockSockets?: MockWebSocket[] })
+          .__latticeMockSockets ??= []);
         sockets.push(this);
 
         queueMicrotask(() => {
@@ -39,15 +40,10 @@ async function installTestHooks(page: Page) {
 
     Object.assign(window, {
       WebSocket: MockWebSocket,
-      __LATTICE_TEST_HOOKS: {
-        reload: () => {
-          (window as Window & { __latticeReloadCount?: number }).__latticeReloadCount =
-            ((window as Window & { __latticeReloadCount?: number }).__latticeReloadCount ?? 0) + 1;
-        },
-      },
       __latticeSocketTest: {
         close() {
-          const sockets = (window as Window & { __latticeMockSockets?: MockWebSocket[] }).__latticeMockSockets ?? [];
+          const sockets = (window as Window & { __latticeMockSockets?: MockWebSocket[] })
+            .__latticeMockSockets ?? [];
           const socket = sockets.at(-1);
           if (!socket) {
             return false;
@@ -55,11 +51,9 @@ async function installTestHooks(page: Page) {
           socket.close();
           return true;
         },
-        count() {
-          return ((window as Window & { __latticeMockSockets?: MockWebSocket[] }).__latticeMockSockets ?? []).length;
-        },
         send(snapshot: unknown) {
-          const sockets = (window as Window & { __latticeMockSockets?: MockWebSocket[] }).__latticeMockSockets ?? [];
+          const sockets = (window as Window & { __latticeMockSockets?: MockWebSocket[] })
+            .__latticeMockSockets ?? [];
           const socket = sockets.at(-1);
           if (!socket) {
             return false;
@@ -76,6 +70,25 @@ async function installTestHooks(page: Page) {
   });
 }
 
+function scheduledSnapshot(
+  snapshot: ViewSnapshot,
+  overrides: Partial<ViewSnapshot> = {}
+): ViewSnapshot {
+  const { discovery_status, ...restOverrides } = overrides;
+  const intervalSeconds = overrides.auto_discovery_interval_seconds ?? 60;
+  return {
+    ...snapshot,
+    ...restOverrides,
+    auto_discovery_interval_seconds: intervalSeconds,
+    next_auto_discovery_at_ms:
+      overrides.next_auto_discovery_at_ms ?? Date.now() + intervalSeconds * 1_000,
+    discovery_status: {
+      ...snapshot.discovery_status,
+      ...discovery_status,
+    },
+  };
+}
+
 async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSnapshot }) {
   let discoverCount = 0;
 
@@ -89,6 +102,14 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
 
   await page.route('**/api/discover', async (route) => {
     discoverCount += 1;
+    currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
+      discovery_status: {
+        state: 'discovering',
+        message: null,
+      },
+      next_auto_discovery_at_ms: null,
+    });
+
     await route.fulfill({
       body: JSON.stringify({ accepted: true }),
       contentType: 'application/json',
@@ -133,9 +154,39 @@ async function clickSceneDevice(page: Page, deviceId: string) {
   expect(clicked).toBe(true);
 }
 
-test('renders empty-state copy from the shared empty fixture', async ({ page }) => {
+async function discoveryControlMetrics(page: Page) {
+  return page.evaluate(() => {
+    const control = document.querySelector('[data-role="discovery-control"]');
+    if (!(control instanceof HTMLElement)) {
+      return null;
+    }
+
+    const progress = Number.parseFloat(
+      control.style.getPropertyValue('--ring-progress') || '0'
+    );
+
+    return {
+      ariaLabel:
+        control.querySelector('button') instanceof HTMLButtonElement
+          ? control.querySelector('button')?.ariaLabel ?? ''
+          : '',
+      progress,
+      state: control.dataset.discoveryState ?? '',
+    };
+  });
+}
+
+test('fits into one screen and keeps the sidebar inside the viewport overlay', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
-  const currentSnapshotRef = { value: await loadViewSnapshotFixture('empty') };
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('empty'), {
+      discovery_status: { state: 'loading', message: null },
+      next_auto_discovery_at_ms: null,
+    }),
+  };
   await installApiRoutes(page, currentSnapshotRef);
 
   await page.goto('/');
@@ -143,13 +194,47 @@ test('renders empty-state copy from the shared empty fixture', async ({ page }) 
 
   await expect(page.getByText('Topology is warming up')).toBeVisible();
   await expect(
-    page.getByText('初回探索が完了すると、3D ビューと操作ペインが表示されます。')
+    page.getByText('初回探索が完了すると、3Dビューと構成が表示されます。')
   ).toBeVisible();
+
+  const metrics = await page.evaluate(() => {
+    const viewport = document.querySelector('.viewport');
+    const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+    if (!(viewport instanceof HTMLElement) || !(sidebar instanceof HTMLElement)) {
+      return null;
+    }
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const sidebarRect = sidebar.getBoundingClientRect();
+
+    return {
+      hasReloadButton: Array.from(document.querySelectorAll('button')).some((button) =>
+        (button.textContent ?? '').includes('再読込')
+      ),
+      innerHeight: window.innerHeight,
+      scrollHeight: document.documentElement.scrollHeight,
+      sidebarInsideViewport:
+        sidebarRect.left >= viewportRect.left &&
+        sidebarRect.top >= viewportRect.top &&
+        sidebarRect.right <= viewportRect.right &&
+        sidebarRect.bottom <= viewportRect.bottom,
+      sidebarRightGap: viewportRect.right - sidebarRect.right,
+    };
+  });
+
+  expect(metrics).not.toBeNull();
+  expect(metrics?.scrollHeight).toBe(metrics?.innerHeight);
+  expect(metrics?.sidebarInsideViewport).toBe(true);
+  expect(metrics?.sidebarRightGap ?? 0).toBeGreaterThan(48);
+  expect(metrics?.hasReloadButton).toBe(false);
 });
 
-test('keeps tree and scene selection in sync and shows hover card details', async ({ page }) => {
+test('keeps tree and scene selection in sync inside the overlaid sidebar', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
-  const currentSnapshotRef = { value: await loadViewSnapshotFixture('populated') };
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
   await installApiRoutes(page, currentSnapshotRef);
 
   await page.goto('/');
@@ -178,136 +263,119 @@ test('keeps tree and scene selection in sync and shows hover card details', asyn
   ).resolves.toBe('router-core');
 });
 
-test('uses label clicks for folder toggle plus selection while keeping toggle buttons collapse-only and rows compact', async ({
+test('uses the discovery icon for manual refresh, resets to busy state, and surfaces failures by tooltip', async ({
   page,
 }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
-  const currentSnapshotRef = { value: await loadViewSnapshotFixture('populated') };
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  const api = await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const discoveryControl = page.locator('[data-role="discovery-control"]');
+  await page.locator('.floating-action--end').hover();
+  await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('今すぐ再探索');
+
+  await discoveryControl.locator('button').click();
+  expect(api.getDiscoverCount()).toBe(1);
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('discovering');
+
+  currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
+    discovery_status: {
+      state: 'ready',
+      message: null,
+    },
+    next_auto_discovery_at_ms: Date.now() + 60_000,
+  });
+  await page.evaluate((snapshot) => {
+    return (
+      window as Window & { __latticeSocketTest?: { send: (payload: unknown) => boolean } }
+    ).__latticeSocketTest?.send(snapshot);
+  }, currentSnapshotRef.value);
+
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('ready');
+  expect((await discoveryControlMetrics(page))?.progress ?? 0).toBeGreaterThan(0.95);
+
+  currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
+    discovery_status: {
+      state: 'failed',
+      message: 'SNMP timeout',
+    },
+    next_auto_discovery_at_ms: Date.now() + 45_000,
+  });
+  await page.evaluate((snapshot) => {
+    return (
+      window as Window & { __latticeSocketTest?: { send: (payload: unknown) => boolean } }
+    ).__latticeSocketTest?.send(snapshot);
+  }, currentSnapshotRef.value);
+
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('failed');
+  await page.locator('.floating-action--end').hover();
+  await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('SNMP timeout');
+});
+
+test('switches the sidebar to a drawer on narrow screens', async ({ page }) => {
+  await page.setViewportSize({ width: 900, height: 700 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
   await installApiRoutes(page, currentSnapshotRef);
 
   await page.goto('/');
   await waitForViewer(page);
 
-  const rootRow = page.locator('[data-entry-id="tree:seed:192.0.2.1/router-core#1"]');
-  const rootLabel = rootRow.locator('.tree-row__label');
-  const rootToggle = rootRow.locator('.tree-toggle');
+  const overlay = page.locator('[data-role="sidebar-overlay"]');
+  const toggle = page.locator('[data-role="sidebar-toggle"]');
 
-  const openToggleGlyph = await rootToggle.evaluate((toggle) => {
-    const before = getComputedStyle(toggle, '::before');
-    const after = getComputedStyle(toggle, '::after');
-    return {
-      beforeWidth: Number.parseFloat(before.width),
-      beforeHeight: Number.parseFloat(before.height),
-      afterWidth: Number.parseFloat(after.width),
-      afterHeight: Number.parseFloat(after.height),
-      afterOpacity: Number.parseFloat(after.opacity),
-    };
-  });
+  await expect(toggle).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+        return sidebar instanceof HTMLElement ? Number.parseFloat(getComputedStyle(sidebar).opacity) : null;
+      })
+    )
+    .toBe(0);
 
-  expect(openToggleGlyph.beforeWidth).toBeGreaterThan(openToggleGlyph.beforeHeight);
-  expect(openToggleGlyph.afterHeight).toBeGreaterThan(openToggleGlyph.afterWidth);
-  expect(openToggleGlyph.afterOpacity).toBe(0);
+  await toggle.click();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+        return sidebar instanceof HTMLElement ? Number.parseFloat(getComputedStyle(sidebar).opacity) : null;
+      })
+    )
+    .toBe(1);
 
-  const headerMetrics = await page.evaluate(() => {
-    const panel = document.querySelector('.panel--info');
-    const header = document.querySelector('.panel--info .panel__header');
-    const tree = document.querySelector('.panel--info .tree');
-    if (
-      !(panel instanceof HTMLElement) ||
-      !(header instanceof HTMLElement) ||
-      !(tree instanceof HTMLElement)
-    ) {
-      return null;
-    }
-
-    const panelRect = panel.getBoundingClientRect();
-    const headerRect = header.getBoundingClientRect();
-    const treeRect = tree.getBoundingClientRect();
-    return {
-      gapBelowHeader: treeRect.top - headerRect.bottom,
-      headerHeight: headerRect.height,
-      gapAbovePanelBottom: panelRect.bottom - treeRect.bottom,
-      panelHeight: panelRect.height,
-      treeHeight: treeRect.height,
-    };
-  });
-
-  expect(headerMetrics).not.toBeNull();
-  expect(headerMetrics?.gapBelowHeader ?? Number.POSITIVE_INFINITY).toBeLessThan(20);
-  expect(headerMetrics?.headerHeight ?? Number.POSITIVE_INFINITY).toBeLessThan(60);
-  expect(headerMetrics?.gapAbovePanelBottom ?? Number.POSITIVE_INFINITY).toBeLessThan(24);
-  expect(
-    (headerMetrics?.treeHeight ?? 0) / Math.max(headerMetrics?.panelHeight ?? 1, 1)
-  ).toBeGreaterThan(0.75);
-
-  await expect(
-    page.evaluate(() => window.__latticeViewer?.getState().selectedEntryId ?? null)
-  ).resolves.toBeNull();
-
-  await rootToggle.click();
-  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
-  await expect(
-    page.evaluate(() => window.__latticeViewer?.getState().selectedEntryId ?? null)
-  ).resolves.toBeNull();
-
-  const closedToggleGlyph = await rootToggle.evaluate((toggle) => {
-    const after = getComputedStyle(toggle, '::after');
-    return {
-      afterWidth: Number.parseFloat(after.width),
-      afterHeight: Number.parseFloat(after.height),
-    };
-  });
-
-  await expect(rootToggle).not.toHaveClass(/is-open/);
-  expect(closedToggleGlyph.afterHeight).toBeGreaterThan(closedToggleGlyph.afterWidth);
-
-  const collapsedMetrics = await page.evaluate(() => {
-    const tree = document.querySelector('.tree');
-    const row = document.querySelector('.tree-row');
-    if (!(tree instanceof HTMLElement) || !(row instanceof HTMLElement)) {
-      return null;
-    }
-
-    const treeRect = tree.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    return {
-      rowHeight: rowRect.height,
-      topOffset: rowRect.top - treeRect.top,
-      treeHeight: treeRect.height,
-    };
-  });
-
-  expect(collapsedMetrics).not.toBeNull();
-  expect(collapsedMetrics?.topOffset ?? Number.POSITIVE_INFINITY).toBeLessThan(12);
-  expect(collapsedMetrics?.rowHeight ?? Number.POSITIVE_INFINITY).toBeLessThan(80);
-  expect(collapsedMetrics?.treeHeight ?? 0).toBeGreaterThan(collapsedMetrics?.rowHeight ?? 0);
-
-  await rootToggle.click();
-  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(1);
-  await expect(
-    page.evaluate(() => window.__latticeViewer?.getState().selectedEntryId ?? null)
-  ).resolves.toBeNull();
-
-  await rootLabel.click();
-  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
-  await expect(rootRow).toHaveClass(/is-selected/);
-  await expect(
-    page.evaluate(() => window.__latticeViewer?.getState().selectedEntryId)
-  ).resolves.toBe('tree:seed:192.0.2.1/router-core#1');
-
-  await rootLabel.click();
-  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(1);
-  await expect(rootRow).toHaveClass(/is-selected/);
-  await expect(
-    page.evaluate(() => window.__latticeViewer?.getState().selectedEntryId)
-  ).resolves.toBe('tree:seed:192.0.2.1/router-core#1');
+  await overlay.locator('[data-device-id="guest-app"] .tree-row__label').click();
+  await expect(page.locator('[data-device-id="guest-app"].is-selected')).toBeVisible();
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+        return sidebar instanceof HTMLElement ? Number.parseFloat(getComputedStyle(sidebar).opacity) : null;
+      })
+    )
+    .toBe(0);
 });
 
-test('preserves collapsed state on websocket updates and falls back to polling when the socket closes', async ({
-  page,
-}) => {
+test('preserves collapsed state across websocket and polling updates', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
-  const currentSnapshotRef = { value: await loadViewSnapshotFixture('populated') };
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
   await installApiRoutes(page, currentSnapshotRef);
 
   await page.goto('/');
@@ -316,54 +384,30 @@ test('preserves collapsed state on websocket updates and falls back to polling w
   await page.locator('[data-entry-id="tree:seed:192.0.2.1/router-core#1"] .tree-toggle').click();
   await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
 
-  const websocketSnapshot = {
-    ...currentSnapshotRef.value,
-    discovery_status: {
-      state: 'ready',
-      message: 'websocket snapshot loaded',
-    },
-  } satisfies ViewSnapshot;
-
-  await page.evaluate((snapshot) => {
-    return (window as Window & { __latticeSocketTest?: { send: (payload: unknown) => boolean } }).__latticeSocketTest?.send(snapshot);
-  }, websocketSnapshot);
-  await expect(page.getByText('websocket snapshot loaded')).toBeVisible();
-  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
-
-  currentSnapshotRef.value = {
-    ...currentSnapshotRef.value,
-    discovery_status: {
-      state: 'ready',
-      message: 'polling snapshot loaded',
-    },
-  };
-  await page.evaluate(() => {
-    return (window as Window & { __latticeSocketTest?: { close: () => boolean } }).__latticeSocketTest?.close();
+  const websocketSnapshot = scheduledSnapshot(currentSnapshotRef.value, {
+    next_auto_discovery_at_ms: Date.now() + 30_000,
   });
-  await expect(page.getByText('polling snapshot loaded')).toBeVisible({ timeout: 5000 });
-});
-
-test('keeps the rediscover and reload controls wired', async ({ page }) => {
-  await installTestHooks(page);
-  const currentSnapshotRef = { value: await loadViewSnapshotFixture('populated') };
-  const api = await installApiRoutes(page, currentSnapshotRef);
-
-  await page.goto('/');
-  await waitForViewer(page);
-
-  currentSnapshotRef.value = {
-    ...currentSnapshotRef.value,
-    discovery_status: {
-      state: 'ready',
-      message: 'discover refresh loaded',
-    },
-  };
-  await page.getByRole('button', { name: '再探索' }).click();
-  await expect(page.getByText('discover refresh loaded')).toBeVisible();
-  expect(api.getDiscoverCount()).toBe(1);
-
-  await page.getByRole('button', { name: '再読込' }).click();
+  await page.evaluate((snapshot) => {
+    return (
+      window as Window & { __latticeSocketTest?: { send: (payload: unknown) => boolean } }
+    ).__latticeSocketTest?.send(snapshot);
+  }, websocketSnapshot);
+  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
   await expect(
-    page.evaluate(() => (window as Window & { __latticeReloadCount?: number }).__latticeReloadCount ?? 0)
-  ).resolves.toBe(1);
+    page.evaluate(() => window.__latticeViewer?.getState().nextAutoDiscoveryAtMs)
+  ).resolves.toBe(websocketSnapshot.next_auto_discovery_at_ms);
+
+  currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
+    next_auto_discovery_at_ms: Date.now() + 15_000,
+  });
+  await page.evaluate(() => {
+    return (
+      window as Window & { __latticeSocketTest?: { close: () => boolean } }
+    ).__latticeSocketTest?.close();
+  });
+
+  await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__latticeViewer?.getState().nextAutoDiscoveryAtMs))
+    .toBe(currentSnapshotRef.value.next_auto_discovery_at_ms);
 });

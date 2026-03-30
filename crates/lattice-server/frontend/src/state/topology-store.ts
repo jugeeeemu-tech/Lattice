@@ -5,8 +5,6 @@ import {
   buildHoverCardForDevice,
   buildHoverCardForEntry,
   buildHoverCardForLink,
-  buildStatusMessage,
-  buildSummaryText,
   buildTopologyModel,
   computeUpstreamPath,
   entryMetaText,
@@ -15,22 +13,23 @@ import {
   preferredEntryForDevice,
   preferredRowForDevice,
   type SidebarEntry,
-  statusLabel,
-  STATUS_THEME,
   type DerivedTopologyModel,
   type EmptyState,
   type HoverCardState,
   type PathState,
 } from '../topology/view-model';
+import type { DiscoveryState } from '../model/view-snapshot';
 
 export type HoverSource = 'scene' | 'tree' | null;
 export type SnapshotSource = 'boot' | 'http' | 'polling' | 'ws';
 export type TransportMode = 'idle' | 'polling' | 'websocket';
 
 export interface TopologyStoreState {
+  autoDiscoveryIntervalSeconds: number;
   collapsedEntryIds: ReadonlySet<string>;
-  discoverButtonDisabled: boolean;
-  discoverButtonLabel: string;
+  deviceCount: number;
+  discoveryMessage: string | null;
+  discoveryState: DiscoveryState;
   emptyState: EmptyState | null;
   hoveredEntryPeers: ReadonlySet<string>;
   hoveredPath: PathState;
@@ -42,6 +41,7 @@ export interface TopologyStoreState {
   hoveredLinkId: string | null;
   hoveredRowId: string | null;
   model: DerivedTopologyModel;
+  nextAutoDiscoveryAtMs: number | null;
   selectedDeviceId: string | null;
   selectedEntryId: string | null;
   selectedEntryPeers: ReadonlySet<string>;
@@ -49,15 +49,12 @@ export interface TopologyStoreState {
   selectedPathEntryIds: ReadonlySet<string>;
   selectedRowId: string | null;
   snapshot: ViewSnapshot;
-  statusLabel: string;
-  statusMessage: string;
-  statusTheme: { bg: string; fg: string; label: string };
-  summaryText: string;
   transport: {
     mode: TransportMode;
     note: string;
   };
   viewportReady: boolean;
+  visibleLinkCount: number;
 }
 
 type Listener = (state: TopologyStoreState) => void;
@@ -387,9 +384,11 @@ export class TopologyStore {
     const statusState = this.#snapshot.discovery_status.state;
 
     return {
+      autoDiscoveryIntervalSeconds: this.#snapshot.auto_discovery_interval_seconds,
       collapsedEntryIds: new Set(this.#collapsedEntryIds),
-      discoverButtonDisabled: statusState === 'discovering',
-      discoverButtonLabel: statusState === 'discovering' ? '探索中' : '再探索',
+      deviceCount: this.#snapshot.devices.length,
+      discoveryMessage: this.#snapshot.discovery_status.message ?? null,
+      discoveryState: statusState,
       emptyState: buildEmptyState(this.#snapshot, this.#model.sceneDeviceIds.size),
       hoveredDeviceId: this.#hoveredDeviceId,
       hoveredEntryId: this.#hoveredEntryId,
@@ -403,6 +402,7 @@ export class TopologyStore {
       hoverCard: this.#computeHoverCard(),
       hoverSource: this.#hoverSource,
       model: this.#model,
+      nextAutoDiscoveryAtMs: this.#snapshot.next_auto_discovery_at_ms ?? null,
       selectedDeviceId: this.#selectedDeviceId,
       selectedEntryId: this.#selectedEntryId,
       selectedEntryPeers: new Set(
@@ -412,12 +412,9 @@ export class TopologyStore {
       selectedPathEntryIds: pathEntryIdsForRow(this.#model, this.#selectedRowId),
       selectedRowId: this.#selectedRowId,
       snapshot: this.#snapshot,
-      statusLabel: statusLabel(statusState),
-      statusMessage: buildStatusMessage(this.#snapshot),
-      statusTheme: STATUS_THEME[statusState],
-      summaryText: buildSummaryText(this.#model),
       transport: { ...this.#transport },
       viewportReady: this.#model.sceneDeviceIds.size > 0,
+      visibleLinkCount: this.#snapshot.links.length,
     };
   }
 }

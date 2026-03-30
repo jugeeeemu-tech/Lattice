@@ -9,16 +9,6 @@ import type {
 } from '../model/view-snapshot';
 import { deviceGuestKindLabel } from './device-visuals';
 
-export const STATUS_THEME: Record<
-  DiscoveryState,
-  { bg: string; fg: string; label: string }
-> = {
-  loading: { bg: '#e0ecff', fg: '#0f3e98', label: 'loading' },
-  discovering: { bg: '#fff1da', fg: '#9a4d00', label: 'discovering' },
-  ready: { bg: '#def7ec', fg: '#0f766e', label: 'ready' },
-  failed: { bg: '#fee2e2', fg: '#b42318', label: 'failed' },
-};
-
 const ROLE_LABELS: Record<DeviceRole, string> = {
   bridge: 'Bridge',
   router: 'Router',
@@ -600,27 +590,6 @@ export function deviceSummary(device: ViewDevice): string[] {
   return details;
 }
 
-export function statusLabel(state: DiscoveryState): string {
-  return STATUS_THEME[state]?.label ?? state;
-}
-
-export function buildStatusMessage(snapshot: ViewSnapshot): string {
-  return (
-    snapshot.discovery_status.message ??
-    ({
-      discovering: '前回の構成を維持したまま更新中',
-      failed: '前回の構成を維持しています',
-      loading: '初回探索を待機中',
-      ready: '最新の構成を表示中',
-    } satisfies Record<DiscoveryState, string>)[snapshot.discovery_status.state] ??
-    '状態を取得中'
-  );
-}
-
-export function buildSummaryText(model: DerivedTopologyModel): string {
-  return `${model.sceneDeviceIds.size} scene devices / ${model.visibleLinkIds.size} visible links`;
-}
-
 export function buildEmptyState(
   snapshot: ViewSnapshot,
   sceneDeviceCount: number
@@ -636,7 +605,7 @@ export function buildEmptyState(
         discovering: '最新の構成を組み立てています。完了後に自動で切り替わります。',
         failed:
           snapshot.discovery_status.message ?? '探索に失敗しました。旧構成があればそのまま保持しています。',
-        loading: '初回探索が完了すると、3D ビューと操作ペインが表示されます。',
+        loading: '初回探索が完了すると、3Dビューと構成が表示されます。',
         ready: '可視化できる機器がありません。',
       } satisfies Record<DiscoveryState, string>)[status],
     title:

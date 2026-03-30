@@ -1,14 +1,6 @@
 import { decodeViewSnapshot } from '../topology/decode-view-snapshot';
 import type { TopologyStore } from '../state/topology-store';
 
-declare global {
-  interface Window {
-    __LATTICE_TEST_HOOKS?: {
-      reload?: () => void;
-    };
-  }
-}
-
 export class TopologyTransport {
   #store: TopologyStore;
   #fetchInFlight = false;
@@ -98,14 +90,6 @@ export class TopologyTransport {
       const message = error instanceof Error ? error.message : String(error);
       this.#store.applyFailureState(`Discovery request failed: ${message}`);
     }
-  }
-
-  reloadPage(): void {
-    if (window.__LATTICE_TEST_HOOKS?.reload) {
-      window.__LATTICE_TEST_HOOKS.reload();
-      return;
-    }
-    window.location.reload();
   }
 
   connectWebSocket(force = false): void {
