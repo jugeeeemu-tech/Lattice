@@ -15,6 +15,7 @@ describe('decodeViewSnapshot', () => {
         {
           deployment_type: 'VIRTUAL',
           device_role: 'Server',
+          guest_kind: 'VM',
           id: ' guest-app ',
           identity_keys: {
             mac_addresses: ['aa:bb:cc:dd:ee:ff', 'aa:bb:cc:dd:ee:ff'],
@@ -56,6 +57,7 @@ describe('decodeViewSnapshot', () => {
           deployment_type: 'virtual',
           device_role: 'server',
           depth: 0,
+          guest_kind: 'vm',
           host_label: null,
           id: 'guest-app',
           identity_keys: {
@@ -94,5 +96,27 @@ describe('decodeViewSnapshot', () => {
       tree_edges: [{ child_row_id: 'row-1', parent_row_id: 'root-1' }],
       tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'Unknown' }],
     });
+  });
+
+  it('normalizes an unknown guest kind to null', () => {
+    const decoded = decodeViewSnapshot({
+      devices: [
+        {
+          id: 'device-1',
+          label: 'device-1',
+          device_role: 'server',
+          deployment_type: 'virtual',
+          guest_kind: 'pod',
+          identity_keys: {
+            mac_addresses: [],
+          },
+        },
+      ],
+      discovery_status: {
+        state: 'ready',
+      },
+    });
+
+    expect(decoded.devices[0]?.guest_kind).toBeNull();
   });
 });

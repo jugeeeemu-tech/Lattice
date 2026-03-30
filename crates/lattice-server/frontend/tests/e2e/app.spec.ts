@@ -166,7 +166,7 @@ test('keeps tree and scene selection in sync and shows hover card details', asyn
   await expect(hoverCard).toBeVisible();
   await expect(hoverCard.locator('[data-role="hover-title"]')).toHaveText('vm-app-01');
   await expect(hoverCard.locator('[data-role="hover-body"]')).toHaveText(
-    'Server · Virtual · pve-01 上'
+    'Server · VM · Virtual · pve-01 上'
   );
   await page.locator('.tree').dispatchEvent('pointerleave');
   await expect(hoverCard).toBeHidden();

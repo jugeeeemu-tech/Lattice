@@ -31,6 +31,7 @@
       "depth": 2,
       "device_role": "server",
       "deployment_type": "virtual",
+      "guest_kind": "vm",
       "identity_keys": {
         "sys_name": "vm-app-01",
         "mgmt_ip": "192.0.2.101",

@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   buildTopologyModel,
   computeUpstreamPath,
+  deviceSummary,
   entryMetaText,
   guestAttachmentNetworkColor,
 } from '../../src/topology/view-model';
@@ -19,7 +20,7 @@ describe('buildTopologyModel', () => {
     ]);
     expect(
       entryMetaText(model, model.sidebarEntryById.get('tree:seed:192.0.2.1/guest-app#1')!)
-    ).toBe('Server · pve-01 上');
+    ).toBe('Server · VM · pve-01 上');
     expect(Array.from(model.visibleLinkIds)).toEqual(['link-core-pve', 'link-pve-guest']);
   });
 
@@ -56,5 +57,20 @@ describe('buildTopologyModel', () => {
       color: guestAttachmentNetworkColor(extendedSnapshot.links[1]?.guest_attachment ?? null),
       trunkLinkId: 'link-pve-router-trunk',
     });
+  });
+
+  it('includes VM and container labels in device summaries when guest kind is present', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const vmSummary = deviceSummary(snapshot.devices.find((device) => device.id === 'guest-app')!);
+
+    expect(vmSummary).toEqual(['Server', 'VM', 'Virtual', 'pve-01 上']);
+
+    const containerSummary = deviceSummary({
+      ...snapshot.devices.find((device) => device.id === 'guest-app')!,
+      guest_kind: 'container',
+      label: 'ct-app-01',
+    });
+
+    expect(containerSummary).toEqual(['Server', 'Container', 'Virtual', 'pve-01 上']);
   });
 });

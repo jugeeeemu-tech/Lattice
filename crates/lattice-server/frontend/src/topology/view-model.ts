@@ -7,6 +7,7 @@ import type {
   ViewLink,
   ViewSnapshot,
 } from '../model/view-snapshot';
+import { deviceGuestKindLabel } from './device-visuals';
 
 export const STATUS_THEME: Record<
   DiscoveryState,
@@ -574,6 +575,10 @@ export function entryMetaText(model: DerivedTopologyModel, entry: SidebarEntry):
   if (device.device_role !== 'unknown') {
     fragments.push(roleLabel(device.device_role));
   }
+  const guestLabel = deviceGuestKindLabel(device);
+  if (guestLabel) {
+    fragments.push(guestLabel);
+  }
   if (device.host_label) {
     fragments.push(`${device.host_label} 上`);
   }
@@ -582,6 +587,10 @@ export function entryMetaText(model: DerivedTopologyModel, entry: SidebarEntry):
 
 export function deviceSummary(device: ViewDevice): string[] {
   const details = [roleLabel(device.device_role)];
+  const guestLabel = deviceGuestKindLabel(device);
+  if (guestLabel) {
+    details.push(guestLabel);
+  }
   if (device.deployment_type !== 'unknown') {
     details.push(deploymentLabel(device.deployment_type));
   }
@@ -694,21 +703,6 @@ export function guestAttachmentNetworkColor(
   }
 
   return hslToHex(hash01(`${attachment.bridge_name}:${attachment.vlan_tag}`), 0.68, 0.56);
-}
-
-export function layoutRadiusForDevice(device: ViewDevice | null | undefined): number {
-  switch (device?.device_role) {
-    case 'bridge':
-      return 1.7;
-    case 'router':
-      return 1.5;
-    case 'switch':
-      return 1.45;
-    case 'server':
-      return 1.3;
-    default:
-      return 1.35;
-  }
 }
 
 export function formatSpeed(speedBps: number | null | undefined): string | null {

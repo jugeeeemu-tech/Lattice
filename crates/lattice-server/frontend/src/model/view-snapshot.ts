@@ -1,6 +1,7 @@
 export type DiscoveryState = 'loading' | 'discovering' | 'ready' | 'failed';
 export type DeviceRole = 'router' | 'switch' | 'bridge' | 'server' | 'unknown';
 export type DeploymentType = 'physical' | 'virtual' | 'unknown';
+export type GuestKind = 'vm' | 'container';
 
 export interface DiscoveryStatus {
   state: DiscoveryState;
@@ -20,6 +21,7 @@ export interface ViewDevice {
   depth: number;
   device_role: DeviceRole;
   deployment_type: DeploymentType;
+  guest_kind: GuestKind | null;
   identity_keys: IdentityKeys;
   host_label?: string | null;
   upstream_interface?: string | null;

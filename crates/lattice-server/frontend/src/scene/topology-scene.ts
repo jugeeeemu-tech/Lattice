@@ -17,7 +17,6 @@ import {
   MeshBasicMaterial,
   MeshStandardMaterial,
   Object3D,
-  OctahedronGeometry,
   PerspectiveCamera,
   Raycaster,
   Scene,
@@ -34,8 +33,8 @@ import {
   computeUpstreamPath,
   deploymentColor,
   guestAttachmentNetworkColor,
-  layoutRadiusForDevice,
 } from '../topology/view-model';
+import { deviceVisualSpec, layoutRadiusForDevice } from '../topology/device-visuals';
 
 type SceneHoverTarget =
   | { deviceId: string; kind: 'device' }
@@ -649,7 +648,7 @@ export class TopologySceneAdapter {
 
   #createDeviceGroup(device: ViewDevice): DeviceGroup {
     const group = new Group() as DeviceGroup;
-    const geometry = this.#createRoleGeometry(device.device_role);
+    const geometry = this.#createDeviceGeometry(device);
     const material = new MeshStandardMaterial({
       color: deploymentColor(device.deployment_type),
       emissive: 0x000000,
@@ -686,18 +685,20 @@ export class TopologySceneAdapter {
     return group;
   }
 
-  #createRoleGeometry(role: ViewDevice['device_role']): BufferGeometry {
-    switch (role) {
-      case 'router':
-        return new OctahedronGeometry(1.08, 0);
-      case 'switch':
-        return new BoxGeometry(1.7, 0.9, 1.1);
-      case 'server':
-        return new BoxGeometry(1.02, 1.9, 0.92);
-      case 'bridge':
-        return new BoxGeometry(2.0, 0.28, 1.15);
+  #createDeviceGeometry(device: ViewDevice): BufferGeometry {
+    const spec = deviceVisualSpec(device);
+    switch (spec.shape.kind) {
+      case 'box':
+        return new BoxGeometry(spec.shape.width, spec.shape.height, spec.shape.depth);
+      case 'cylinder':
+        return new CylinderGeometry(
+          spec.shape.radiusTop,
+          spec.shape.radiusBottom,
+          spec.shape.height,
+          spec.shape.radialSegments
+        );
       default:
-        return new IcosahedronGeometry(0.98, 0);
+        return new IcosahedronGeometry(spec.shape.radius, spec.shape.detail);
     }
   }
 

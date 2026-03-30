@@ -3,6 +3,7 @@ import type {
   DeviceRole,
   DiscoveryState,
   DiscoveryStatus,
+  GuestKind,
   IdentityKeys,
   TreeEdge,
   TreeRow,
@@ -72,6 +73,18 @@ function normalizeDeploymentType(value: unknown): DeploymentType {
   }
 
   return 'unknown';
+}
+
+function normalizeGuestKind(value: unknown): GuestKind | null {
+  const guestKind = normalizeText(value, '')
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+
+  if (guestKind === 'vm' || guestKind === 'container') {
+    return guestKind;
+  }
+
+  return null;
 }
 
 function normalizeDiscoveryState(value: unknown): DiscoveryState {
@@ -157,6 +170,7 @@ function normalizeDevice(rawDevice: unknown): ViewDevice {
     depth: Math.max(0, toNumber(device.depth, 0)),
     device_role: normalizeDeviceRole(device.device_role),
     deployment_type: normalizeDeploymentType(device.deployment_type),
+    guest_kind: normalizeGuestKind(device.guest_kind),
     identity_keys: identityKeys,
     host_label: normalizeText(device.host_label, '') || null,
     upstream_interface: normalizeText(device.upstream_interface, '') || null,
