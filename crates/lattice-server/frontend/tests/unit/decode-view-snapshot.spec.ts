@@ -7,6 +7,8 @@ describe('decodeViewSnapshot', () => {
     expect(EMPTY_SNAPSHOT.discovery_status.state).toBe('loading');
     expect(EMPTY_SNAPSHOT.devices).toEqual([]);
     expect(EMPTY_SNAPSHOT.links).toEqual([]);
+    expect(EMPTY_SNAPSHOT.auto_discovery_interval_seconds).toBe(60);
+    expect(EMPTY_SNAPSHOT.next_auto_discovery_at_ms).toBeNull();
   });
 
   it('normalizes incoming payloads into the frontend snapshot shape', () => {
@@ -29,6 +31,8 @@ describe('decodeViewSnapshot', () => {
         kind: 'READY',
         reason: ' synced ',
       },
+      auto_discovery_interval_seconds: '90',
+      next_auto_discovery_at_ms: '1744000000000',
       links: [
         {
           guest_attachment: {
@@ -74,6 +78,8 @@ describe('decodeViewSnapshot', () => {
         message: 'synced',
         state: 'ready',
       },
+      auto_discovery_interval_seconds: 90,
+      next_auto_discovery_at_ms: 1744000000000,
       links: [
         {
           guest_attachment: {
@@ -115,8 +121,10 @@ describe('decodeViewSnapshot', () => {
       discovery_status: {
         state: 'ready',
       },
+      auto_discovery_interval_seconds: 0,
     });
 
     expect(decoded.devices[0]?.guest_kind).toBeNull();
+    expect(decoded.auto_discovery_interval_seconds).toBe(60);
   });
 });

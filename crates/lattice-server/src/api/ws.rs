@@ -24,7 +24,9 @@ async fn handle_socket(mut socket: WebSocket, coordinator: Arc<super::DiscoveryC
     let mut receiver = coordinator.subscribe();
     loop {
         match receiver.recv().await {
-            Ok(DiscoveryEvent::Completed) | Ok(DiscoveryEvent::Failed) => {
+            Ok(DiscoveryEvent::Started)
+            | Ok(DiscoveryEvent::Completed)
+            | Ok(DiscoveryEvent::Failed) => {
                 if send_snapshot(&mut socket, &coordinator).await.is_err() {
                     break;
                 }

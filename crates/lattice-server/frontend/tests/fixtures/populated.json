@@ -100,6 +100,8 @@
     "proxmox-host": "seed:192.0.2.1/proxmox-host#1",
     "guest-app": "seed:192.0.2.1/guest-app#1"
   },
+  "auto_discovery_interval_seconds": 60,
+  "next_auto_discovery_at_ms": 4102444800000,
   "discovery_status": {
     "state": "ready",
     "message": "fixture snapshot loaded"

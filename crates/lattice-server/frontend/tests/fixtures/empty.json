@@ -4,6 +4,8 @@
   "tree_rows": [],
   "tree_edges": [],
   "primary_row_by_device": {},
+  "auto_discovery_interval_seconds": 60,
+  "next_auto_discovery_at_ms": null,
   "discovery_status": {
     "state": "loading"
   }

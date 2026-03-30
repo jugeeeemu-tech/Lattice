@@ -76,8 +76,11 @@ async fn run_serve(
         config.discovery.clone(),
         config.sources.clone(),
     ));
-    let coordinator = Arc::new(DiscoveryCoordinator::new(engine));
-    coordinator.start_initial_discovery();
+    let coordinator = Arc::new(DiscoveryCoordinator::new(
+        engine,
+        config.discovery.auto_discovery_interval_seconds,
+    ));
+    coordinator.start();
 
     let listener = TcpListener::bind(&bind_addr).await?;
     println!("Lattice is running at http://{}", bind_addr);

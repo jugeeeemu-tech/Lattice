@@ -64,4 +64,6 @@ export interface ViewSnapshot {
   tree_edges: TreeEdge[];
   primary_row_by_device: Record<string, string>;
   discovery_status: DiscoveryStatus;
+  auto_discovery_interval_seconds: number;
+  next_auto_discovery_at_ms?: number | null;
 }

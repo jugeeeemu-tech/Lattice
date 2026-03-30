@@ -20,6 +20,8 @@ export const EMPTY_SNAPSHOT: ViewSnapshot = Object.freeze({
   tree_edges: [],
   primary_row_by_device: {},
   discovery_status: { state: 'loading' as const, message: null },
+  auto_discovery_interval_seconds: 60,
+  next_auto_discovery_at_ms: null,
 });
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -49,6 +51,20 @@ function firstNonEmptyText(...values: unknown[]): string | null {
 function toNumber(value: unknown, fallback = 0): number {
   const number = Number(value);
   return Number.isFinite(number) ? number : fallback;
+}
+
+function normalizePositiveWholeNumber(value: unknown, fallback: number): number {
+  const normalized = Math.floor(toNumber(value, fallback));
+  return normalized >= 1 ? normalized : fallback;
+}
+
+function normalizeTimestamp(value: unknown): number | null {
+  if (value === null || value === undefined || value === '') {
+    return null;
+  }
+
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
 }
 
 function normalizeDeviceRole(value: unknown): DeviceRole {
@@ -263,5 +279,10 @@ export function decodeViewSnapshot(rawSnapshot: unknown): ViewSnapshot {
         .filter(([deviceId, rowId]) => deviceId.length > 0 && rowId.length > 0)
     ),
     discovery_status: normalizeDiscoveryStatus(snapshot.discovery_status),
+    auto_discovery_interval_seconds: normalizePositiveWholeNumber(
+      snapshot.auto_discovery_interval_seconds,
+      60
+    ),
+    next_auto_discovery_at_ms: normalizeTimestamp(snapshot.next_auto_discovery_at_ms),
   };
 }

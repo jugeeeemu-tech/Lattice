@@ -54,6 +54,8 @@ pub struct DiscoveryConfig {
     pub retries: u32,
     #[serde(default = "default_concurrent_devices")]
     pub concurrent_devices: usize,
+    #[serde(default = "default_auto_discovery_interval_seconds")]
+    pub auto_discovery_interval_seconds: u64,
 }
 
 impl Default for DiscoveryConfig {
@@ -63,6 +65,7 @@ impl Default for DiscoveryConfig {
             timeout_seconds: default_timeout_seconds(),
             retries: default_retries(),
             concurrent_devices: default_concurrent_devices(),
+            auto_discovery_interval_seconds: default_auto_discovery_interval_seconds(),
         }
     }
 }
@@ -177,6 +180,10 @@ const fn default_concurrent_devices() -> usize {
     1
 }
 
+const fn default_auto_discovery_interval_seconds() -> u64 {
+    60
+}
+
 fn default_snmp_version() -> String {
     "2c".to_string()
 }
@@ -201,6 +208,7 @@ mod tests {
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.discovery.max_hops, 10);
+        assert_eq!(config.discovery.auto_discovery_interval_seconds, 60);
         assert_eq!(config.sources.len(), 2);
 
         let SourceConfig::Snmp(snmp) = &config.sources[0] else {
@@ -227,6 +235,7 @@ mod tests {
 
         assert_eq!(json["server"]["host"], "127.0.0.1");
         assert_eq!(json["discovery"]["max_hops"], 10);
+        assert_eq!(json["discovery"]["auto_discovery_interval_seconds"], 60);
         assert_eq!(json["sources"][0]["kind"], "snmp");
         assert_eq!(json["sources"][1]["kind"], "proxmox");
     }

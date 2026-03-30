@@ -113,10 +113,17 @@ pub struct ViewSnapshot {
     pub tree_edges: Vec<TreeEdge>,
     pub primary_row_by_device: HashMap<String, String>,
     pub discovery_status: DiscoveryStatus,
+    pub auto_discovery_interval_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_auto_discovery_at_ms: Option<i64>,
 }
 
 impl ViewSnapshot {
-    pub fn empty(status: DiscoveryStatus) -> Self {
+    pub fn empty(
+        status: DiscoveryStatus,
+        auto_discovery_interval_seconds: u64,
+        next_auto_discovery_at_ms: Option<i64>,
+    ) -> Self {
         Self {
             devices: Vec::new(),
             links: Vec::new(),
@@ -124,6 +131,8 @@ impl ViewSnapshot {
             tree_edges: Vec::new(),
             primary_row_by_device: HashMap::new(),
             discovery_status: status,
+            auto_discovery_interval_seconds,
+            next_auto_discovery_at_ms,
         }
     }
 }
@@ -132,6 +141,8 @@ pub fn build_view_snapshot(
     topology: &Topology,
     tree: &DiscoveryTree,
     status: &DiscoveryStatus,
+    auto_discovery_interval_seconds: u64,
+    next_auto_discovery_at_ms: Option<i64>,
 ) -> ViewSnapshot {
     let min_depth_by_device = build_min_depths(tree);
     let devices = build_devices(topology, &min_depth_by_device);
@@ -145,6 +156,8 @@ pub fn build_view_snapshot(
         tree_edges,
         primary_row_by_device,
         discovery_status: status.clone(),
+        auto_discovery_interval_seconds,
+        next_auto_discovery_at_ms,
     }
 }
 
@@ -433,10 +446,18 @@ mod tests {
             ],
         };
 
-        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready());
+        let snapshot = build_view_snapshot(
+            &topology,
+            &tree,
+            &DiscoveryStatus::ready(),
+            60,
+            Some(1_744_000_000_000),
+        );
 
         assert_eq!(snapshot.devices.len(), 3);
         assert_eq!(snapshot.tree_rows.len(), 4);
+        assert_eq!(snapshot.auto_discovery_interval_seconds, 60);
+        assert_eq!(snapshot.next_auto_discovery_at_ms, Some(1_744_000_000_000));
         assert_eq!(
             snapshot.primary_row_by_device["proxmox:pve-1:qemu:100"],
             "seed:192.0.2.2/proxmox:pve-1:qemu:100#1"
@@ -465,8 +486,8 @@ mod tests {
             ],
         };
 
-        let first = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready());
-        let second = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready());
+        let first = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
+        let second = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
 
         assert_eq!(first.tree_rows, second.tree_rows);
         assert_eq!(first.primary_row_by_device, second.primary_row_by_device);
@@ -494,7 +515,7 @@ mod tests {
             ],
         };
 
-        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready());
+        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
 
         assert_eq!(
             snapshot
@@ -528,6 +549,8 @@ mod tests {
             &topology,
             &DiscoveryTree::default(),
             &DiscoveryStatus::ready(),
+            60,
+            None,
         );
         let value = serde_json::to_value(&snapshot).unwrap();
 
@@ -592,6 +615,8 @@ mod tests {
             &topology,
             &DiscoveryTree::default(),
             &DiscoveryStatus::ready(),
+            60,
+            None,
         );
 
         assert_eq!(snapshot.links.len(), 1);
@@ -701,6 +726,8 @@ mod tests {
             &topology,
             &DiscoveryTree::default(),
             &DiscoveryStatus::ready(),
+            60,
+            None,
         );
 
         assert_eq!(
@@ -764,6 +791,8 @@ mod tests {
             &topology,
             &DiscoveryTree::default(),
             &DiscoveryStatus::ready(),
+            60,
+            None,
         );
 
         assert_eq!(snapshot.links.len(), 1);

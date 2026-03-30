@@ -84,8 +84,12 @@ mod tests {
     use super::*;
 
     fn test_state() -> AppState {
-        let engine = Arc::new(DiscoveryEngine::new(DiscoveryConfig::default(), Vec::new()));
-        let coordinator = Arc::new(DiscoveryCoordinator::new(engine));
+        let config = DiscoveryConfig::default();
+        let engine = Arc::new(DiscoveryEngine::new(config.clone(), Vec::new()));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(
+            engine,
+            config.auto_discovery_interval_seconds,
+        ));
         AppState { coordinator }
     }
 
