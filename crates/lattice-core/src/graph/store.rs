@@ -279,6 +279,7 @@ impl GraphStore {
         current.device_role = merge_device_role(current.device_role.clone(), incoming.device_role);
         current.deployment_type =
             merge_deployment_type(current.deployment_type.clone(), incoming.deployment_type);
+        current.guest_kind = incoming.guest_kind.or(current.guest_kind);
         if !incoming.interfaces.is_empty() {
             current.interfaces = merge_interfaces(&current.interfaces, &incoming.interfaces);
         }
@@ -839,6 +840,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Unknown,
             deployment_type: DeploymentType::Unknown,
+            guest_kind: None,
             interfaces: Vec::new(),
             status: DeviceStatus::Up,
             host_label: None,
@@ -1085,6 +1087,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1111,6 +1114,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno1".to_string(),
@@ -1148,6 +1152,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1174,6 +1179,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno9".to_string(),
@@ -1211,6 +1217,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![
                 Interface {
                     if_index: 1,
@@ -1246,6 +1253,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "enp3s0".to_string(),
@@ -1282,6 +1290,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1308,6 +1317,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno7".to_string(),
@@ -1344,6 +1354,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "vmbr0".to_string(),
@@ -1370,6 +1381,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 2,
                 if_name: "eno1".to_string(),
@@ -1396,6 +1408,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 3,
                 if_name: "eno1".to_string(),

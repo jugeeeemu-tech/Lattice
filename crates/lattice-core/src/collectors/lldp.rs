@@ -95,6 +95,7 @@ impl Collector for LldpCollector {
                 model: None,
                 device_role,
                 deployment_type: DeploymentType::Unknown,
+                guest_kind: None,
                 interfaces: Vec::new(),
                 status: DeviceStatus::Unknown,
                 host_label: None,

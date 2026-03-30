@@ -197,6 +197,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Router,
             deployment_type: DeploymentType::Unknown,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),

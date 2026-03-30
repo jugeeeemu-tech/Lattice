@@ -138,6 +138,7 @@ impl Collector for InterfaceCollector {
                 model: None,
                 device_role: DeviceRole::Unknown,
                 deployment_type: DeploymentType::Unknown,
+                guest_kind: None,
                 interfaces,
                 status: DeviceStatus::Unknown,
                 host_label: None,

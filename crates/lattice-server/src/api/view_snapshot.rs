@@ -2,7 +2,7 @@ use std::{cmp::Ordering, collections::HashMap};
 
 use lattice_core::{
     DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode,
-    GuestAttachment as CoreGuestAttachment, IdentityKeys, Link, Topology,
+    GuestAttachment as CoreGuestAttachment, GuestKind, IdentityKeys, Link, Topology,
 };
 use serde::{Deserialize, Serialize};
 
@@ -59,6 +59,8 @@ pub struct ViewDevice {
     pub depth: u32,
     pub device_role: DeviceRole,
     pub deployment_type: DeploymentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_kind: Option<GuestKind>,
     pub identity_keys: IdentityKeys,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host_label: Option<String>,
@@ -170,6 +172,7 @@ fn build_devices(
             depth: min_depth_by_device.get(&device.id).copied().unwrap_or(0),
             device_role: device.device_role.clone(),
             deployment_type: device.deployment_type.clone(),
+            guest_kind: device.guest_kind,
             identity_keys: device.identity_keys.clone(),
             host_label: device.host_label.clone(),
             upstream_interface: device.upstream_interface.clone(),
@@ -290,8 +293,8 @@ mod tests {
 
     use chrono::{TimeZone, Utc};
     use lattice_core::{
-        DeploymentType, DeviceRole, DeviceStatus, GuestAttachment, Interface, LinkProtocol,
-        OperStatus,
+        DeploymentType, DeviceRole, DeviceStatus, GuestAttachment, GuestKind, Interface,
+        LinkProtocol, OperStatus,
     };
 
     use super::*;
@@ -301,6 +304,7 @@ mod tests {
         sys_name: &str,
         device_role: DeviceRole,
         deployment_type: DeploymentType,
+        guest_kind: Option<GuestKind>,
         host_label: Option<&str>,
     ) -> Device {
         Device {
@@ -316,6 +320,7 @@ mod tests {
             model: None,
             device_role,
             deployment_type,
+            guest_kind,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),
@@ -344,6 +349,7 @@ mod tests {
                 DeviceRole::Router,
                 DeploymentType::Unknown,
                 None,
+                None,
             ),
         );
         devices.insert(
@@ -353,6 +359,7 @@ mod tests {
                 "vmbr0",
                 DeviceRole::Bridge,
                 DeploymentType::Virtual,
+                None,
                 Some("pve-1"),
             ),
         );
@@ -363,6 +370,7 @@ mod tests {
                 "web",
                 DeviceRole::Server,
                 DeploymentType::Virtual,
+                Some(GuestKind::Vm),
                 Some("pve-1"),
             ),
         );
@@ -493,8 +501,8 @@ mod tests {
                 .devices
                 .iter()
                 .find(|device| device.id == "proxmox:pve-1:qemu:100")
-                .and_then(|device| device.host_label.as_deref()),
-            Some("pve-1")
+                .map(|device| (device.host_label.as_deref(), device.guest_kind)),
+            Some((Some("pve-1"), Some(GuestKind::Vm)))
         );
         assert_eq!(snapshot.tree_edges.len(), 1);
         assert_eq!(snapshot.links[0].protocol, "proxmox_guest_link");
@@ -529,6 +537,12 @@ mod tests {
             .iter()
             .find(|device| device["id"] == "proxmox:pve-1:bridge:vmbr0")
             .unwrap();
+        let guest = value["devices"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|device| device["id"] == "proxmox:pve-1:qemu:100")
+            .unwrap();
 
         assert_eq!(bridge["device_role"], "bridge");
         assert_eq!(bridge["deployment_type"], "virtual");
@@ -537,6 +551,7 @@ mod tests {
             bridge["identity_keys"]["mac_addresses"],
             serde_json::json!(["aa:bb:cc:dd:ee:ff"])
         );
+        assert_eq!(guest["guest_kind"], "vm");
     }
 
     #[test]
@@ -552,6 +567,7 @@ mod tests {
                 "mc01",
                 DeviceRole::Server,
                 DeploymentType::Virtual,
+                Some(GuestKind::Vm),
                 Some("pve-1"),
             ),
         );
@@ -604,6 +620,7 @@ mod tests {
                 "mc01",
                 DeviceRole::Server,
                 DeploymentType::Virtual,
+                Some(GuestKind::Vm),
                 Some("pve-1"),
             ),
         );
@@ -614,6 +631,7 @@ mod tests {
                 "vyos01",
                 DeviceRole::Router,
                 DeploymentType::Virtual,
+                Some(GuestKind::Vm),
                 Some("pve-1"),
             ),
         );
@@ -624,6 +642,7 @@ mod tests {
                 "vyos02",
                 DeviceRole::Router,
                 DeploymentType::Virtual,
+                Some(GuestKind::Vm),
                 Some("pve-1"),
             ),
         );
@@ -711,6 +730,7 @@ mod tests {
                         DeviceRole::Router,
                         DeploymentType::Physical,
                         None,
+                        None,
                     ),
                 ),
                 (
@@ -720,6 +740,7 @@ mod tests {
                         "edge",
                         DeviceRole::Router,
                         DeploymentType::Physical,
+                        None,
                         None,
                     ),
                 ),

@@ -8,8 +8,8 @@ use crate::{
     config::ProxmoxSourceConfig,
     discovery::{DiscoverySource, DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode},
     graph::{
-        DeploymentType, Device, DeviceRole, DeviceStatus, GuestAttachment, IdentityKeys, Interface,
-        Link, LinkProtocol, OperStatus, Topology,
+        DeploymentType, Device, DeviceRole, DeviceStatus, GuestAttachment, GuestKind, IdentityKeys,
+        Interface, Link, LinkProtocol, OperStatus, Topology,
     },
     proxmox::{ClusterResource, GuestNetworkAttachment, ProxmoxApi, ProxmoxApiClient},
 };
@@ -226,6 +226,7 @@ fn build_bridge_device(
         model: None,
         device_role: DeviceRole::Bridge,
         deployment_type: DeploymentType::Virtual,
+        guest_kind: None,
         interfaces,
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
@@ -249,6 +250,7 @@ fn build_node_device(node: &str, node_resource: Option<&ClusterResource>) -> Dev
         model: None,
         device_role: DeviceRole::Server,
         deployment_type: DeploymentType::Physical,
+        guest_kind: None,
         interfaces: Vec::new(),
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
@@ -304,6 +306,11 @@ fn build_guest_device(
         model: None,
         device_role: DeviceRole::Server,
         deployment_type: DeploymentType::Virtual,
+        guest_kind: if resource.is_lxc() {
+            Some(GuestKind::Container)
+        } else {
+            Some(GuestKind::Vm)
+        },
         interfaces,
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
@@ -343,6 +350,7 @@ fn ensure_bridge_device(
         model: None,
         device_role: DeviceRole::Bridge,
         deployment_type: DeploymentType::Virtual,
+        guest_kind: None,
         interfaces: vec![Interface {
             if_index: 0,
             if_name: bridge_name.to_string(),
@@ -406,6 +414,7 @@ mod tests {
 
     use super::*;
     use crate::proxmox::{GuestConfig, GuestNetworkAttachment, NodeNetworkInterface};
+    use crate::GuestKind;
 
     #[derive(Debug, Default)]
     struct FakeApi;
@@ -501,8 +510,15 @@ mod tests {
             .values()
             .any(|device| device.device_role == DeviceRole::Server
                 && device.deployment_type == DeploymentType::Virtual
+                && device.guest_kind == Some(GuestKind::Vm)
                 && device.identity_keys.mac_addresses.as_slice() == ["de:ad:be:ef:00:01"]
                 && device.host_mgmt_ip.as_deref() == Some("192.0.2.10")));
+        assert!(result.topology.devices.values().any(|device| {
+            device.id == "proxmox:pve-1:lxc:200"
+                && device.device_role == DeviceRole::Server
+                && device.deployment_type == DeploymentType::Virtual
+                && device.guest_kind == Some(GuestKind::Container)
+        }));
         assert!(
             result
                 .topology

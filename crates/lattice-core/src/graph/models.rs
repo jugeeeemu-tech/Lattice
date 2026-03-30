@@ -43,6 +43,13 @@ impl Default for DeploymentType {
     }
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestKind {
+    Vm,
+    Container,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum DeviceStatus {
@@ -111,6 +118,8 @@ pub struct Device {
     pub model: Option<String>,
     pub device_role: DeviceRole,
     pub deployment_type: DeploymentType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub guest_kind: Option<GuestKind>,
     pub interfaces: Vec<Interface>,
     pub status: DeviceStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -132,6 +141,7 @@ impl Device {
             model: None,
             device_role: DeviceRole::Unknown,
             deployment_type: DeploymentType::Unknown,
+            guest_kind: None,
             interfaces: Vec::new(),
             status: DeviceStatus::Unknown,
             host_label: None,
@@ -224,6 +234,7 @@ mod tests {
                 model: Some("virtual".to_string()),
                 device_role: DeviceRole::Bridge,
                 deployment_type: DeploymentType::Virtual,
+                guest_kind: Some(GuestKind::Container),
                 interfaces: vec![Interface {
                     if_index: 1,
                     if_name: "vmbr0".to_string(),
@@ -277,6 +288,10 @@ mod tests {
         assert_eq!(
             round_trip.devices["device-1"].host_mgmt_ip.as_deref(),
             Some("192.0.2.10")
+        );
+        assert_eq!(
+            round_trip.devices["device-1"].guest_kind,
+            Some(GuestKind::Container)
         );
         assert_eq!(
             round_trip.devices["device-1"].upstream_interface.as_deref(),

@@ -263,6 +263,7 @@ mod tests {
             model: None,
             device_role: role,
             deployment_type,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eth0".to_string(),
@@ -351,6 +352,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Bridge,
             deployment_type: DeploymentType::Virtual,
+            guest_kind: None,
             interfaces: vec![
                 Interface {
                     if_index: 0,
@@ -386,6 +388,7 @@ mod tests {
             model: None,
             device_role: DeviceRole::Server,
             deployment_type: DeploymentType::Physical,
+            guest_kind: None,
             interfaces: vec![Interface {
                 if_index: 1,
                 if_name: "eno1".to_string(),

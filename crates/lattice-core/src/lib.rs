@@ -17,7 +17,7 @@ pub use discovery::{
 };
 pub use graph::{
     synthesize_proxmox_uplinks, DeploymentType, Device, DeviceRole, DeviceStatus, GraphStore,
-    GuestAttachment, IdentityKeys, Interface, Link, LinkProtocol, OperStatus, Topology,
+    GuestAttachment, GuestKind, IdentityKeys, Interface, Link, LinkProtocol, OperStatus, Topology,
 };
 pub use proxmox::{
     attach_proxmox_uplinks, ClusterResource, GuestConfig, GuestNetworkAttachment,
