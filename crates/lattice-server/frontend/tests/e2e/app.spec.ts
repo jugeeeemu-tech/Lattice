@@ -184,7 +184,7 @@ async function clickSceneDevice(page: Page, deviceId: string) {
 async function discoveryControlMetrics(page: Page) {
   return page.evaluate(() => {
     const control = document.querySelector('[data-role="discovery-control"]');
-    if (!(control instanceof HTMLElement)) {
+    if (!(control instanceof HTMLButtonElement)) {
       return null;
     }
 
@@ -193,10 +193,7 @@ async function discoveryControlMetrics(page: Page) {
     );
 
     return {
-      ariaLabel:
-        control.querySelector('button') instanceof HTMLButtonElement
-          ? control.querySelector('button')?.ariaLabel ?? ''
-          : '',
+      ariaLabel: control.ariaLabel,
       progress,
       state: control.dataset.discoveryState ?? '',
     };
@@ -205,7 +202,7 @@ async function discoveryControlMetrics(page: Page) {
 
 async function discoveryGlyphScale(page: Page) {
   return page.evaluate(() => {
-    const glyph = document.querySelector('.icon-button--discovery .icon-button__glyph');
+    const glyph = document.querySelector('[data-role="discovery-control"] .icon-button__glyph');
     if (!(glyph instanceof HTMLElement)) {
       return null;
     }
@@ -221,7 +218,7 @@ async function discoveryGlyphScale(page: Page) {
 
 async function discoveryButtonOffsetY(page: Page) {
   return page.evaluate(() => {
-    const button = document.querySelector('.icon-button--discovery');
+    const button = document.querySelector('[data-role="discovery-control"]');
     if (!(button instanceof HTMLElement)) {
       return null;
     }
@@ -651,7 +648,6 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await waitForViewer(page);
 
   const discoveryControl = page.locator('[data-role="discovery-control"]');
-  const discoveryButton = discoveryControl.locator('button');
   await page.locator('[data-role="discovery-action"]').hover();
   await expect.poll(() => discoveryButtonOffsetY(page)).toBe(0);
   await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('今すぐ再探索');
@@ -660,7 +656,7 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
     '60秒ごとに自動で更新します。'
   );
 
-  await discoveryButton.dispatchEvent('pointerdown', {
+  await discoveryControl.dispatchEvent('pointerdown', {
     button: 0,
     clientX: 0,
     clientY: 0,
@@ -682,11 +678,12 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   });
   await expect.poll(() => discoveryGlyphScale(page)).toBe(1);
 
-  await discoveryButton.click();
+  await discoveryControl.click();
   expect(api.getDiscoverCount()).toBe(1);
   await expect
     .poll(async () => (await discoveryControlMetrics(page))?.state)
     .toBe('discovering');
+  await expect(discoveryControl).toBeDisabled();
 
   currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
     discovery_status: {
@@ -704,6 +701,7 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await expect
     .poll(async () => (await discoveryControlMetrics(page))?.state)
     .toBe('ready');
+  await expect(discoveryControl).toBeEnabled();
   expect((await discoveryControlMetrics(page))?.progress ?? 0).toBeGreaterThan(0.95);
 
   currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
@@ -726,6 +724,69 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('SNMP timeout');
 });
 
+test('accepts manual refresh clicks on the outer progress ring hit area', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  const api = await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const bounds = await page.locator('[data-role="discovery-control"]').boundingBox();
+  expect(bounds).not.toBeNull();
+  if (!bounds) {
+    return;
+  }
+
+  await page.mouse.click(bounds.x + bounds.width - 3, bounds.y + bounds.height / 2);
+
+  await expect.poll(() => api.getDiscoverCount()).toBe(1);
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('discovering');
+});
+
+test('supports keyboard activation with Enter and Space', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  const api = await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const discoveryControl = page.locator('[data-role="discovery-control"]');
+  await discoveryControl.focus();
+  await page.keyboard.press('Enter');
+
+  await expect.poll(() => api.getDiscoverCount()).toBe(1);
+  await expect(discoveryControl).toBeDisabled();
+
+  currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
+    discovery_status: {
+      state: 'ready',
+      message: null,
+    },
+    next_auto_discovery_at_ms: Date.now() + 60_000,
+  });
+  await expect.poll(() => pushMockSnapshot(page, currentSnapshotRef.value)).toBe(true);
+
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('ready');
+  await expect(discoveryControl).toBeEnabled();
+  await discoveryControl.focus();
+  await page.keyboard.press('Space');
+
+  await expect.poll(() => api.getDiscoverCount()).toBe(2);
+  await expect(discoveryControl).toBeDisabled();
+});
+
 test('does not update the current snapshot when manual refresh returns busy', async ({ page }) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
@@ -743,7 +804,7 @@ test('does not update the current snapshot when manual refresh returns busy', as
   }));
 
   api.setNextDiscoveryResponse('busy');
-  await page.locator('[data-role="discovery-control"] button').click();
+  await page.locator('[data-role="discovery-control"]').click();
 
   await expect.poll(() => api.getDiscoverCount()).toBe(1);
   await expect

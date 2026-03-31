@@ -199,6 +199,17 @@ lattice-sidebar-tree {
   height: 3.5rem;
   display: grid;
   place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  background: none;
+  box-shadow: none;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.discovery-control:disabled {
+  cursor: default;
 }
 
 .discovery-control__ring {
@@ -241,12 +252,24 @@ lattice-sidebar-tree {
 }
 
 .icon-button--discovery {
+  pointer-events: none;
+  position: relative;
+  z-index: 1;
   width: 3rem;
   height: 3rem;
   border-radius: 999px;
 }
 
-.icon-button--discovery[data-pressed="true"]:not(:disabled) .icon-button__glyph {
+.discovery-control:hover:not(:disabled) .icon-button--discovery {
+  border-color: rgba(15, 98, 254, 0.28);
+  box-shadow: 0 16px 30px rgba(15, 98, 254, 0.12);
+}
+
+.discovery-control:disabled .icon-button--discovery {
+  opacity: 0.82;
+}
+
+.discovery-control[data-pressed="true"]:not(:disabled) .icon-button__glyph {
   transform: scale(0.9);
   transition-duration: 120ms;
 }

@@ -1,4 +1,6 @@
 import { LitElement, html } from 'lit';
+import { unsafeSVG } from 'lit/directives/unsafe-svg.js';
+import reloadIconSvg from '@tabler/icons/outline/reload.svg?raw';
 
 import type { DiscoveryState } from '../model/view-snapshot';
 import type { TopologySceneAdapter } from '../scene/topology-scene';
@@ -334,25 +336,7 @@ export class LatticeApp extends LitElement {
   }
 
   #renderDiscoveryIcon() {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true">
-        <path
-          d="M18.5 8.5A7.5 7.5 0 1 0 20 13.1"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-width="1.9"
-        ></path>
-        <path
-          d="M15.8 5.2h4.4v4.4"
-          fill="none"
-          stroke="currentColor"
-          stroke-linecap="round"
-          stroke-linejoin="round"
-          stroke-width="1.9"
-        ></path>
-      </svg>
-    `;
+    return unsafeSVG(reloadIconSvg);
   }
 
   #renderDeviceStatIcon() {
@@ -548,30 +532,28 @@ export class LatticeApp extends LitElement {
               class="floating-action floating-action--end"
               data-role="discovery-action"
             >
-              <div
+              <button
+                type="button"
                 class="discovery-control"
                 data-role="discovery-control"
                 data-discovery-state=${discoveryState}
+                data-pressed=${this.discoveryPressed ? 'true' : 'false'}
+                aria-label=${this.#discoveryAriaLabel()}
+                ?disabled=${discoveryControlDisabled}
                 style=${`--ring-progress:${this.#discoveryProgress().toFixed(4)};`}
+                @blur=${this.#releaseDiscoveryPress}
+                @click=${() => {
+                  void this.#requestDiscovery();
+                }}
+                @keydown=${this.#handleDiscoveryKeyDown}
+                @keyup=${this.#handleDiscoveryKeyUp}
+                @pointerdown=${this.#handleDiscoveryPointerDown}
               >
                 <span class="discovery-control__ring" aria-hidden="true"></span>
-                <button
-                  type="button"
-                  class="icon-button icon-button--discovery"
-                  data-pressed=${this.discoveryPressed ? 'true' : 'false'}
-                  aria-label=${this.#discoveryAriaLabel()}
-                  ?disabled=${discoveryControlDisabled}
-                  @blur=${this.#releaseDiscoveryPress}
-                  @click=${() => {
-                    void this.#requestDiscovery();
-                  }}
-                  @keydown=${this.#handleDiscoveryKeyDown}
-                  @keyup=${this.#handleDiscoveryKeyUp}
-                  @pointerdown=${this.#handleDiscoveryPointerDown}
-                >
+                <div class="icon-button icon-button--discovery" aria-hidden="true">
                   <span class="icon-button__glyph">${this.#renderDiscoveryIcon()}</span>
-                </button>
-              </div>
+                </div>
+              </button>
               <div class="floating-tooltip" data-role="discovery-tooltip">
                 <p class="floating-tooltip__title">${discoveryTooltip.title}</p>
                 <p class="floating-tooltip__body">${discoveryTooltip.body}</p>

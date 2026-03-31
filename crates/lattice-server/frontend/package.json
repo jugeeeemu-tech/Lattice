@@ -16,6 +16,7 @@
     "test:e2e": "playwright test"
   },
   "dependencies": {
+    "@tabler/icons": "3.41.1",
     "lit": "3.3.2",
     "three": "0.183.2"
   },
