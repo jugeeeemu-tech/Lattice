@@ -91,6 +91,7 @@ function scheduledSnapshot(
 
 async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSnapshot }) {
   let discoverCount = 0;
+  let nextDiscoveryResponse: 'busy' | 'started' = 'started';
 
   await page.route('**/api/topology', async (route) => {
     await route.fulfill({
@@ -102,6 +103,16 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
 
   await page.route('**/api/discover', async (route) => {
     discoverCount += 1;
+    if (nextDiscoveryResponse === 'busy') {
+      nextDiscoveryResponse = 'started';
+      await route.fulfill({
+        body: JSON.stringify({ status: 'busy' }),
+        contentType: 'application/json',
+        status: 200,
+      });
+      return;
+    }
+
     currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
       discovery_status: {
         state: 'discovering',
@@ -111,7 +122,10 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
     });
 
     await route.fulfill({
-      body: JSON.stringify({ accepted: true }),
+      body: JSON.stringify({
+        status: 'started',
+        snapshot: currentSnapshotRef.value,
+      }),
       contentType: 'application/json',
       status: 202,
     });
@@ -119,6 +133,9 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
 
   return {
     getDiscoverCount: () => discoverCount,
+    setNextDiscoveryResponse: (response: 'busy' | 'started') => {
+      nextDiscoveryResponse = response;
+    },
   };
 }
 
@@ -324,6 +341,35 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('SNMP timeout');
 });
 
+test('does not update the current snapshot when manual refresh returns busy', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  const api = await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const before = await page.evaluate(() => ({
+    discoveryState: window.__latticeViewer?.getState().discoveryState ?? null,
+    nextAutoDiscoveryAtMs: window.__latticeViewer?.getState().nextAutoDiscoveryAtMs ?? null,
+  }));
+
+  api.setNextDiscoveryResponse('busy');
+  await page.locator('[data-role="discovery-control"] button').click();
+
+  await expect.poll(() => api.getDiscoverCount()).toBe(1);
+  await expect
+    .poll(() =>
+      page.evaluate(() => ({
+        discoveryState: window.__latticeViewer?.getState().discoveryState ?? null,
+        nextAutoDiscoveryAtMs: window.__latticeViewer?.getState().nextAutoDiscoveryAtMs ?? null,
+      }))
+    )
+    .toEqual(before);
+});
 test('switches the sidebar to a drawer on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   await installTestHooks(page);

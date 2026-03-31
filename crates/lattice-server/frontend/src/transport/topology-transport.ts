@@ -1,6 +1,10 @@
 import { decodeViewSnapshot } from '../topology/decode-view-snapshot';
 import type { TopologyStore } from '../state/topology-store';
 
+type DiscoveryRequestResponse =
+  | { snapshot: unknown; status: 'started' }
+  | { status: 'busy' };
+
 export class TopologyTransport {
   #store: TopologyStore;
   #fetchInFlight = false;
@@ -84,8 +88,11 @@ export class TopologyTransport {
         throw new Error(`HTTP ${response.status}`);
       }
 
-      await this.refreshSnapshot({ quiet: false, source: 'http' });
-      this.connectWebSocket(true);
+      const payload = (await response.json()) as DiscoveryRequestResponse;
+      if (payload.status === 'started') {
+        this.#store.applySnapshot(decodeViewSnapshot(payload.snapshot), 'http');
+        this.connectWebSocket(true);
+      }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.#store.applyFailureState(`Discovery request failed: ${message}`);

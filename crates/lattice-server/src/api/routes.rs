@@ -9,17 +9,20 @@ use axum::{
     Router,
 };
 use lattice_core::Device;
+use serde::Serialize;
 
-use super::{
-    frontend_assets,
-    ws::topology_socket,
-    DiscoveryCoordinator,
-    ViewSnapshot,
-};
+use super::{frontend_assets, ws::topology_socket, DiscoveryCoordinator, ViewSnapshot};
 
 #[derive(Clone)]
 pub struct AppState {
     pub coordinator: Arc<DiscoveryCoordinator>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum PostDiscoverResponse {
+    Busy,
+    Started { snapshot: ViewSnapshot },
 }
 
 pub fn build_router(state: AppState) -> Router {
@@ -46,9 +49,15 @@ async fn get_devices(State(state): State<AppState>) -> Json<Vec<Device>> {
     Json(state.coordinator.current_devices().await)
 }
 
-async fn post_discover(State(state): State<AppState>) -> impl IntoResponse {
-    let _ = state.coordinator.trigger_manual_discovery();
-    StatusCode::ACCEPTED
+async fn post_discover(State(state): State<AppState>) -> Response {
+    match state.coordinator.trigger_manual_discovery().await {
+        Some(snapshot) => (
+            StatusCode::ACCEPTED,
+            Json(PostDiscoverResponse::Started { snapshot }),
+        )
+            .into_response(),
+        None => (StatusCode::OK, Json(PostDiscoverResponse::Busy)).into_response(),
+    }
 }
 
 async fn index_html() -> Html<&'static str> {
@@ -74,14 +83,24 @@ fn binary_response(body: &'static [u8], content_type: &'static str) -> Response 
 mod tests {
     use std::sync::Arc;
 
+    use anyhow::Result;
+    use async_trait::async_trait;
     use axum::{
         body::to_bytes,
         http::{Request, StatusCode},
     };
-    use lattice_core::{DiscoveryConfig, DiscoveryEngine};
+    use lattice_core::{
+        DiscoveryConfig, DiscoveryEngine, DiscoveryResult, DiscoveryTree, Topology,
+    };
+    use serde_json::Value;
+    use tokio::{
+        sync::Notify,
+        time::{timeout, Duration},
+    };
     use tower::ServiceExt;
 
     use super::*;
+    use crate::api::discovery_coordinator::DiscoveryRunner;
 
     fn test_state() -> AppState {
         let config = DiscoveryConfig::default();
@@ -91,6 +110,25 @@ mod tests {
             config.auto_discovery_interval_seconds,
         ));
         AppState { coordinator }
+    }
+
+    #[derive(Clone)]
+    struct BlockingRunner {
+        entered: Arc<Notify>,
+        release: Arc<Notify>,
+    }
+
+    #[async_trait]
+    impl DiscoveryRunner for BlockingRunner {
+        async fn run_discovery(&self) -> Result<DiscoveryResult> {
+            self.entered.notify_waiters();
+            self.release.notified().await;
+            Ok(DiscoveryResult {
+                topology: Topology::default(),
+                tree: DiscoveryTree::default(),
+                discovered_at: chrono::Utc::now(),
+            })
+        }
     }
 
     fn html_asset_paths(html: &str) -> Vec<&str> {
@@ -117,12 +155,7 @@ mod tests {
     #[tokio::test]
     async fn root_serves_built_index_html() {
         let response = build_router(test_state())
-            .oneshot(
-                Request::builder()
-                    .uri("/")
-                    .body(Body::empty())
-                    .unwrap(),
-            )
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
 
@@ -259,6 +292,13 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(discover.status(), StatusCode::ACCEPTED);
+        let discover_body = to_bytes(discover.into_body(), usize::MAX).await.unwrap();
+        let discover_json: Value = serde_json::from_slice(&discover_body).unwrap();
+        assert_eq!(discover_json["status"], "started");
+        assert_eq!(
+            discover_json["snapshot"]["discovery_status"]["state"],
+            "discovering"
+        );
 
         let websocket = router
             .oneshot(
@@ -270,5 +310,52 @@ mod tests {
             .await
             .unwrap();
         assert_ne!(websocket.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn discover_returns_busy_while_a_manual_run_is_already_active() {
+        let entered = Arc::new(Notify::new());
+        let release = Arc::new(Notify::new());
+        let coordinator = Arc::new(DiscoveryCoordinator::new(
+            Arc::new(BlockingRunner {
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            }),
+            60,
+        ));
+        let router = build_router(AppState { coordinator });
+
+        let started = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discover")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(started.status(), StatusCode::ACCEPTED);
+        timeout(Duration::from_secs(1), entered.notified())
+            .await
+            .expect("first discovery run should start");
+
+        let busy = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discover")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(busy.status(), StatusCode::OK);
+        let busy_body = to_bytes(busy.into_body(), usize::MAX).await.unwrap();
+        let busy_json: Value = serde_json::from_slice(&busy_body).unwrap();
+        assert_eq!(busy_json, serde_json::json!({ "status": "busy" }));
+
+        release.notify_waiters();
     }
 }
