@@ -1,7 +1,9 @@
-import { LitElement, html, type TemplateResult } from 'lit';
+import { LitElement, html, svg, type TemplateResult } from 'lit';
 
+import type { ViewDevice } from '../model/view-snapshot';
 import type { TopologyStoreState } from '../state/topology-store';
 import { entryMetaText } from '../topology/view-model';
+import { deviceSidebarIconSpec } from '../topology/device-visuals';
 
 export class LatticeSidebarTree extends LitElement {
   static properties = {
@@ -84,11 +86,7 @@ export class LatticeSidebarTree extends LitElement {
           @click=${() => this.#dispatch('entry-primary-action', { entryId: entry.id })}
           @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
         >
-          <span
-            class="tree-row__mark"
-            data-role-kind=${device.device_role}
-            data-deployment=${device.deployment_type}
-          ></span>
+          ${this.#renderDeviceMark(device)}
           <span class="tree-row__copy">
             <span class="tree-row__name">${entry.label || device.label || 'Unknown'}</span>
             <span class="tree-row__meta">${entryMetaText(this.state.model, entry)}</span>
@@ -110,6 +108,33 @@ export class LatticeSidebarTree extends LitElement {
         detail,
       })
     );
+  }
+
+  #renderDeviceMark(device: ViewDevice): TemplateResult {
+    const icon = deviceSidebarIconSpec(device);
+
+    return html`
+      <span
+        class="tree-row__mark"
+        data-deployment=${device.deployment_type}
+        data-variant=${icon.variant}
+      >
+        ${svg`<svg viewBox=${icon.viewBox} aria-hidden="true" focusable="false">
+          ${icon.topPath
+            ? svg`<path class="tree-row__mark-top" d=${icon.topPath}></path>`
+            : null}
+          ${icon.frontPath
+            ? svg`<path class="tree-row__mark-front" d=${icon.frontPath}></path>`
+            : null}
+          ${icon.sidePath
+            ? svg`<path class="tree-row__mark-side" d=${icon.sidePath}></path>`
+            : null}
+          ${icon.bodyPath
+            ? svg`<path class="tree-row__mark-body" d=${icon.bodyPath}></path>`
+            : null}
+        </svg>`}
+      </span>
+    `;
   }
 
   #handlePointerLeave() {

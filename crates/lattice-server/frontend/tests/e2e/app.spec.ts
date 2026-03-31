@@ -1,8 +1,16 @@
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type Page, type TestInfo } from '@playwright/test';
 
 import type { ViewSnapshot } from '../../src/model/view-snapshot';
 import { loadViewSnapshotFixture } from '../helpers/load-view-snapshot-fixture';
 
+const VARIANT_FIXTURE_DEVICES = [
+  { deviceId: 'variant-router', variant: 'router' },
+  { deviceId: 'variant-switch', variant: 'switch' },
+  { deviceId: 'variant-bridge', variant: 'bridge' },
+  { deviceId: 'variant-server', variant: 'server' },
+  { deviceId: 'variant-container', variant: 'container' },
+  { deviceId: 'variant-unknown', variant: 'unknown' },
+] as const;
 
 async function installTestHooks(page: Page) {
   await page.addInitScript(() => {
@@ -227,6 +235,94 @@ async function discoveryButtonOffsetY(page: Page) {
   });
 }
 
+async function firstTreeIconMetrics(page: Page) {
+  return page.evaluate(() => {
+    const svg = document.querySelector('.tree-row__mark svg');
+    const path = document.querySelector('.tree-row__mark svg path');
+    if (!(svg instanceof SVGSVGElement) || !(path instanceof SVGPathElement)) {
+      return null;
+    }
+
+    const pathBox = path.getBBox();
+    const svgBox = svg.getBoundingClientRect();
+    const styles = getComputedStyle(path);
+
+    return {
+      fill: styles.fill,
+      pathBBoxHeight: pathBox.height,
+      pathBBoxWidth: pathBox.width,
+      pathNamespace: path.namespaceURI,
+      stroke: styles.stroke,
+      svgHeight: svgBox.height,
+      svgWidth: svgBox.width,
+      svgNamespace: svg.namespaceURI,
+    };
+  });
+}
+
+function filterSnapshotToDevices(
+  snapshot: ViewSnapshot,
+  deviceIds: readonly string[]
+): ViewSnapshot {
+  const allowedDeviceIds = new Set(deviceIds);
+  const treeRows = snapshot.tree_rows.filter((row) => allowedDeviceIds.has(row.device_id));
+  const allowedRowIds = new Set(treeRows.map((row) => row.id));
+
+  return {
+    ...snapshot,
+    devices: snapshot.devices.filter((device) => allowedDeviceIds.has(device.id)),
+    links: snapshot.links.filter(
+      (link) =>
+        allowedDeviceIds.has(link.local_device_id) && allowedDeviceIds.has(link.remote_device_id)
+    ),
+    tree_rows: treeRows,
+    tree_edges: snapshot.tree_edges.filter(
+      (edge) => allowedRowIds.has(edge.parent_row_id) && allowedRowIds.has(edge.child_row_id)
+    ),
+    primary_row_by_device: Object.fromEntries(
+      Object.entries(snapshot.primary_row_by_device).filter(
+        ([deviceId, rowId]) => allowedDeviceIds.has(deviceId) && allowedRowIds.has(rowId)
+      )
+    ),
+  };
+}
+
+async function pushMockSnapshot(page: Page, snapshot: ViewSnapshot) {
+  return page.evaluate((payload) => {
+    return (
+      window as Window & { __latticeSocketTest?: { send: (frame: unknown) => boolean } }
+    ).__latticeSocketTest?.send(payload);
+  }, snapshot);
+}
+
+async function captureArtifactScreenshot(
+  page: Page,
+  testInfo: TestInfo,
+  fileName: string
+): Promise<string> {
+  const path = testInfo.outputPath(fileName);
+  await page.screenshot({
+    fullPage: true,
+    path,
+  });
+  await testInfo.attach(fileName, {
+    path,
+    contentType: 'image/png',
+  });
+  return path;
+}
+
+async function sceneDeviceCount(page: Page) {
+  return page.evaluate(() => window.__latticeViewer?.getState().model.sceneDeviceIds.size ?? 0);
+}
+
+async function treeIconVariants(page: Page) {
+  return page.evaluate(() =>
+    Array.from(document.querySelectorAll('.tree-row__mark')).map(
+      (element) => (element as HTMLElement).dataset.variant ?? ''
+    )
+  );
+}
 
 test('fits into one screen and keeps the sidebar inside the viewport overlay', async ({
   page,
@@ -701,6 +797,69 @@ test('shows explanatory tooltips for device and link counts', async ({ page }) =
   );
 });
 
+test('renders sidebar device icons as visible SVG paths', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const metrics = await firstTreeIconMetrics(page);
+  expect(metrics).not.toBeNull();
+  expect(metrics?.svgNamespace).toBe('http://www.w3.org/2000/svg');
+  expect(metrics?.pathNamespace).toBe('http://www.w3.org/2000/svg');
+  expect(metrics?.svgWidth ?? 0).toBeGreaterThan(10);
+  expect(metrics?.svgHeight ?? 0).toBeGreaterThan(10);
+  expect(metrics?.pathBBoxWidth ?? 0).toBeGreaterThan(4);
+  expect(metrics?.pathBBoxHeight ?? 0).toBeGreaterThan(2);
+  expect(metrics?.fill).not.toBe('none');
+  expect(metrics?.stroke).not.toBe('none');
+});
+
+test('captures overview and focused comparison screenshots for all visual variants', async ({
+  page,
+}, testInfo) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const baseSnapshot = scheduledSnapshot(await loadViewSnapshotFixture('all-variants'));
+  const currentSnapshotRef = {
+    value: baseSnapshot,
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  await expect(page.locator('.tree-row')).toHaveCount(VARIANT_FIXTURE_DEVICES.length);
+  await expect.poll(() => sceneDeviceCount(page)).toBe(VARIANT_FIXTURE_DEVICES.length);
+
+  const overviewVariants = new Set(await treeIconVariants(page));
+  expect(overviewVariants).toEqual(
+    new Set(VARIANT_FIXTURE_DEVICES.map((device) => device.variant))
+  );
+
+  await captureArtifactScreenshot(page, testInfo, 'all-variants-overview.png');
+
+  for (const { deviceId, variant } of VARIANT_FIXTURE_DEVICES) {
+    currentSnapshotRef.value = scheduledSnapshot(filterSnapshotToDevices(baseSnapshot, [deviceId]));
+    await pushMockSnapshot(page, currentSnapshotRef.value);
+
+    await expect(page.locator('.tree-row')).toHaveCount(1);
+    await expect.poll(() => sceneDeviceCount(page)).toBe(1);
+    await expect
+      .poll(async () => {
+        const variants = await treeIconVariants(page);
+        return variants[0] ?? null;
+      })
+      .toBe(variant);
+
+    await captureArtifactScreenshot(page, testInfo, `variant-${variant}-focused.png`);
+  }
+});
 
 test('switches the sidebar to a drawer on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });

@@ -1,0 +1,206 @@
+{
+  "devices": [
+    {
+      "id": "variant-router",
+      "label": "router-lab",
+      "depth": 0,
+      "device_role": "router",
+      "deployment_type": "physical",
+      "identity_keys": {
+        "sys_name": "router-lab",
+        "mgmt_ip": "192.0.2.10",
+        "mac_addresses": ["00:11:22:33:44:10"]
+      }
+    },
+    {
+      "id": "variant-switch",
+      "label": "switch-lab",
+      "depth": 1,
+      "device_role": "switch",
+      "deployment_type": "physical",
+      "identity_keys": {
+        "sys_name": "switch-lab",
+        "mgmt_ip": "192.0.2.20",
+        "mac_addresses": ["00:11:22:33:44:20"]
+      }
+    },
+    {
+      "id": "variant-bridge",
+      "label": "bridge-lab",
+      "depth": 1,
+      "device_role": "bridge",
+      "deployment_type": "virtual",
+      "identity_keys": {
+        "sys_name": "bridge-lab",
+        "mgmt_ip": "192.0.2.30",
+        "mac_addresses": ["00:11:22:33:44:30"]
+      }
+    },
+    {
+      "id": "variant-server",
+      "label": "server-lab",
+      "depth": 2,
+      "device_role": "server",
+      "deployment_type": "physical",
+      "identity_keys": {
+        "sys_name": "server-lab",
+        "mgmt_ip": "192.0.2.40",
+        "mac_addresses": ["00:11:22:33:44:40"]
+      },
+      "host_label": "rack-a"
+    },
+    {
+      "id": "variant-container",
+      "label": "container-lab",
+      "depth": 3,
+      "device_role": "server",
+      "deployment_type": "virtual",
+      "guest_kind": "container",
+      "identity_keys": {
+        "sys_name": "container-lab",
+        "mgmt_ip": "192.0.2.50",
+        "mac_addresses": ["00:11:22:33:44:50"]
+      },
+      "host_label": "server-lab",
+      "upstream_interface": "br-app"
+    },
+    {
+      "id": "variant-unknown",
+      "label": "mystery-lab",
+      "depth": 2,
+      "device_role": "unknown",
+      "deployment_type": "unknown",
+      "identity_keys": {
+        "sys_name": "mystery-lab",
+        "mgmt_ip": "192.0.2.60",
+        "mac_addresses": ["00:11:22:33:44:60"]
+      }
+    }
+  ],
+  "links": [
+    {
+      "id": "link-router-switch",
+      "local_device_id": "variant-router",
+      "local_interface": "xe-0/0/1",
+      "local_ip": "192.0.2.10/24",
+      "remote_device_id": "variant-switch",
+      "remote_interface": "swp1",
+      "remote_ip": "192.0.2.20/24",
+      "speed_bps": 1000000000,
+      "protocol": "lldp"
+    },
+    {
+      "id": "link-router-bridge",
+      "local_device_id": "variant-router",
+      "local_interface": "xe-0/0/2",
+      "local_ip": "192.0.2.10/24",
+      "remote_device_id": "variant-bridge",
+      "remote_interface": "br-uplink",
+      "remote_ip": "192.0.2.30/24",
+      "speed_bps": 1000000000,
+      "protocol": "lldp"
+    },
+    {
+      "id": "link-switch-server",
+      "local_device_id": "variant-switch",
+      "local_interface": "swp10",
+      "local_ip": "192.0.2.20/24",
+      "remote_device_id": "variant-server",
+      "remote_interface": "eno1",
+      "remote_ip": "192.0.2.40/24",
+      "speed_bps": 1000000000,
+      "protocol": "lldp"
+    },
+    {
+      "id": "link-server-container",
+      "local_device_id": "variant-server",
+      "local_interface": "br-app",
+      "remote_device_id": "variant-container",
+      "remote_interface": "eth0",
+      "speed_bps": 1000000000,
+      "protocol": "proxmox_guest_link",
+      "guest_attachment": {
+        "bridge_name": "br-app",
+        "vlan_tag": 210,
+        "trunk_vlans": [210]
+      }
+    },
+    {
+      "id": "link-bridge-unknown",
+      "local_device_id": "variant-bridge",
+      "local_interface": "tap42",
+      "remote_device_id": "variant-unknown",
+      "remote_interface": "myst0",
+      "speed_bps": 1000000000,
+      "protocol": "lldp"
+    }
+  ],
+  "tree_rows": [
+    {
+      "id": "seed:192.0.2.10/variant-router#1",
+      "device_id": "variant-router",
+      "label": "router-lab"
+    },
+    {
+      "id": "seed:192.0.2.10/variant-switch#1",
+      "device_id": "variant-switch",
+      "label": "switch-lab"
+    },
+    {
+      "id": "seed:192.0.2.10/variant-bridge#1",
+      "device_id": "variant-bridge",
+      "label": "bridge-lab"
+    },
+    {
+      "id": "seed:192.0.2.10/variant-server#1",
+      "device_id": "variant-server",
+      "label": "server-lab"
+    },
+    {
+      "id": "seed:192.0.2.10/variant-container#1",
+      "device_id": "variant-container",
+      "label": "container-lab"
+    },
+    {
+      "id": "seed:192.0.2.10/variant-unknown#1",
+      "device_id": "variant-unknown",
+      "label": "mystery-lab"
+    }
+  ],
+  "tree_edges": [
+    {
+      "parent_row_id": "seed:192.0.2.10/variant-router#1",
+      "child_row_id": "seed:192.0.2.10/variant-switch#1"
+    },
+    {
+      "parent_row_id": "seed:192.0.2.10/variant-router#1",
+      "child_row_id": "seed:192.0.2.10/variant-bridge#1"
+    },
+    {
+      "parent_row_id": "seed:192.0.2.10/variant-switch#1",
+      "child_row_id": "seed:192.0.2.10/variant-server#1"
+    },
+    {
+      "parent_row_id": "seed:192.0.2.10/variant-server#1",
+      "child_row_id": "seed:192.0.2.10/variant-container#1"
+    },
+    {
+      "parent_row_id": "seed:192.0.2.10/variant-bridge#1",
+      "child_row_id": "seed:192.0.2.10/variant-unknown#1"
+    }
+  ],
+  "primary_row_by_device": {
+    "variant-router": "seed:192.0.2.10/variant-router#1",
+    "variant-switch": "seed:192.0.2.10/variant-switch#1",
+    "variant-bridge": "seed:192.0.2.10/variant-bridge#1",
+    "variant-server": "seed:192.0.2.10/variant-server#1",
+    "variant-container": "seed:192.0.2.10/variant-container#1",
+    "variant-unknown": "seed:192.0.2.10/variant-unknown#1"
+  },
+  "auto_discovery_interval_seconds": 60,
+  "next_auto_discovery_at_ms": 4102444800000,
+  "discovery_status": {
+    "state": "ready",
+    "message": "all variants fixture loaded"
+  }
+}
