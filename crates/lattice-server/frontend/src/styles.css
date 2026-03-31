@@ -61,10 +61,10 @@ lattice-sidebar-tree {
 }
 
 #app {
-  width: min(1440px, 100%);
+  width: 100%;
   height: 100dvh;
-  margin: 0 auto;
-  padding: 0.8rem;
+  margin: 0;
+  padding: 0;
 }
 
 .viewport {
@@ -72,14 +72,6 @@ lattice-sidebar-tree {
   height: 100%;
   min-height: 0;
   overflow: hidden;
-  border-radius: 32px;
-  border: 1px solid var(--border);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.82) 0%, rgba(236, 241, 248, 0.76) 100%),
-    rgba(255, 255, 255, 0.54);
-  box-shadow: var(--shadow);
-  backdrop-filter: blur(18px) saturate(1.15);
-  -webkit-backdrop-filter: blur(18px) saturate(1.15);
 }
 
 .viewport__scene {
@@ -123,10 +115,6 @@ lattice-sidebar-tree {
   color: var(--ink);
   opacity: 0;
   pointer-events: none;
-  transform: translateY(-6px);
-  transition:
-    opacity 140ms ease,
-    transform 140ms ease;
 }
 
 .floating-action--start .floating-tooltip {
@@ -140,7 +128,6 @@ lattice-sidebar-tree {
 .floating-action:hover .floating-tooltip,
 .floating-action:focus-within .floating-tooltip {
   opacity: 1;
-  transform: translateY(0);
 }
 
 .floating-tooltip__title,
@@ -170,14 +157,12 @@ lattice-sidebar-tree {
   box-shadow: 0 14px 32px rgba(15, 22, 36, 0.14);
   color: var(--ink);
   transition:
-    transform 140ms ease,
     box-shadow 140ms ease,
     border-color 140ms ease,
     opacity 140ms ease;
 }
 
 .icon-button:hover:not(:disabled) {
-  transform: translateY(-1px);
   border-color: rgba(15, 98, 254, 0.28);
   box-shadow: 0 16px 30px rgba(15, 98, 254, 0.12);
 }
@@ -198,6 +183,13 @@ lattice-sidebar-tree {
 
 .icon-button--menu {
   display: none;
+}
+
+.icon-button__glyph {
+  display: grid;
+  place-items: center;
+  transform: scale(1);
+  transition: transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .discovery-control {
@@ -254,6 +246,11 @@ lattice-sidebar-tree {
   border-radius: 999px;
 }
 
+.icon-button--discovery[data-pressed="true"]:not(:disabled) .icon-button__glyph {
+  transform: scale(0.9);
+  transition-duration: 120ms;
+}
+
 .viewport__backdrop {
   display: none;
   position: absolute;
@@ -282,10 +279,8 @@ lattice-sidebar-tree {
   padding: 1rem;
   border-radius: 28px;
   border: 1px solid var(--border-strong);
-  background: rgba(255, 255, 255, 0.78);
+  background: #ffffff;
   box-shadow: 0 24px 56px rgba(21, 31, 46, 0.16);
-  backdrop-filter: blur(22px) saturate(1.1);
-  -webkit-backdrop-filter: blur(22px) saturate(1.1);
 }
 
 .sidebar-shell__summary {
@@ -322,6 +317,7 @@ lattice-sidebar-tree {
   border-radius: 999px;
   background: var(--panel-soft);
   color: var(--ink);
+  cursor: default;
 }
 
 .sidebar-stat__icon {
@@ -493,11 +489,11 @@ lattice-sidebar-tree {
 
 .tree-row__mark {
   --mark-color: var(--unknown);
-  width: 0.88rem;
-  height: 0.88rem;
-  background: var(--mark-color);
-  box-shadow: inset 0 0 0 1px rgba(20, 32, 51, 0.12);
-  display: inline-block;
+  width: 1.3rem;
+  height: 1.3rem;
+  color: var(--mark-color);
+  display: inline-grid;
+  place-items: center;
   flex: 0 0 auto;
 }
 
@@ -513,31 +509,46 @@ lattice-sidebar-tree {
   --mark-color: var(--unknown);
 }
 
-.tree-row__mark[data-role-kind="router"] {
-  border-radius: 0.18rem;
-  transform: rotate(45deg);
+.tree-row__mark svg {
+  width: 100%;
+  height: 100%;
+  overflow: visible;
 }
 
-.tree-row__mark[data-role-kind="switch"] {
-  width: 1.02rem;
-  height: 0.58rem;
-  border-radius: 0.22rem;
+.tree-row__mark-top,
+.tree-row__mark-front,
+.tree-row__mark-side,
+.tree-row__mark-body {
+  stroke: rgba(20, 32, 51, 0.36);
+  stroke-linejoin: round;
+  stroke-width: 0.9;
+  vector-effect: non-scaling-stroke;
 }
 
-.tree-row__mark[data-role-kind="server"] {
-  width: 0.62rem;
-  height: 1rem;
-  border-radius: 0.18rem;
+.tree-row__mark-top {
+  fill: currentColor;
+  opacity: 0.68;
 }
 
-.tree-row__mark[data-role-kind="bridge"] {
-  width: 1.08rem;
-  height: 0.3rem;
-  border-radius: 999px;
+.tree-row__mark-front {
+  fill: currentColor;
+  opacity: 0.88;
 }
 
-.tree-row__mark[data-role-kind="unknown"] {
-  border-radius: 999px;
+.tree-row__mark-side,
+.tree-row__mark-body {
+  fill: currentColor;
+  opacity: 0.96;
+}
+
+.tree-row__mark[data-variant="bridge"] {
+  width: 1.48rem;
+  height: 1.16rem;
+}
+
+.tree-row__mark[data-variant="server"] {
+  width: 1.16rem;
+  height: 1.52rem;
 }
 
 .viewport__empty {
@@ -609,14 +620,6 @@ lattice-sidebar-tree {
 }
 
 @media (max-width: 960px) {
-  #app {
-    padding: 0.65rem;
-  }
-
-  .viewport {
-    border-radius: 24px;
-  }
-
   .viewport__toolbar {
     top: 0.75rem;
   }
@@ -659,14 +662,6 @@ lattice-sidebar-tree {
 }
 
 @media (max-width: 640px) {
-  #app {
-    padding: 0.5rem;
-  }
-
-  .viewport {
-    border-radius: 22px;
-  }
-
   .viewport__toolbar {
     top: 0.65rem;
   }

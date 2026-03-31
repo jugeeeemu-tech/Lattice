@@ -1,7 +1,6 @@
 import {
   BoxGeometry,
   BufferGeometry,
-  Color,
   CylinderGeometry,
   DirectionalLight,
   DoubleSide,
@@ -29,6 +28,7 @@ import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
 import type { ViewDevice, ViewLink } from '../model/view-snapshot';
 import type { TopologyStoreState } from '../state/topology-store';
+import { projectionInsetFromDesktopInset } from './scene-layout';
 import {
   computeUpstreamPath,
   deploymentColor,
@@ -81,6 +81,12 @@ function hash01(input: string): number {
   return ((hash >>> 0) % 100000) / 100000;
 }
 
+export interface DeviceScreenAnchor {
+  visibility: 'behind' | 'offscreen' | 'visible';
+  x: number;
+  y: number;
+}
+
 export class TopologySceneAdapter {
   #host: HTMLElement;
   #onHoverTarget: (target: SceneHoverTarget, pointer?: { x: number; y: number }) => void;
@@ -103,6 +109,10 @@ export class TopologySceneAdapter {
   #positionCache = new Map<string, Vector3>();
   #frameHandle = 0;
   #framedScene = false;
+  #desktopLeftInset = 0;
+  #lastFrameSignature: string | null = null;
+  #lastVisibleDeviceById = new Map<string, ViewDevice>();
+  #lastTargetByDeviceId = new Map<string, Vector3>();
 
   constructor(options: {
     host: HTMLElement;
@@ -130,6 +140,17 @@ export class TopologySceneAdapter {
     this.#renderer.domElement.remove();
   }
 
+  setDesktopLeftInset(leftInset: number): void {
+    const normalizedInset = Math.max(0, leftInset);
+    if (Math.abs(this.#desktopLeftInset - normalizedInset) < 0.5) {
+      return;
+    }
+
+    this.#desktopLeftInset = normalizedInset;
+    this.#applyCameraViewportOffset();
+    this.#frameSceneIfNeeded();
+  }
+
   sync(state: TopologyStoreState): void {
     this.#state = state;
     const visibleDevices = state.snapshot.devices.filter((device) =>
@@ -137,23 +158,14 @@ export class TopologySceneAdapter {
     );
     const visibleDeviceSet = new Set(visibleDevices.map((device) => device.id));
     const targetByDeviceId = this.#computeTargets(visibleDevices, state);
+    this.#lastVisibleDeviceById = new Map(visibleDevices.map((device) => [device.id, device]));
+    this.#lastTargetByDeviceId = new Map(
+      Array.from(targetByDeviceId.entries(), ([deviceId, target]) => [deviceId, target.clone()])
+    );
 
-    if (!this.#framedScene && visibleDevices.length > 0) {
-      const centroid = this.#computeCentroid(targetByDeviceId);
-      const bounds = this.#computeBounds(targetByDeviceId);
-      const spanX = bounds.max.x - bounds.min.x;
-      const spanY = bounds.max.y - bounds.min.y;
-      const spanZ = bounds.max.z - bounds.min.z;
-      const planarSpan = Math.max(spanX, spanZ, 14);
-      const verticalSpan = Math.max(spanY, 8);
-      this.#controls.target.copy(centroid);
-      this.#camera.position.set(
-        centroid.x + planarSpan * 0.42,
-        centroid.y + Math.max(10, verticalSpan * 0.8 + 4),
-        centroid.z + planarSpan * 0.86
-      );
-      this.#camera.lookAt(centroid);
-      this.#framedScene = true;
+    if (visibleDevices.length === 0) {
+      this.#framedScene = false;
+      this.#lastFrameSignature = null;
     }
 
     for (const device of visibleDevices) {
@@ -203,33 +215,84 @@ export class TopologySceneAdapter {
       }
     }
 
+    this.#frameSceneIfNeeded();
     this.#updateObjectStyles(state);
   }
 
   screenPointForDevice(deviceId: string): { x: number; y: number } | null {
+    const anchor = this.screenAnchorForDevice(deviceId);
+    if (!anchor || anchor.visibility !== 'visible') {
+      return null;
+    }
+    return {
+      x: anchor.x,
+      y: anchor.y,
+    };
+  }
+
+  screenAnchorForDevice(deviceId: string): DeviceScreenAnchor | null {
     const group = this.#deviceGroups.get(deviceId);
     if (!group) {
       return null;
     }
 
-    const projected = group.position.clone().project(this.#camera);
+    this.#camera.updateMatrixWorld();
+    group.updateMatrixWorld(true);
+
+    const worldPosition = new Vector3();
+    group.getWorldPosition(worldPosition);
+
+    const projected = worldPosition.clone().project(this.#camera);
+    const cameraSpacePosition = worldPosition.clone().applyMatrix4(this.#camera.matrixWorldInverse);
+    const isBehind = cameraSpacePosition.z >= 0;
+    const isVisible =
+      !isBehind &&
+      projected.x >= -1 &&
+      projected.x <= 1 &&
+      projected.y >= -1 &&
+      projected.y <= 1 &&
+      projected.z >= -1 &&
+      projected.z <= 1;
+
+    let normalizedX = projected.x;
+    let normalizedY = projected.y;
+    let visibility: DeviceScreenAnchor['visibility'] = 'visible';
+
+    if (!isVisible) {
+      visibility = isBehind ? 'behind' : 'offscreen';
+      if (isBehind) {
+        normalizedX = -normalizedX;
+        normalizedY = -normalizedY;
+      }
+
+      if (Math.abs(normalizedX) < 0.0001 && Math.abs(normalizedY) < 0.0001) {
+        normalizedY = 1;
+      }
+
+      const magnitude = Math.max(Math.abs(normalizedX), Math.abs(normalizedY), 0.0001);
+      normalizedX /= magnitude;
+      normalizedY /= magnitude;
+    }
+
     const rect = this.#renderer.domElement.getBoundingClientRect();
     return {
-      x: ((projected.x + 1) / 2) * rect.width,
-      y: ((-projected.y + 1) / 2) * rect.height,
+      x: ((normalizedX + 1) / 2) * rect.width,
+      y: ((-normalizedY + 1) / 2) * rect.height,
+      visibility,
     };
   }
 
   #installScene(): void {
-    this.#scene.background = new Color(0xf7f9fc);
+    this.#scene.background = null;
     this.#camera.position.set(0, 18, 34);
 
     this.#renderer.outputColorSpace = SRGBColorSpace;
     this.#renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-    this.#renderer.setClearColor(0xf7f9fc, 1);
+    this.#renderer.setClearColor(0x000000, 0);
     this.#renderer.domElement.style.width = '100%';
     this.#renderer.domElement.style.height = '100%';
     this.#renderer.domElement.style.display = 'block';
+    this.#renderer.domElement.style.background = 'transparent';
     this.#host.appendChild(this.#renderer.domElement);
 
     this.#controls.enableDamping = true;
@@ -264,8 +327,8 @@ export class TopologySceneAdapter {
     const safeWidth = Math.max(1, Math.floor(width));
     const safeHeight = Math.max(1, Math.floor(height));
     this.#renderer.setSize(safeWidth, safeHeight, false);
-    this.#camera.aspect = safeWidth / safeHeight;
-    this.#camera.updateProjectionMatrix();
+    this.#applyCameraViewportOffset(safeWidth, safeHeight);
+    this.#frameSceneIfNeeded();
   };
 
   #handlePointerMove = (event: PointerEvent): void => {
@@ -639,11 +702,135 @@ export class TopologySceneAdapter {
 
     const min = new Vector3(Infinity, Infinity, Infinity);
     const max = new Vector3(-Infinity, -Infinity, -Infinity);
-    for (const target of targetByDeviceId.values()) {
-      min.min(target);
-      max.max(target);
+    for (const [deviceId, target] of targetByDeviceId.entries()) {
+      const device = this.#lastVisibleDeviceById.get(deviceId);
+      const padding = layoutRadiusForDevice(device) * 0.72;
+      min.min(new Vector3(target.x - padding, target.y - padding, target.z - padding));
+      max.max(new Vector3(target.x + padding, target.y + padding, target.z + padding));
     }
     return { max, min };
+  }
+
+  #currentRenderSize(): { height: number; width: number } {
+    const rect = this.#host.getBoundingClientRect();
+    return {
+      width: Math.max(1, Math.floor(rect.width)),
+      height: Math.max(1, Math.floor(rect.height)),
+    };
+  }
+
+  #effectiveVisibleWidth(width: number): number {
+    return Math.max(width * 0.35, width - this.#desktopLeftInset);
+  }
+
+  #projectionInset(): number {
+    return projectionInsetFromDesktopInset(this.#desktopLeftInset);
+  }
+
+  #applyCameraViewportOffset(width?: number, height?: number): void {
+    const renderSize = width && height ? { width, height } : this.#currentRenderSize();
+    const projectionInset = this.#projectionInset();
+
+    if (projectionInset > 0.5) {
+      const fullWidth = renderSize.width + projectionInset;
+      this.#camera.aspect = fullWidth / renderSize.height;
+      this.#camera.setViewOffset(fullWidth, renderSize.height, 0, 0, renderSize.width, renderSize.height);
+    } else {
+      this.#camera.clearViewOffset();
+      this.#camera.aspect = renderSize.width / renderSize.height;
+    }
+    this.#camera.updateProjectionMatrix();
+  }
+
+  #frameSceneIfNeeded(): void {
+    if (this.#lastTargetByDeviceId.size === 0 || this.#lastVisibleDeviceById.size === 0) {
+      return;
+    }
+
+    const renderSize = this.#currentRenderSize();
+    const bounds = this.#computeBounds(this.#lastTargetByDeviceId);
+    const deviceSignature = Array.from(this.#lastVisibleDeviceById.keys()).sort().join('|');
+    const boundsSignature = [
+      bounds.min.x,
+      bounds.min.y,
+      bounds.min.z,
+      bounds.max.x,
+      bounds.max.y,
+      bounds.max.z,
+    ]
+      .map((value) => value.toFixed(2))
+      .join('|');
+    const frameSignature = [
+      deviceSignature,
+      boundsSignature,
+      renderSize.width,
+      renderSize.height,
+      this.#desktopLeftInset.toFixed(1),
+      this.#projectionInset().toFixed(1),
+    ].join('::');
+
+    if (this.#framedScene && this.#lastFrameSignature === frameSignature) {
+      return;
+    }
+
+    this.#frameScene(bounds, renderSize.width, renderSize.height);
+    this.#lastFrameSignature = frameSignature;
+    this.#framedScene = true;
+  }
+
+  #frameScene(
+    bounds: {
+      max: Vector3;
+      min: Vector3;
+    },
+    renderWidth: number,
+    renderHeight: number
+  ): void {
+    const center = bounds.min.clone().add(bounds.max).multiplyScalar(0.5);
+    const offsetDirection = new Vector3(0.42, 0.68, 0.86).normalize();
+    const forward = offsetDirection.clone().multiplyScalar(-1);
+    const worldUp = new Vector3(0, 1, 0);
+    const right = new Vector3().crossVectors(worldUp, forward).normalize();
+    const up = new Vector3().crossVectors(forward, right).normalize();
+    const verticalFov = (this.#camera.fov * Math.PI) / 180;
+    const horizontalFov =
+      2 * Math.atan(Math.tan(verticalFov / 2) * (this.#effectiveVisibleWidth(renderWidth) / renderHeight));
+    const corners = this.#boundsCorners(bounds);
+
+    let horizontalExtent = 0;
+    let verticalExtent = 0;
+    let depthExtent = 0;
+    for (const corner of corners) {
+      const relative = corner.clone().sub(center);
+      horizontalExtent = Math.max(horizontalExtent, Math.abs(relative.dot(right)));
+      verticalExtent = Math.max(verticalExtent, Math.abs(relative.dot(up)));
+      depthExtent = Math.max(depthExtent, Math.abs(relative.dot(forward)));
+    }
+
+    const fitDistance = Math.max(
+      horizontalExtent / Math.tan(horizontalFov / 2),
+      verticalExtent / Math.tan(verticalFov / 2),
+      12
+    );
+    const distance = fitDistance + depthExtent + 3.5;
+
+    this.#controls.target.copy(center);
+    this.#camera.position.copy(center.clone().add(offsetDirection.multiplyScalar(distance)));
+    this.#camera.lookAt(center);
+  }
+
+  #boundsCorners(bounds: { max: Vector3; min: Vector3 }): Vector3[] {
+    const { min, max } = bounds;
+    return [
+      new Vector3(min.x, min.y, min.z),
+      new Vector3(min.x, min.y, max.z),
+      new Vector3(min.x, max.y, min.z),
+      new Vector3(min.x, max.y, max.z),
+      new Vector3(max.x, min.y, min.z),
+      new Vector3(max.x, min.y, max.z),
+      new Vector3(max.x, max.y, min.z),
+      new Vector3(max.x, max.y, max.z),
+    ];
   }
 
   #createDeviceGroup(device: ViewDevice): DeviceGroup {

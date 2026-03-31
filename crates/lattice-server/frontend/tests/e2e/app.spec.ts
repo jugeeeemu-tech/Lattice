@@ -3,6 +3,7 @@ import { expect, test, type Page } from '@playwright/test';
 import type { ViewSnapshot } from '../../src/model/view-snapshot';
 import { loadViewSnapshotFixture } from '../helpers/load-view-snapshot-fixture';
 
+
 async function installTestHooks(page: Page) {
   await page.addInitScript(() => {
     class MockWebSocket extends EventTarget {
@@ -141,6 +142,7 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
 
 async function waitForViewer(page: Page) {
   await page.waitForFunction(() => Boolean(window.__latticeViewer));
+  await page.waitForSelector('canvas');
 }
 
 async function clickSceneDevice(page: Page, deviceId: string) {
@@ -193,6 +195,39 @@ async function discoveryControlMetrics(page: Page) {
   });
 }
 
+async function discoveryGlyphScale(page: Page) {
+  return page.evaluate(() => {
+    const glyph = document.querySelector('.icon-button--discovery .icon-button__glyph');
+    if (!(glyph instanceof HTMLElement)) {
+      return null;
+    }
+
+    const transform = getComputedStyle(glyph).transform;
+    if (transform === 'none') {
+      return 1;
+    }
+
+    return Number(new DOMMatrixReadOnly(transform).a.toFixed(2));
+  });
+}
+
+async function discoveryButtonOffsetY(page: Page) {
+  return page.evaluate(() => {
+    const button = document.querySelector('.icon-button--discovery');
+    if (!(button instanceof HTMLElement)) {
+      return null;
+    }
+
+    const transform = getComputedStyle(button).transform;
+    if (transform === 'none') {
+      return 0;
+    }
+
+    return Number(new DOMMatrixReadOnly(transform).m42.toFixed(2));
+  });
+}
+
+
 test('fits into one screen and keeps the sidebar inside the viewport overlay', async ({
   page,
 }) => {
@@ -215,35 +250,113 @@ test('fits into one screen and keeps the sidebar inside the viewport overlay', a
   ).toBeVisible();
 
   const metrics = await page.evaluate(() => {
+    const app = document.querySelector('#app');
     const viewport = document.querySelector('.viewport');
+    const scene = document.querySelector('#scene-host');
     const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
-    if (!(viewport instanceof HTMLElement) || !(sidebar instanceof HTMLElement)) {
+    const canvas = document.querySelector('canvas');
+    if (
+      !(app instanceof HTMLElement) ||
+      !(viewport instanceof HTMLElement) ||
+      !(scene instanceof HTMLElement) ||
+      !(sidebar instanceof HTMLElement) ||
+      !(canvas instanceof HTMLCanvasElement)
+    ) {
       return null;
     }
 
+    const appRect = app.getBoundingClientRect();
     const viewportRect = viewport.getBoundingClientRect();
+    const sceneRect = scene.getBoundingClientRect();
+    const canvasRect = canvas.getBoundingClientRect();
     const sidebarRect = sidebar.getBoundingClientRect();
+    const gl =
+      canvas.getContext('webgl2', { preserveDrawingBuffer: true }) ??
+      canvas.getContext('webgl', { preserveDrawingBuffer: true });
+    const clearColor = gl ? (gl.getParameter(gl.COLOR_CLEAR_VALUE) as [number, number, number, number]) : null;
 
     return {
+      appRect: {
+        bottom: appRect.bottom,
+        height: appRect.height,
+        left: appRect.left,
+        right: appRect.right,
+        top: appRect.top,
+        width: appRect.width,
+      },
+      canvasBackgroundColor: getComputedStyle(canvas).backgroundColor,
+      canvasClearAlpha: clearColor ? Number(clearColor[3].toFixed(2)) : null,
+      canvasRect: {
+        bottom: canvasRect.bottom,
+        height: canvasRect.height,
+        left: canvasRect.left,
+        right: canvasRect.right,
+        top: canvasRect.top,
+        width: canvasRect.width,
+      },
       hasReloadButton: Array.from(document.querySelectorAll('button')).some((button) =>
         (button.textContent ?? '').includes('再読込')
       ),
       innerHeight: window.innerHeight,
+      innerWidth: window.innerWidth,
+      sceneRect: {
+        bottom: sceneRect.bottom,
+        height: sceneRect.height,
+        left: sceneRect.left,
+        right: sceneRect.right,
+        top: sceneRect.top,
+        width: sceneRect.width,
+      },
       scrollHeight: document.documentElement.scrollHeight,
+      sidebarBackground: getComputedStyle(sidebar).backgroundColor,
       sidebarInsideViewport:
         sidebarRect.left >= viewportRect.left &&
         sidebarRect.top >= viewportRect.top &&
         sidebarRect.right <= viewportRect.right &&
         sidebarRect.bottom <= viewportRect.bottom,
       sidebarRightGap: viewportRect.right - sidebarRect.right,
+      viewportBackgroundImage: getComputedStyle(viewport).backgroundImage,
+      viewportBorderTopWidth: getComputedStyle(viewport).borderTopWidth,
+      viewportBoxShadow: getComputedStyle(viewport).boxShadow,
+      viewportRadius: getComputedStyle(viewport).borderRadius,
+      viewportRect: {
+        bottom: viewportRect.bottom,
+        height: viewportRect.height,
+        left: viewportRect.left,
+        right: viewportRect.right,
+        top: viewportRect.top,
+        width: viewportRect.width,
+      },
     };
   });
 
   expect(metrics).not.toBeNull();
+  expect(metrics?.innerWidth).toBe(metrics?.appRect.width);
   expect(metrics?.scrollHeight).toBe(metrics?.innerHeight);
+  expect(metrics?.appRect.left).toBe(0);
+  expect(metrics?.appRect.top).toBe(0);
+  expect(metrics?.viewportRect.left).toBe(0);
+  expect(metrics?.viewportRect.top).toBe(0);
+  expect(metrics?.sceneRect.left).toBe(0);
+  expect(metrics?.sceneRect.top).toBe(0);
+  expect(metrics?.canvasRect.left).toBe(0);
+  expect(metrics?.canvasRect.top).toBe(0);
+  expect(metrics?.viewportRect.width).toBe(metrics?.innerWidth);
+  expect(metrics?.viewportRect.height).toBe(metrics?.innerHeight);
+  expect(metrics?.sceneRect.width).toBe(metrics?.innerWidth);
+  expect(metrics?.sceneRect.height).toBe(metrics?.innerHeight);
+  expect(metrics?.canvasRect.width).toBe(metrics?.innerWidth);
+  expect(metrics?.canvasRect.height).toBe(metrics?.innerHeight);
   expect(metrics?.sidebarInsideViewport).toBe(true);
+  expect(metrics?.sidebarBackground).toBe('rgb(255, 255, 255)');
+  expect(metrics?.canvasBackgroundColor).toBe('rgba(0, 0, 0, 0)');
+  expect(metrics?.canvasClearAlpha).toBe(0);
   expect(metrics?.sidebarRightGap ?? 0).toBeGreaterThan(48);
   expect(metrics?.hasReloadButton).toBe(false);
+  expect(metrics?.viewportBorderTopWidth).toBe('0px');
+  expect(metrics?.viewportBoxShadow).toBe('none');
+  expect(metrics?.viewportBackgroundImage).toBe('none');
+  expect(metrics?.viewportRadius).toBe('0px');
 });
 
 test('keeps tree and scene selection in sync inside the overlaid sidebar', async ({ page }) => {
@@ -270,6 +383,39 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   await expect(hoverCard.locator('[data-role="hover-body"]')).toHaveText(
     'Server · VM · Virtual · pve-01 上'
   );
+  const hoverPlacement = await page.evaluate(() => {
+    const viewer = window.__latticeViewer;
+    const hoverCardElement = document.querySelector('[data-role="hover-card"]');
+    const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+    const viewport = document.querySelector('.viewport');
+    const anchor = viewer?.screenAnchorForDevice('guest-app') ?? null;
+    if (
+      !(hoverCardElement instanceof HTMLElement) ||
+      !(sidebar instanceof HTMLElement) ||
+      !(viewport instanceof HTMLElement) ||
+      !anchor
+    ) {
+      return null;
+    }
+
+    const hoverRect = hoverCardElement.getBoundingClientRect();
+    const sidebarRect = sidebar.getBoundingClientRect();
+    const viewportRect = viewport.getBoundingClientRect();
+
+    return {
+      anchorVisibility: anchor.visibility,
+      hoverLeft: hoverRect.left,
+      hoverTop: hoverRect.top,
+      sidebarRight: sidebarRect.right,
+      viewportBottom: viewportRect.bottom,
+      viewportTop: viewportRect.top,
+    };
+  });
+  expect(hoverPlacement).not.toBeNull();
+  expect(hoverPlacement?.anchorVisibility).toBe('visible');
+  expect(hoverPlacement?.hoverLeft ?? 0).toBeGreaterThan((hoverPlacement?.sidebarRight ?? 0) + 8);
+  expect(hoverPlacement?.hoverTop ?? 0).toBeGreaterThan(hoverPlacement?.viewportTop ?? 0);
+  expect(hoverPlacement?.hoverTop ?? 0).toBeLessThan(hoverPlacement?.viewportBottom ?? Infinity);
   await page.locator('.tree').dispatchEvent('pointerleave');
   await expect(hoverCard).toBeHidden();
 
@@ -278,6 +424,121 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   await expect(
     page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
   ).resolves.toBe('router-core');
+});
+
+test('centers the scene between the free area and the full viewport using a 6:4 weighting', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const viewer = window.__latticeViewer;
+        if (!viewer) {
+          return 0;
+        }
+
+        return Array.from(viewer.getState().model.sceneDeviceIds).filter(
+          (deviceId) => viewer.screenPointForDevice(deviceId) !== null
+        ).length;
+      })
+    )
+    .toBeGreaterThan(0);
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const viewer = window.__latticeViewer;
+        const viewport = document.querySelector('.viewport');
+        const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+        if (!viewer || !(viewport instanceof HTMLElement) || !(sidebar instanceof HTMLElement)) {
+          return null;
+        }
+
+        const deviceIds = Array.from(viewer.getState().model.sceneDeviceIds);
+        const points = deviceIds
+          .map((deviceId) => viewer.screenPointForDevice(deviceId))
+          .filter((point): point is { x: number; y: number } => Boolean(point));
+        if (points.length === 0) {
+          return null;
+        }
+
+        const average = points.reduce(
+          (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
+          { x: 0, y: 0 }
+        );
+        const viewportRect = viewport.getBoundingClientRect();
+        const sidebarRect = sidebar.getBoundingClientRect();
+
+        return {
+          averageScreenX: average.x / points.length,
+          freeAreaCenterX: ((sidebarRect.right - viewportRect.left) + viewportRect.width) / 2,
+          viewportCenterX: viewportRect.width / 2,
+          weightedCenterX:
+            ((((sidebarRect.right - viewportRect.left) + viewportRect.width) / 2) * 0.6) +
+            (viewportRect.width / 2) * 0.4,
+        };
+      })
+    )
+    .not.toBeNull();
+
+  const resolvedMetrics = await page.evaluate(() => {
+    const viewer = window.__latticeViewer;
+    const viewport = document.querySelector('.viewport');
+    const sidebar = document.querySelector('[data-role="sidebar-overlay"]');
+    if (!viewer || !(viewport instanceof HTMLElement) || !(sidebar instanceof HTMLElement)) {
+      return null;
+    }
+
+    const deviceIds = Array.from(viewer.getState().model.sceneDeviceIds);
+    const points = deviceIds
+      .map((deviceId) => viewer.screenPointForDevice(deviceId))
+      .filter((point): point is { x: number; y: number } => Boolean(point));
+    if (points.length === 0) {
+      return null;
+    }
+
+    const average = points.reduce(
+      (acc, point) => ({ x: acc.x + point.x, y: acc.y + point.y }),
+      { x: 0, y: 0 }
+    );
+    const viewportRect = viewport.getBoundingClientRect();
+    const sidebarRect = sidebar.getBoundingClientRect();
+
+    return {
+      averageScreenX: average.x / points.length,
+      freeAreaCenterX: ((sidebarRect.right - viewportRect.left) + viewportRect.width) / 2,
+      viewportCenterX: viewportRect.width / 2,
+      weightedCenterX:
+        ((((sidebarRect.right - viewportRect.left) + viewportRect.width) / 2) * 0.6) +
+        (viewportRect.width / 2) * 0.4,
+    };
+  });
+
+  expect(resolvedMetrics).not.toBeNull();
+  const metrics = resolvedMetrics as {
+    averageScreenX: number;
+    freeAreaCenterX: number;
+    viewportCenterX: number;
+    weightedCenterX: number;
+  };
+  expect(
+    Math.abs(metrics.averageScreenX - metrics.weightedCenterX)
+  ).toBeLessThan(80);
+  expect(metrics.averageScreenX).toBeGreaterThan(metrics.viewportCenterX);
+  expect(metrics.averageScreenX).toBeLessThan(metrics.freeAreaCenterX);
+  expect(Math.abs(metrics.averageScreenX - metrics.weightedCenterX)).toBeLessThan(
+    Math.abs(metrics.averageScreenX - metrics.freeAreaCenterX)
+  );
 });
 
 test('uses the discovery icon for manual refresh, resets to busy state, and surfaces failures by tooltip', async ({
@@ -294,10 +555,38 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await waitForViewer(page);
 
   const discoveryControl = page.locator('[data-role="discovery-control"]');
-  await page.locator('.floating-action--end').hover();
+  const discoveryButton = discoveryControl.locator('button');
+  await page.locator('[data-role="discovery-action"]').hover();
+  await expect.poll(() => discoveryButtonOffsetY(page)).toBe(0);
   await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('今すぐ再探索');
+  await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('最新の構成を取得します。');
+  await expect(page.locator('[data-role="discovery-tooltip"]')).not.toContainText(
+    '60秒ごとに自動で更新します。'
+  );
 
-  await discoveryControl.locator('button').click();
+  await discoveryButton.dispatchEvent('pointerdown', {
+    button: 0,
+    clientX: 0,
+    clientY: 0,
+    isPrimary: true,
+    pointerId: 1,
+    pointerType: 'mouse',
+  });
+  await expect.poll(() => discoveryGlyphScale(page)).toBe(0.9);
+  await page.evaluate(() => {
+    window.dispatchEvent(
+      new PointerEvent('pointerup', {
+        bubbles: true,
+        cancelable: true,
+        isPrimary: true,
+        pointerId: 1,
+        pointerType: 'mouse',
+      })
+    );
+  });
+  await expect.poll(() => discoveryGlyphScale(page)).toBe(1);
+
+  await discoveryButton.click();
   expect(api.getDiscoverCount()).toBe(1);
   await expect
     .poll(async () => (await discoveryControlMetrics(page))?.state)
@@ -337,7 +626,7 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   await expect
     .poll(async () => (await discoveryControlMetrics(page))?.state)
     .toBe('failed');
-  await page.locator('.floating-action--end').hover();
+  await page.locator('[data-role="discovery-action"]').hover();
   await expect(page.locator('[data-role="discovery-tooltip"]')).toContainText('SNMP timeout');
 });
 
@@ -370,6 +659,49 @@ test('does not update the current snapshot when manual refresh returns busy', as
     )
     .toEqual(before);
 });
+
+test('shows explanatory tooltips for device and link counts', async ({ page }) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  await page.locator('[data-role="device-stat"]').hover();
+  const deviceTooltipStyles = await page.evaluate(() => {
+    const tooltip = document.querySelector('[data-role="device-stat-tooltip"]');
+    if (!(tooltip instanceof HTMLElement)) {
+      return null;
+    }
+    const styles = getComputedStyle(tooltip);
+    return {
+      opacity: styles.opacity,
+      transform: styles.transform,
+      transitionDuration: styles.transitionDuration,
+    };
+  });
+  expect(deviceTooltipStyles).toEqual({
+    opacity: '1',
+    transform: 'none',
+    transitionDuration: '0s',
+  });
+  await expect(page.locator('[data-role="device-stat-tooltip"]')).toContainText('表示中の機器数');
+  await expect(page.locator('[data-role="device-stat-tooltip"]')).toContainText(
+    '3Dシーンと構成ツリーに含まれる機器の数です。'
+  );
+
+  await page.locator('[data-role="link-stat"]').hover();
+  await expect(page.locator('[data-role="link-stat-tooltip"]')).toContainText('表示中のリンク数');
+  await expect(page.locator('[data-role="link-stat-tooltip"]')).toContainText(
+    '現在表示している接続の数です。'
+  );
+});
+
+
 test('switches the sidebar to a drawer on narrow screens', async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 700 });
   await installTestHooks(page);

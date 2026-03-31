@@ -5,6 +5,7 @@ import type { TopologySceneAdapter } from '../scene/topology-scene';
 import { TopologyStore, type TopologyStoreState } from '../state/topology-store';
 import { preferredEntryForDevice } from '../topology/view-model';
 import { TopologyTransport } from '../transport/topology-transport';
+import { resolveTreeHoverCardPosition } from './hover-card-position';
 import './lattice-hover-card';
 import './lattice-sidebar-tree';
 
@@ -12,6 +13,11 @@ declare global {
   interface Window {
     __latticeViewer?: {
       getState: () => TopologyStoreState;
+      screenAnchorForDevice: (
+        deviceId: string
+      ) =>
+        | { visibility: 'behind' | 'offscreen' | 'visible'; x: number; y: number }
+        | null;
       screenPointForDevice: (deviceId: string) => { x: number; y: number } | null;
       selectDevice: (deviceId: string) => void;
       transport: TopologyTransport;
@@ -43,6 +49,7 @@ function clamp(value: number, min: number, max: number): number {
 export class LatticeApp extends LitElement {
   static properties = {
     discoveryPending: { attribute: false },
+    discoveryPressed: { attribute: false },
     isCompactLayout: { attribute: false },
     nowMs: { attribute: false },
     sidebarOpen: { attribute: false },
@@ -50,6 +57,7 @@ export class LatticeApp extends LitElement {
   };
 
   declare discoveryPending: boolean;
+  declare discoveryPressed: boolean;
   declare isCompactLayout: boolean;
   declare nowMs: number;
   declare sidebarOpen: boolean;
@@ -61,7 +69,13 @@ export class LatticeApp extends LitElement {
   #sceneLoadPromise: Promise<void> | null = null;
   #unsubscribe: (() => void) | null = null;
   #clockTimer: number | null = null;
+  #layoutObserver: ResizeObserver | null = null;
   #mediaQuery: MediaQueryList | null = null;
+  #releaseDiscoveryPress = () => {
+    this.discoveryPressed = false;
+    window.removeEventListener('pointerup', this.#releaseDiscoveryPress);
+    window.removeEventListener('pointercancel', this.#releaseDiscoveryPress);
+  };
   #handleViewportModeChange = (event: MediaQueryListEvent) => {
     this.#syncViewportMode(event.matches);
   };
@@ -69,6 +83,7 @@ export class LatticeApp extends LitElement {
   constructor() {
     super();
     this.discoveryPending = false;
+    this.discoveryPressed = false;
     this.isCompactLayout = false;
     this.nowMs = Date.now();
     this.sidebarOpen = false;
@@ -98,7 +113,9 @@ export class LatticeApp extends LitElement {
     this.#unsubscribe = null;
     this.#stopClock();
     this.#unbindViewportMode();
+    this.#unbindLayoutObserver();
     this.#transport.stop();
+    this.#releaseDiscoveryPress();
     this.#scene?.dispose();
     this.#scene = null;
     this.#sceneLoadPromise = null;
@@ -111,9 +128,12 @@ export class LatticeApp extends LitElement {
       throw new Error('Scene host #scene-host was not found.');
     }
     this.#sceneLoadPromise ??= this.#mountScene(sceneHost);
+    this.#bindLayoutObserver();
 
     window.__latticeViewer = {
       getState: () => this.#store.getState(),
+      screenAnchorForDevice: (deviceId: string) =>
+        this.#scene?.screenAnchorForDevice(deviceId) ?? null,
       screenPointForDevice: (deviceId: string) =>
         this.#scene?.screenPointForDevice(deviceId) ?? null,
       selectDevice: (deviceId: string) => {
@@ -156,6 +176,7 @@ export class LatticeApp extends LitElement {
         }
       },
     });
+    this.#syncSceneLayout();
     this.#scene.sync(this.state);
   }
 
@@ -207,6 +228,7 @@ export class LatticeApp extends LitElement {
     if (!isCompactLayout) {
       this.sidebarOpen = false;
     }
+    this.#syncSceneLayout();
   }
 
   #toggleSidebar() {
@@ -227,7 +249,7 @@ export class LatticeApp extends LitElement {
       return;
     }
 
-    const discoveryState = this.#effectiveDiscoveryState();
+    const discoveryState = this.state.discoveryState;
     if (discoveryState === 'discovering' || discoveryState === 'loading') {
       return;
     }
@@ -241,7 +263,7 @@ export class LatticeApp extends LitElement {
   }
 
   #effectiveDiscoveryState(): DiscoveryState {
-    return this.discoveryPending ? 'discovering' : this.state.discoveryState;
+    return this.state.discoveryState;
   }
 
   #discoveryProgress(): number {
@@ -265,9 +287,7 @@ export class LatticeApp extends LitElement {
     if (discoveryState === 'failed') {
       return {
         title: '再探索',
-        body:
-          this.state.discoveryMessage ??
-          `${this.state.autoDiscoveryIntervalSeconds}秒ごとに再試行します。`,
+        body: this.state.discoveryMessage ?? '探索を再実行します。',
       };
     }
 
@@ -280,7 +300,7 @@ export class LatticeApp extends LitElement {
 
     return {
       title: '今すぐ再探索',
-      body: `${this.state.autoDiscoveryIntervalSeconds}秒ごとに自動で更新します。`,
+      body: '最新の構成を取得します。',
     };
   }
 
@@ -368,11 +388,125 @@ export class LatticeApp extends LitElement {
     `;
   }
 
+  #bindLayoutObserver() {
+    const viewport = this.querySelector<HTMLElement>('.viewport');
+    const sidebar = this.querySelector<HTMLElement>('[data-role="sidebar-overlay"]');
+    if (!viewport || !sidebar || typeof ResizeObserver === 'undefined') {
+      this.#syncSceneLayout();
+      return;
+    }
+
+    this.#layoutObserver?.disconnect();
+    this.#layoutObserver = new ResizeObserver(() => this.#syncSceneLayout());
+    this.#layoutObserver.observe(viewport);
+    this.#layoutObserver.observe(sidebar);
+    this.#syncSceneLayout();
+  }
+
+  #unbindLayoutObserver() {
+    this.#layoutObserver?.disconnect();
+    this.#layoutObserver = null;
+  }
+
+  #syncSceneLayout() {
+    if (!this.#scene) {
+      return;
+    }
+
+    const viewport = this.querySelector<HTMLElement>('.viewport');
+    const sidebar = this.querySelector<HTMLElement>('[data-role="sidebar-overlay"]');
+    if (!viewport || !sidebar || this.isCompactLayout) {
+      this.#scene.setDesktopLeftInset(0);
+      return;
+    }
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const sidebarRect = sidebar.getBoundingClientRect();
+    const leftInset = Math.max(0, sidebarRect.right - viewportRect.left);
+    this.#scene.setDesktopLeftInset(leftInset);
+  }
+
+  #handleDiscoveryPointerDown = (event: PointerEvent) => {
+    const button = event.currentTarget;
+    if (!(button instanceof HTMLButtonElement) || button.disabled) {
+      return;
+    }
+
+    this.discoveryPressed = true;
+    window.addEventListener('pointerup', this.#releaseDiscoveryPress, { once: true });
+    window.addEventListener('pointercancel', this.#releaseDiscoveryPress, { once: true });
+  };
+
+  #handleDiscoveryKeyDown = (event: KeyboardEvent) => {
+    if (event.key !== ' ' && event.key !== 'Enter') {
+      return;
+    }
+
+    const button = event.currentTarget;
+    if (!(button instanceof HTMLButtonElement) || button.disabled) {
+      return;
+    }
+
+    this.discoveryPressed = true;
+  };
+
+  #handleDiscoveryKeyUp = (event: KeyboardEvent) => {
+    if (event.key !== ' ' && event.key !== 'Enter') {
+      return;
+    }
+
+    this.discoveryPressed = false;
+  };
+
+  #treeHoverCardBounds():
+    | { bottom: number; left: number; right: number; top: number }
+    | null {
+    const viewport = this.querySelector<HTMLElement>('.viewport');
+    const sidebar = this.querySelector<HTMLElement>('[data-role="sidebar-overlay"]');
+    if (!viewport) {
+      return null;
+    }
+
+    const viewportRect = viewport.getBoundingClientRect();
+    const leftInset =
+      !sidebar || this.isCompactLayout
+        ? 0
+        : Math.max(0, sidebar.getBoundingClientRect().right - viewportRect.left);
+
+    return {
+      left: leftInset,
+      top: 0,
+      right: viewportRect.width,
+      bottom: viewportRect.height,
+    };
+  }
+
+  #resolvedHoverCardPosition():
+    | { x: number; y: number }
+    | null
+    | undefined {
+    if (!this.state.hoverCard) {
+      return undefined;
+    }
+
+    if (this.state.hoverSource !== 'tree' || !this.state.hoveredDeviceId) {
+      return undefined;
+    }
+
+    const anchor = this.#scene?.screenAnchorForDevice(this.state.hoveredDeviceId) ?? null;
+    const bounds = this.#treeHoverCardBounds();
+    if (!anchor || !bounds) {
+      return null;
+    }
+
+    return resolveTreeHoverCardPosition(anchor, bounds);
+  }
+
   render() {
     const discoveryState = this.#effectiveDiscoveryState();
     const discoveryTooltip = this.#discoveryTooltip();
     const discoveryControlDisabled =
-      discoveryState === 'discovering' || discoveryState === 'loading';
+      this.discoveryPending || discoveryState === 'discovering' || discoveryState === 'loading';
 
     return html`
       <main id="app">
@@ -410,7 +544,10 @@ export class LatticeApp extends LitElement {
           </div>
 
           <div class="viewport__toolbar viewport__toolbar--end">
-            <div class="floating-action floating-action--end">
+            <div
+              class="floating-action floating-action--end"
+              data-role="discovery-action"
+            >
               <div
                 class="discovery-control"
                 data-role="discovery-control"
@@ -421,13 +558,18 @@ export class LatticeApp extends LitElement {
                 <button
                   type="button"
                   class="icon-button icon-button--discovery"
+                  data-pressed=${this.discoveryPressed ? 'true' : 'false'}
                   aria-label=${this.#discoveryAriaLabel()}
                   ?disabled=${discoveryControlDisabled}
+                  @blur=${this.#releaseDiscoveryPress}
                   @click=${() => {
                     void this.#requestDiscovery();
                   }}
+                  @keydown=${this.#handleDiscoveryKeyDown}
+                  @keyup=${this.#handleDiscoveryKeyUp}
+                  @pointerdown=${this.#handleDiscoveryPointerDown}
                 >
-                  ${this.#renderDiscoveryIcon()}
+                  <span class="icon-button__glyph">${this.#renderDiscoveryIcon()}</span>
                 </button>
               </div>
               <div class="floating-tooltip" data-role="discovery-tooltip">
@@ -450,22 +592,36 @@ export class LatticeApp extends LitElement {
               <div class="sidebar-shell__brand" aria-hidden="true">L</div>
 
               <div class="sidebar-shell__stats">
-                <div
-                  class="sidebar-stat"
-                  data-role="device-stat"
-                  aria-label=${`${this.state.deviceCount} devices`}
-                >
-                  <span class="sidebar-stat__icon">${this.#renderDeviceStatIcon()}</span>
-                  <span class="sidebar-stat__value">${this.state.deviceCount}</span>
+                <div class="floating-action floating-action--end sidebar-stat-action">
+                  <div
+                    class="sidebar-stat"
+                    data-role="device-stat"
+                    aria-label=${`${this.state.deviceCount} devices`}
+                  >
+                    <span class="sidebar-stat__icon">${this.#renderDeviceStatIcon()}</span>
+                    <span class="sidebar-stat__value">${this.state.deviceCount}</span>
+                  </div>
+                  <div class="floating-tooltip" data-role="device-stat-tooltip">
+                    <p class="floating-tooltip__title">表示中の機器数</p>
+                    <p class="floating-tooltip__body">
+                      3Dシーンと構成ツリーに含まれる機器の数です。
+                    </p>
+                  </div>
                 </div>
 
-                <div
-                  class="sidebar-stat"
-                  data-role="link-stat"
-                  aria-label=${`${this.state.visibleLinkCount} links`}
-                >
-                  <span class="sidebar-stat__icon">${this.#renderLinkStatIcon()}</span>
-                  <span class="sidebar-stat__value">${this.state.visibleLinkCount}</span>
+                <div class="floating-action floating-action--end sidebar-stat-action">
+                  <div
+                    class="sidebar-stat"
+                    data-role="link-stat"
+                    aria-label=${`${this.state.visibleLinkCount} links`}
+                  >
+                    <span class="sidebar-stat__icon">${this.#renderLinkStatIcon()}</span>
+                    <span class="sidebar-stat__value">${this.state.visibleLinkCount}</span>
+                  </div>
+                  <div class="floating-tooltip" data-role="link-stat-tooltip">
+                    <p class="floating-tooltip__title">表示中のリンク数</p>
+                    <p class="floating-tooltip__body">現在表示している接続の数です。</p>
+                  </div>
                 </div>
               </div>
             </div>
@@ -497,7 +653,10 @@ export class LatticeApp extends LitElement {
               : html``}
           </div>
 
-          <lattice-hover-card .state=${this.state}></lattice-hover-card>
+          <lattice-hover-card
+            .position=${this.#resolvedHoverCardPosition()}
+            .state=${this.state}
+          ></lattice-hover-card>
         </section>
       </main>
     `;

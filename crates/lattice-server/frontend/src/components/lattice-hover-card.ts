@@ -4,17 +4,36 @@ import type { TopologyStoreState } from '../state/topology-store';
 
 export class LatticeHoverCard extends LitElement {
   static properties = {
+    position: { attribute: false },
     state: { attribute: false },
   };
 
+  declare position: { x: number; y: number } | null | undefined;
   declare state: TopologyStoreState;
+
+  constructor() {
+    super();
+    this.position = undefined;
+  }
 
   createRenderRoot(): this {
     return this;
   }
 
   render() {
-    const hoverCard = this.state?.hoverCard ?? null;
+    const baseHoverCard = this.state?.hoverCard ?? null;
+    const hoverCard =
+      !baseHoverCard
+        ? null
+        : this.position === undefined
+          ? baseHoverCard
+          : this.position
+            ? {
+                ...baseHoverCard,
+                x: this.position.x,
+                y: this.position.y,
+              }
+            : null;
     return html`
       <div
         class="hover-card"
