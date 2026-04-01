@@ -73,7 +73,8 @@ fn main() -> Result<(), Box<dyn Error>> {
     let manifest_assets = collect_manifest_assets(&manifest_path)?;
     let embedded_assets = collect_embedded_assets(&dist_dir)?;
     ensure_manifest_assets_are_embedded(&manifest_assets, &embedded_assets)?;
-    let generated = render_generated_assets_module(&index_html_path, &manifest_assets, &embedded_assets);
+    let generated =
+        render_generated_assets_module(&index_html_path, &manifest_assets, &embedded_assets);
     let out_dir = PathBuf::from(env::var("OUT_DIR")?);
     fs::write(out_dir.join("frontend_assets.rs"), generated)?;
 
@@ -294,9 +295,7 @@ fn render_generated_assets_module(
         generated.push_str(&rust_string_literal(asset.content_type));
         generated.push_str(",\n");
         generated.push_str("            bytes: include_bytes!(");
-        generated.push_str(&rust_string_literal(
-            &asset.absolute_path.to_string_lossy(),
-        ));
+        generated.push_str(&rust_string_literal(&asset.absolute_path.to_string_lossy()));
         generated.push_str("),\n");
         generated.push_str("        }),\n");
     }

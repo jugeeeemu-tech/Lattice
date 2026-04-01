@@ -4,8 +4,12 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use lattice_core::{load_config, DiscoveryEngine};
 use tokio::net::TcpListener;
+use tracing::info;
 
-use crate::api::{routes::build_router, AppState, DiscoveryCoordinator};
+use crate::{
+    api::{routes::build_router, AppState, DiscoveryCoordinator},
+    observability::init_tracing,
+};
 
 #[derive(Debug, Parser)]
 #[command(name = "lattice", about = "Dynamic network topology explorer")]
@@ -63,6 +67,8 @@ async fn run_serve(
     host_override: Option<String>,
     port_override: Option<u16>,
 ) -> Result<()> {
+    init_tracing();
+
     let mut config = load_config(config_path)?;
     if let Some(host) = host_override {
         config.server.host = host;
@@ -83,7 +89,7 @@ async fn run_serve(
     coordinator.start();
 
     let listener = TcpListener::bind(&bind_addr).await?;
-    println!("Lattice is running at http://{}", bind_addr);
+    info!(listen_addr = %bind_addr, "lattice server listening");
 
     let state = AppState { coordinator };
     axum::serve(listener, build_router(state)).await?;

@@ -1,5 +1,6 @@
 pub mod api;
 pub mod cli;
+pub mod observability;
 
 use std::path::{Path, PathBuf};
 

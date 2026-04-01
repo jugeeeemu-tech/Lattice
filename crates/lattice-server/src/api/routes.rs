@@ -1,8 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::{
     body::Body,
-    extract::{Path, State},
+    extract::{MatchedPath, Path, State},
     http::{header, HeaderValue, StatusCode},
     response::{Html, IntoResponse, Json, Response},
     routing::{get, post},
@@ -10,6 +11,8 @@ use axum::{
 };
 use lattice_core::Device;
 use serde::Serialize;
+use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
+use tracing::{info_span, Level};
 
 use super::{frontend_assets, ws::topology_socket, DiscoveryCoordinator, ViewSnapshot};
 
@@ -26,6 +29,53 @@ enum PostDiscoverResponse {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    let trace_layer = TraceLayer::new_for_http()
+        .make_span_with(|request: &axum::http::Request<Body>| {
+            let matched_path = request
+                .extensions()
+                .get::<MatchedPath>()
+                .map(MatchedPath::as_str)
+                .unwrap_or_else(|| request.uri().path());
+
+            info_span!(
+                "http_request",
+                method = %request.method(),
+                matched_path = %matched_path,
+                status = tracing::field::Empty,
+                latency_ms = tracing::field::Empty,
+            )
+        })
+        .on_response(
+            |response: &Response, latency: Duration, span: &tracing::Span| {
+                span.record(
+                    "status",
+                    tracing::field::display(response.status().as_u16()),
+                );
+                span.record("latency_ms", latency.as_millis());
+
+                tracing::event!(
+                    parent: span,
+                    Level::INFO,
+                    status = response.status().as_u16(),
+                    latency_ms = latency.as_millis(),
+                    "http request completed"
+                );
+            },
+        )
+        .on_failure(
+            |error: ServerErrorsFailureClass, latency: Duration, span: &tracing::Span| {
+                span.record("latency_ms", latency.as_millis());
+
+                tracing::event!(
+                    parent: span,
+                    Level::ERROR,
+                    failure_class = %error,
+                    latency_ms = latency.as_millis(),
+                    "http request failed"
+                );
+            },
+        );
+
     Router::new()
         .route("/health", get(health))
         .route("/api/topology", get(get_topology))
@@ -34,6 +84,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/ws/topology", get(topology_socket))
         .route("/", get(index_html))
         .route("/*asset_path", get(static_asset))
+        .layer(trace_layer)
         .with_state(state)
 }
 

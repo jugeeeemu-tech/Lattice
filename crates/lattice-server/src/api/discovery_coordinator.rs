@@ -3,7 +3,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::Result;
@@ -12,6 +12,7 @@ use chrono::{DateTime, Utc};
 use lattice_core::{Device, DiscoveryEngine, DiscoveryResult, DiscoveryTree, Topology};
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
+use tracing::{error, info, warn};
 
 use crate::api::view_snapshot::{build_view_snapshot, DiscoveryStatus, ViewSnapshot};
 
@@ -52,6 +53,16 @@ enum DiscoveryTrigger {
     Initial,
     Manual,
     Automatic,
+}
+
+impl DiscoveryTrigger {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Initial => "initial",
+            Self::Manual => "manual",
+            Self::Automatic => "automatic",
+        }
+    }
 }
 
 impl DiscoveryCoordinator {
@@ -163,7 +174,13 @@ impl DiscoveryCoordinator {
     ) -> Option<ViewSnapshot> {
         let discovery_guard = match self.discovery_lock.clone().try_lock_owned() {
             Ok(guard) => guard,
-            Err(_) => return None,
+            Err(_) => {
+                warn!(
+                    trigger = trigger.as_str(),
+                    "discovery start skipped because another run is active"
+                );
+                return None;
+            }
         };
 
         self.pause_auto_discovery().await;
@@ -177,28 +194,53 @@ impl DiscoveryCoordinator {
             };
         }
         let snapshot = self.current_snapshot().await;
+        info!(trigger = trigger.as_str(), "discovery started");
         let _ = self.tx.send(DiscoveryEvent::Started);
 
         let coordinator = Arc::clone(self);
         tokio::spawn(async move {
-            coordinator.run_discovery_task(discovery_guard).await;
+            coordinator
+                .run_discovery_task(trigger, discovery_guard)
+                .await;
         });
 
         Some(snapshot)
     }
 
-    async fn run_discovery_task(self: Arc<Self>, discovery_guard: OwnedMutexGuard<()>) {
+    async fn run_discovery_task(
+        self: Arc<Self>,
+        trigger: DiscoveryTrigger,
+        discovery_guard: OwnedMutexGuard<()>,
+    ) {
+        let started_at = Instant::now();
+
         match self.runner.run_discovery().await {
             Ok(result) => {
+                let device_count = result.topology.devices.len();
+                let link_count = result.topology.links.len();
                 *self.current_result.write().await = Some(result);
                 *self.discovery_status.write().await = DiscoveryStatus::ready();
                 self.schedule_next_auto_discovery().await;
+                info!(
+                    trigger = trigger.as_str(),
+                    duration_ms = started_at.elapsed().as_millis(),
+                    device_count,
+                    link_count,
+                    "discovery completed"
+                );
                 let _ = self.tx.send(DiscoveryEvent::Completed);
             }
             Err(error) => {
-                *self.discovery_status.write().await =
-                    DiscoveryStatus::failed(short_error_message(&error.to_string()));
+                let message = short_error_message(&error.to_string());
+                *self.discovery_status.write().await = DiscoveryStatus::failed(message.clone());
                 self.schedule_next_auto_discovery().await;
+                error!(
+                    trigger = trigger.as_str(),
+                    duration_ms = started_at.elapsed().as_millis(),
+                    error_message = %message,
+                    error = %error,
+                    "discovery failed"
+                );
                 let _ = self.tx.send(DiscoveryEvent::Failed);
             }
         }
