@@ -1,4 +1,4 @@
-import type { GuestKind, ViewDevice } from '../model/view-snapshot';
+import type { GuestKind, ViewDevice } from '../generated';
 
 export type DeviceVisualVariant =
   | 'bridge'

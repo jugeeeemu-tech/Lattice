@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ViewDevice } from '../../src/model/view-snapshot';
+import type { ViewDevice } from '../../src/generated';
 import {
   deviceSidebarIconSpec,
   deviceVisualSpec,

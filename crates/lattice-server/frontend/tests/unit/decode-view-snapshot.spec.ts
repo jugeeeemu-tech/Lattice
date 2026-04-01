@@ -11,48 +11,55 @@ describe('decodeViewSnapshot', () => {
     expect(EMPTY_SNAPSHOT.next_auto_discovery_at_ms).toBeNull();
   });
 
-  it('normalizes incoming payloads into the frontend snapshot shape', () => {
+  it('preserves valid API payloads while applying only structural guards', () => {
     const decoded = decodeViewSnapshot({
       devices: [
         {
-          deployment_type: 'VIRTUAL',
-          device_role: 'Server',
-          guest_kind: 'VM',
-          id: ' guest-app ',
+          deployment_type: 'virtual',
+          device_role: 'server',
+          guest_kind: 'vm',
+          id: 'guest-app',
           identity_keys: {
-            mac_addresses: ['aa:bb:cc:dd:ee:ff', 'aa:bb:cc:dd:ee:ff'],
-            mgmt_ip: ' 192.0.2.10 ',
-            sys_name: ' vm-app ',
+            chassis_id: null,
+            mac_addresses: ['aa:bb:cc:dd:ee:ff'],
+            mgmt_ip: '192.0.2.10',
+            sys_name: 'vm-app',
           },
-          label: '',
+          label: 'vm-app',
+          depth: 0,
+          host_label: null,
+          upstream_interface: null,
         },
       ],
       discovery_status: {
-        kind: 'READY',
-        reason: ' synced ',
+        state: 'ready',
+        message: 'synced',
       },
-      auto_discovery_interval_seconds: '90',
-      next_auto_discovery_at_ms: '1744000000000',
+      auto_discovery_interval_seconds: 90,
+      next_auto_discovery_at_ms: 1744000000000,
       links: [
         {
           guest_attachment: {
             bridge_name: 'vmbr0',
-            trunk_vlans: ['120', '120', '130'],
-            vlan_tag: '120',
+            trunk_vlans: [120, 130],
+            vlan_tag: 120,
           },
           local_device_id: 'guest-app',
-          local_interface: '',
-          protocol: 'LLDP',
+          local_interface: 'eth0',
+          local_ip: null,
+          protocol: 'lldp',
           remote_device_id: 'router-core',
           remote_interface: 'eth0',
-          speed_bps: '1000',
+          remote_ip: null,
+          speed_bps: 1000,
+          id: 'link-1',
         },
       ],
       primary_row_by_device: {
-        ' guest-app ': ' row-1 ',
+        'guest-app': 'row-1',
       },
       tree_edges: [{ child_row_id: 'row-1', parent_row_id: 'root-1' }],
-      tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: '' }],
+      tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'vm-app' }],
     });
 
     expect(decoded).toEqual({
@@ -62,7 +69,6 @@ describe('decodeViewSnapshot', () => {
           device_role: 'server',
           depth: 0,
           guest_kind: 'vm',
-          host_label: null,
           id: 'guest-app',
           identity_keys: {
             chassis_id: null,
@@ -71,6 +77,7 @@ describe('decodeViewSnapshot', () => {
             sys_name: 'vm-app',
           },
           label: 'vm-app',
+          host_label: null,
           upstream_interface: null,
         },
       ],
@@ -87,9 +94,9 @@ describe('decodeViewSnapshot', () => {
             trunk_vlans: [120, 130],
             vlan_tag: 120,
           },
-          id: 'guest-app||router-core|eth0|LLDP',
+          id: 'link-1',
           local_device_id: 'guest-app',
-          local_interface: 'unknown',
+          local_interface: 'eth0',
           local_ip: null,
           protocol: 'lldp',
           remote_device_id: 'router-core',
@@ -100,31 +107,39 @@ describe('decodeViewSnapshot', () => {
       ],
       primary_row_by_device: { 'guest-app': 'row-1' },
       tree_edges: [{ child_row_id: 'row-1', parent_row_id: 'root-1' }],
-      tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'Unknown' }],
+      tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'vm-app' }],
     });
   });
 
-  it('normalizes an unknown guest kind to null', () => {
+  it('falls back to safe defaults when required containers are missing', () => {
     const decoded = decodeViewSnapshot({
-      devices: [
-        {
-          id: 'device-1',
-          label: 'device-1',
-          device_role: 'server',
-          deployment_type: 'virtual',
-          guest_kind: 'pod',
-          identity_keys: {
-            mac_addresses: [],
-          },
-        },
-      ],
       discovery_status: {
-        state: 'ready',
+        state: 'invalid',
+        message: 42,
       },
       auto_discovery_interval_seconds: 0,
+      devices: null,
+      links: 'invalid',
+      tree_rows: {},
+      tree_edges: undefined,
+      primary_row_by_device: {
+        guest: 'row-1',
+        bad: 42,
+      },
     });
 
-    expect(decoded.devices[0]?.guest_kind).toBeNull();
+    expect(decoded.devices).toEqual([]);
+    expect(decoded.links).toEqual([]);
+    expect(decoded.tree_rows).toEqual([]);
+    expect(decoded.tree_edges).toEqual([]);
+    expect(decoded.primary_row_by_device).toEqual({ guest: 'row-1' });
+    expect(decoded.discovery_status).toEqual({ state: 'loading', message: null });
     expect(decoded.auto_discovery_interval_seconds).toBe(60);
+    expect(decoded.next_auto_discovery_at_ms).toBeNull();
+  });
+
+  it('returns the stable empty snapshot for non-object payloads', () => {
+    expect(decodeViewSnapshot(null)).toBe(EMPTY_SNAPSHOT);
+    expect(decodeViewSnapshot([])).toBe(EMPTY_SNAPSHOT);
   });
 });

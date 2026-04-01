@@ -5,8 +5,9 @@ use lattice_core::{
     GuestAttachment as CoreGuestAttachment, GuestKind, IdentityKeys, Link, Topology,
 };
 use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[serde(rename_all = "snake_case")]
 pub enum DiscoveryState {
     Loading,
@@ -15,7 +16,7 @@ pub enum DiscoveryState {
     Failed,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct DiscoveryStatus {
     pub state: DiscoveryState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -52,7 +53,7 @@ impl DiscoveryStatus {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ViewDevice {
     pub id: String,
     pub label: String,
@@ -68,7 +69,7 @@ pub struct ViewDevice {
     pub upstream_interface: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ViewLink {
     pub id: String,
     pub local_device_id: String,
@@ -83,7 +84,7 @@ pub struct ViewLink {
     pub guest_attachment: Option<ViewGuestAttachment>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct ViewGuestAttachment {
     pub bridge_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -92,20 +93,21 @@ pub struct ViewGuestAttachment {
     pub trunk_vlans: Vec<u16>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct TreeRow {
     pub id: String,
     pub device_id: String,
     pub label: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct TreeEdge {
     pub parent_row_id: String,
     pub child_row_id: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
 pub struct ViewSnapshot {
     pub devices: Vec<ViewDevice>,
     pub links: Vec<ViewLink>,

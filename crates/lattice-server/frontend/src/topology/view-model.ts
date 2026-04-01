@@ -6,7 +6,7 @@ import type {
   ViewDevice,
   ViewLink,
   ViewSnapshot,
-} from '../model/view-snapshot';
+} from '../generated';
 import { deviceGuestKindLabel } from './device-visuals';
 
 const ROLE_LABELS: Record<DeviceRole, string> = {

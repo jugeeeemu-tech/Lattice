@@ -1,6 +1,6 @@
 import { LitElement, html, svg, type TemplateResult } from 'lit';
 
-import type { ViewDevice } from '../model/view-snapshot';
+import type { ViewDevice } from '../generated';
 import type { TopologyStoreState } from '../state/topology-store';
 import { entryMetaText } from '../topology/view-model';
 import { deviceSidebarIconSpec } from '../topology/device-visuals';

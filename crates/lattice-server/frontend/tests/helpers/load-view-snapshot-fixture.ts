@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises';
 
-import type { ViewSnapshot } from '../../src/model/view-snapshot';
+import type { ViewSnapshot } from '../../src/generated';
 import { decodeViewSnapshot } from '../../src/topology/decode-view-snapshot';
 
 export async function loadViewSnapshotFixture(

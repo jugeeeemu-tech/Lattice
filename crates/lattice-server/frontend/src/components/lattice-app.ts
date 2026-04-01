@@ -2,7 +2,7 @@ import { LitElement, html } from 'lit';
 import { unsafeSVG } from 'lit/directives/unsafe-svg.js';
 import reloadIconSvg from '@tabler/icons/outline/reload.svg?raw';
 
-import type { DiscoveryState } from '../model/view-snapshot';
+import type { DiscoveryState } from '../generated';
 import type { TopologySceneAdapter } from '../scene/topology-scene';
 import { TopologyStore, type TopologyStoreState } from '../state/topology-store';
 import { preferredEntryForDevice } from '../topology/view-model';

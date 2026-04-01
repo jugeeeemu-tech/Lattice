@@ -1,4 +1,4 @@
-import type { ViewSnapshot } from '../model/view-snapshot';
+import type { DiscoveryState, ViewSnapshot } from '../generated';
 import { EMPTY_SNAPSHOT } from '../topology/decode-view-snapshot';
 import {
   buildEmptyState,
@@ -18,8 +18,6 @@ import {
   type HoverCardState,
   type PathState,
 } from '../topology/view-model';
-import type { DiscoveryState } from '../model/view-snapshot';
-
 export type HoverSource = 'scene' | 'tree' | null;
 export type SnapshotSource = 'boot' | 'http' | 'polling' | 'ws';
 export type TransportMode = 'idle' | 'polling' | 'websocket';

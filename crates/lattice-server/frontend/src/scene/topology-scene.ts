@@ -26,7 +26,7 @@ import {
 } from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 
-import type { ViewDevice, ViewLink } from '../model/view-snapshot';
+import type { ViewDevice, ViewLink } from '../generated';
 import type { TopologyStoreState } from '../state/topology-store';
 import { projectionInsetFromDesktopInset } from './scene-layout';
 import {

@@ -1,6 +1,6 @@
 import { expect, test, type Page, type TestInfo } from '@playwright/test';
 
-import type { ViewSnapshot } from '../../src/model/view-snapshot';
+import type { ViewSnapshot } from '../../src/generated';
 import { loadViewSnapshotFixture } from '../helpers/load-view-snapshot-fixture';
 
 const VARIANT_FIXTURE_DEVICES = [
