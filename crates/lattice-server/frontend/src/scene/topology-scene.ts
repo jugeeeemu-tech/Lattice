@@ -87,6 +87,8 @@ export interface DeviceScreenAnchor {
   y: number;
 }
 
+const ROTATION_DRAG_THRESHOLD_PX = 4;
+
 export class TopologySceneAdapter {
   #host: HTMLElement;
   #onHoverTarget: (target: SceneHoverTarget, pointer?: { x: number; y: number }) => void;
@@ -103,6 +105,10 @@ export class TopologySceneAdapter {
   #raycaster = new Raycaster();
   #pointer = new Vector2();
   #hoverPointer = { x: 0, y: 0 };
+  #primaryPointerId: number | null = null;
+  #pointerDownPosition: { x: number; y: number } | null = null;
+  #sceneDragInProgress = false;
+  #suppressNextClick = false;
   #resizeObserver: ResizeObserver | null = null;
   #deviceGroups = new Map<string, DeviceGroup>();
   #linkGroups = new Map<string, LinkGroup>();
@@ -308,7 +314,10 @@ export class TopologySceneAdapter {
     fill.position.set(18, -10, 12);
     this.#scene.add(ambient, key, fill, this.#linkRoot, this.#deviceRoot);
 
+    this.#renderer.domElement.addEventListener('pointerdown', this.#handlePointerDown);
     this.#renderer.domElement.addEventListener('pointermove', this.#handlePointerMove);
+    this.#renderer.domElement.addEventListener('pointerup', this.#handlePointerUp);
+    this.#renderer.domElement.addEventListener('pointercancel', this.#handlePointerCancel);
     this.#renderer.domElement.addEventListener('pointerleave', this.#handlePointerLeave);
     this.#renderer.domElement.addEventListener('click', this.#handlePointerClick);
     window.addEventListener('resize', this.#resize);
@@ -331,6 +340,19 @@ export class TopologySceneAdapter {
     this.#frameSceneIfNeeded();
   };
 
+  #handlePointerDown = (event: PointerEvent): void => {
+    if (!event.isPrimary || event.button !== 0) {
+      return;
+    }
+
+    this.#primaryPointerId = event.pointerId;
+    this.#pointerDownPosition = {
+      x: event.clientX,
+      y: event.clientY,
+    };
+    this.#sceneDragInProgress = false;
+  };
+
   #handlePointerMove = (event: PointerEvent): void => {
     const rect = this.#renderer.domElement.getBoundingClientRect();
     this.#hoverPointer = {
@@ -339,6 +361,17 @@ export class TopologySceneAdapter {
     };
     this.#pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.#pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
+
+    if (this.#shouldStartRotationDrag(event)) {
+      this.#sceneDragInProgress = true;
+      if (this.#state?.hoverSource === 'scene') {
+        this.#onClearHover();
+      }
+    }
+
+    if (this.#sceneDragInProgress) {
+      return;
+    }
 
     const hits = this.#collectScenePointerHits();
     if (hits.deviceId) {
@@ -361,7 +394,36 @@ export class TopologySceneAdapter {
     }
   };
 
+  #handlePointerUp = (event: PointerEvent): void => {
+    if (event.pointerId !== this.#primaryPointerId) {
+      return;
+    }
+
+    if (this.#sceneDragInProgress) {
+      this.#suppressNextClick = true;
+    }
+
+    this.#primaryPointerId = null;
+    this.#pointerDownPosition = null;
+    this.#sceneDragInProgress = false;
+  };
+
+  #handlePointerCancel = (event: PointerEvent): void => {
+    if (event.pointerId !== this.#primaryPointerId) {
+      return;
+    }
+
+    this.#primaryPointerId = null;
+    this.#pointerDownPosition = null;
+    this.#sceneDragInProgress = false;
+  };
+
   #handlePointerClick = (event: MouseEvent): void => {
+    if (this.#suppressNextClick) {
+      this.#suppressNextClick = false;
+      return;
+    }
+
     const rect = this.#renderer.domElement.getBoundingClientRect();
     this.#pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.#pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
@@ -370,6 +432,19 @@ export class TopologySceneAdapter {
       this.#onSelectDevice(hits.deviceId);
     }
   };
+
+  #shouldStartRotationDrag(event: PointerEvent): boolean {
+    if (this.#sceneDragInProgress) {
+      return false;
+    }
+    if (event.pointerId !== this.#primaryPointerId || !this.#pointerDownPosition) {
+      return false;
+    }
+
+    const deltaX = event.clientX - this.#pointerDownPosition.x;
+    const deltaY = event.clientY - this.#pointerDownPosition.y;
+    return Math.hypot(deltaX, deltaY) >= ROTATION_DRAG_THRESHOLD_PX;
+  }
 
   #collectScenePointerHits(): { deviceId: string | null; linkId: string | null } {
     this.#raycaster.setFromCamera(this.#pointer, this.#camera);

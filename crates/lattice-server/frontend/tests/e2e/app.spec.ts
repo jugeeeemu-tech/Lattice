@@ -153,12 +153,21 @@ async function waitForViewer(page: Page) {
   await page.waitForSelector('canvas');
 }
 
-async function clickSceneDevice(page: Page, deviceId: string) {
+async function scenePointForDevice(page: Page, deviceId: string) {
   await page.waitForFunction(
     (targetDeviceId) => window.__latticeViewer?.screenPointForDevice(targetDeviceId) !== null,
     deviceId
   );
 
+  const point = await page.evaluate((targetDeviceId) => {
+    return window.__latticeViewer?.screenPointForDevice(targetDeviceId) ?? null;
+  }, deviceId);
+
+  expect(point).not.toBeNull();
+  return point as { x: number; y: number };
+}
+
+async function clickSceneDevice(page: Page, deviceId: string) {
   const clicked = await page.evaluate((targetDeviceId) => {
     const point = window.__latticeViewer?.screenPointForDevice(targetDeviceId) ?? null;
     const canvas = document.querySelector('canvas');
@@ -179,6 +188,74 @@ async function clickSceneDevice(page: Page, deviceId: string) {
   }, deviceId);
 
   expect(clicked).toBe(true);
+}
+
+async function hoverSceneDevice(page: Page, deviceId: string) {
+  const point = await scenePointForDevice(page, deviceId);
+  const canvas = page.locator('canvas');
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+  await page.mouse.move((bounds?.x ?? 0) + point.x, (bounds?.y ?? 0) + point.y);
+}
+
+async function dragSceneFromDevice(page: Page, deviceId: string, delta: { x: number; y: number }) {
+  const point = await scenePointForDevice(page, deviceId);
+  const canvas = page.locator('canvas');
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+  const startX = (bounds?.x ?? 0) + point.x;
+  const startY = (bounds?.y ?? 0) + point.y;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + delta.x, startY + delta.y, { steps: 8 });
+  await page.mouse.up();
+  return {
+    clientX: startX + delta.x,
+    clientY: startY + delta.y,
+  };
+}
+
+async function beginSceneDragFromDevice(
+  page: Page,
+  deviceId: string,
+  delta: { x: number; y: number }
+) {
+  const point = await scenePointForDevice(page, deviceId);
+  const canvas = page.locator('canvas');
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+  const startX = (bounds?.x ?? 0) + point.x;
+  const startY = (bounds?.y ?? 0) + point.y;
+  await page.mouse.move(startX, startY);
+  await page.mouse.down();
+  await page.mouse.move(startX + delta.x, startY + delta.y, { steps: 4 });
+  return {
+    clientX: startX + delta.x,
+    clientY: startY + delta.y,
+  };
+}
+
+async function endSceneDrag(page: Page) {
+  await page.mouse.up();
+}
+
+async function dispatchSceneClick(page: Page, point: { clientX: number; clientY: number }) {
+  await page.evaluate(({ clientX, clientY }) => {
+    const canvas = document.querySelector('canvas');
+    if (!(canvas instanceof HTMLCanvasElement)) {
+      return false;
+    }
+
+    canvas.dispatchEvent(
+      new MouseEvent('click', {
+        bubbles: true,
+        cancelable: true,
+        clientX,
+        clientY,
+      })
+    );
+    return true;
+  }, point);
 }
 
 async function discoveryControlMetrics(page: Page) {
@@ -514,6 +591,62 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
 
   await clickSceneDevice(page, 'router-core');
   await expect(page.locator('[data-device-id="router-core"].is-selected')).toBeVisible();
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
+  ).resolves.toBe('router-core');
+});
+
+test('hides scene hover cards while rotating and ignores the release click after a drag', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  const hoverCard = page.locator('[data-role="hover-card"]');
+
+  await hoverSceneDevice(page, 'router-core');
+  await expect(hoverCard).toBeVisible();
+  await expect(hoverCard.locator('[data-role="hover-title"]')).toHaveText('vyos-core');
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().hoveredDeviceId)
+  ).resolves.toBe('router-core');
+
+  const releasePoint = await beginSceneDragFromDevice(page, 'router-core', { x: 18, y: 6 });
+
+  await expect(hoverCard).toBeHidden();
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().hoveredDeviceId)
+  ).resolves.toBe(null);
+
+  await page.mouse.move(releasePoint.clientX + 122, releasePoint.clientY + 22, { steps: 4 });
+  await expect(hoverCard).toBeHidden();
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().hoveredDeviceId)
+  ).resolves.toBe(null);
+
+  await endSceneDrag(page);
+
+  await expect(hoverCard).toBeHidden();
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().hoveredDeviceId)
+  ).resolves.toBe(null);
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
+  ).resolves.toBe(null);
+
+  await dispatchSceneClick(page, releasePoint);
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
+  ).resolves.toBe(null);
+
+  await clickSceneDevice(page, 'router-core');
   await expect(
     page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
   ).resolves.toBe('router-core');
