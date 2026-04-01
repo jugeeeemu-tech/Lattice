@@ -103,8 +103,14 @@ impl LinkProtocol {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
 pub struct IdentityKeys {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub chassis_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub sys_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub mgmt_ip: Option<String>,
     #[serde(default)]
     pub mac_addresses: Vec<String>,

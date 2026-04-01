@@ -940,7 +940,6 @@ export class TopologySceneAdapter {
   #isGuestAccessLink(link: ViewLink): boolean {
     return (
       link.protocol === 'proxmox_guest_link' &&
-      link.guest_attachment?.vlan_tag !== null &&
       link.guest_attachment?.vlan_tag !== undefined
     );
   }
@@ -948,7 +947,7 @@ export class TopologySceneAdapter {
   #isGuestTrunkLink(link: ViewLink): boolean {
     return (
       link.protocol === 'proxmox_guest_link' &&
-      link.guest_attachment?.vlan_tag === null &&
+      link.guest_attachment?.vlan_tag === undefined &&
       Array.isArray(link.guest_attachment?.trunk_vlans) &&
       link.guest_attachment.trunk_vlans.length > 0
     );

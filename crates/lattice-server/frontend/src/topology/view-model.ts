@@ -663,11 +663,7 @@ function hslToHex(h: number, s: number, l: number): number {
 export function guestAttachmentNetworkColor(
   attachment: ViewLink['guest_attachment']
 ): number | null {
-  if (
-    !attachment?.bridge_name ||
-    attachment.vlan_tag === null ||
-    attachment.vlan_tag === undefined
-  ) {
+  if (!attachment?.bridge_name || attachment.vlan_tag === undefined) {
     return null;
   }
 
@@ -789,7 +785,7 @@ function preferredAccessGuestLinkForDevice(
       guestDeviceIdForLink(snapshot, model, link) === deviceId
   );
   const taggedGuestLinks = guestLinks.filter(
-    (link) => link.guest_attachment?.vlan_tag !== null
+    (link) => link.guest_attachment?.vlan_tag !== undefined
   );
   return taggedGuestLinks.length === 1 ? taggedGuestLinks[0] : null;
 }
@@ -803,7 +799,6 @@ function routerCandidateLinkForGuestLink(
   if (
     link.protocol !== 'proxmox_guest_link' ||
     !attachment ||
-    attachment.vlan_tag === null ||
     attachment.vlan_tag === undefined
   ) {
     return null;
@@ -823,13 +818,10 @@ function routerCandidateLinkForGuestLink(
     if (candidate.guest_attachment.bridge_name !== attachment.bridge_name) {
       return false;
     }
-    if (
-      candidate.guest_attachment.vlan_tag !== null &&
-      candidate.guest_attachment.vlan_tag !== undefined
-    ) {
+    if (candidate.guest_attachment.vlan_tag !== undefined) {
       return false;
     }
-    if (!candidate.guest_attachment.trunk_vlans.includes(vlanTag)) {
+    if (!(candidate.guest_attachment.trunk_vlans ?? []).includes(vlanTag)) {
       return false;
     }
     const candidateBridgeId = bridgeDeviceIdForLink(snapshot, model, candidate);
@@ -1028,10 +1020,10 @@ export function buildHoverCardForLink(
     formatSpeed(link.speed_bps),
     protocolLabel(link.protocol),
     attachment?.bridge_name ? `bridge ${attachment.bridge_name}` : null,
-    attachment?.vlan_tag !== null && attachment?.vlan_tag !== undefined
+    attachment?.vlan_tag !== undefined
       ? `VLAN ${attachment.vlan_tag}`
       : null,
-    attachment?.trunk_vlans.length ? `trunk ${attachment.trunk_vlans.join(', ')}` : null,
+    attachment?.trunk_vlans?.length ? `trunk ${attachment.trunk_vlans.join(', ')}` : null,
   ].filter((detail): detail is string => Boolean(detail));
 
   return {

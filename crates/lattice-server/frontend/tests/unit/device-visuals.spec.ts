@@ -13,15 +13,12 @@ function device(overrides: Partial<ViewDevice> = {}): ViewDevice {
     depth: overrides.depth ?? 0,
     device_role: overrides.device_role ?? 'unknown',
     deployment_type: overrides.deployment_type ?? 'unknown',
-    guest_kind: overrides.guest_kind ?? null,
+    guest_kind: overrides.guest_kind,
     identity_keys: overrides.identity_keys ?? {
-      chassis_id: null,
-      sys_name: null,
-      mgmt_ip: null,
       mac_addresses: [],
     },
-    host_label: overrides.host_label ?? null,
-    upstream_interface: overrides.upstream_interface ?? null,
+    host_label: overrides.host_label,
+    upstream_interface: overrides.upstream_interface,
   };
 }
 

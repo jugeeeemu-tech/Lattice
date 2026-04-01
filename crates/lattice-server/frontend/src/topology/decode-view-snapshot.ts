@@ -14,9 +14,8 @@ export const EMPTY_SNAPSHOT: ViewSnapshot = Object.freeze({
   tree_rows: [],
   tree_edges: [],
   primary_row_by_device: {},
-  discovery_status: { state: 'loading' as const, message: null },
+  discovery_status: { state: 'loading' as const },
   auto_discovery_interval_seconds: 60,
-  next_auto_discovery_at_ms: null,
 });
 
 function asObject(value: unknown): Record<string, unknown> {
@@ -25,6 +24,10 @@ function asObject(value: unknown): Record<string, unknown> {
 
 function asString(value: unknown): string | null {
   return typeof value === 'string' ? value : null;
+}
+
+function asOptionalString(value: unknown): string | undefined {
+  return typeof value === 'string' ? value : undefined;
 }
 
 function asFiniteNumber(value: unknown): number | null {
@@ -71,7 +74,7 @@ function decodeDiscoveryStatus(rawStatus: unknown): DiscoveryStatus {
 
   return {
     state: asDiscoveryState(status.state),
-    message: asString(status.message),
+    message: asOptionalString(status.message),
   };
 }
 
@@ -93,9 +96,6 @@ export function decodeViewSnapshot(rawSnapshot: unknown): ViewSnapshot {
       snapshot.auto_discovery_interval_seconds,
       EMPTY_SNAPSHOT.auto_discovery_interval_seconds
     ),
-    next_auto_discovery_at_ms:
-      snapshot.next_auto_discovery_at_ms === null
-        ? null
-        : asFiniteNumber(snapshot.next_auto_discovery_at_ms),
+    next_auto_discovery_at_ms: asFiniteNumber(snapshot.next_auto_discovery_at_ms) ?? undefined,
   };
 }

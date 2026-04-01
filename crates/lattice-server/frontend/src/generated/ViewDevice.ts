@@ -4,4 +4,4 @@ import type { DeviceRole } from "./DeviceRole.ts";
 import type { GuestKind } from "./GuestKind.ts";
 import type { IdentityKeys } from "./IdentityKeys.ts";
 
-export type ViewDevice = { id: string, label: string, depth: number, device_role: DeviceRole, deployment_type: DeploymentType, guest_kind?: GuestKind | null, identity_keys: IdentityKeys, host_label?: string | null, upstream_interface?: string | null, };
+export type ViewDevice = { id: string, label: string, depth: number, device_role: DeviceRole, deployment_type: DeploymentType, guest_kind?: GuestKind, identity_keys: IdentityKeys, host_label?: string, upstream_interface?: string, };

@@ -20,6 +20,7 @@ pub enum DiscoveryState {
 pub struct DiscoveryStatus {
     pub state: DiscoveryState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub message: Option<String>,
 }
 
@@ -61,11 +62,14 @@ pub struct ViewDevice {
     pub device_role: DeviceRole,
     pub deployment_type: DeploymentType,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub guest_kind: Option<GuestKind>,
     pub identity_keys: IdentityKeys,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub host_label: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub upstream_interface: Option<String>,
 }
 
@@ -74,13 +78,20 @@ pub struct ViewLink {
     pub id: String,
     pub local_device_id: String,
     pub local_interface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub local_ip: Option<String>,
     pub remote_device_id: String,
     pub remote_interface: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub remote_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub speed_bps: Option<u64>,
     pub protocol: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub guest_attachment: Option<ViewGuestAttachment>,
 }
 
@@ -88,6 +99,7 @@ pub struct ViewLink {
 pub struct ViewGuestAttachment {
     pub bridge_name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub vlan_tag: Option<u16>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trunk_vlans: Vec<u16>,
@@ -117,6 +129,7 @@ pub struct ViewSnapshot {
     pub discovery_status: DiscoveryStatus,
     pub auto_discovery_interval_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
     pub next_auto_discovery_at_ms: Option<i64>,
 }
 
@@ -577,6 +590,47 @@ mod tests {
             serde_json::json!(["aa:bb:cc:dd:ee:ff"])
         );
         assert_eq!(guest["guest_kind"], "vm");
+        assert!(bridge["identity_keys"].get("chassis_id").is_none());
+        assert!(bridge["identity_keys"].get("mgmt_ip").is_some());
+        assert!(bridge.get("host_label").is_some());
+        assert!(value.get("next_auto_discovery_at_ms").is_none());
+    }
+
+    #[test]
+    fn snapshot_omits_none_option_fields_in_json() {
+        let snapshot = ViewSnapshot::empty(DiscoveryStatus::ready(), 60, None);
+        let value = serde_json::to_value(&snapshot).unwrap();
+
+        assert!(value["discovery_status"].get("message").is_none());
+        assert!(value.get("next_auto_discovery_at_ms").is_none());
+        assert_eq!(value["devices"], serde_json::json!([]));
+
+        let link = serde_json::to_value(ViewLink {
+            id: "link-1".to_string(),
+            local_device_id: "device-a".to_string(),
+            local_interface: "eth0".to_string(),
+            local_ip: None,
+            remote_device_id: "device-b".to_string(),
+            remote_interface: "eth1".to_string(),
+            remote_ip: None,
+            speed_bps: None,
+            protocol: "lldp".to_string(),
+            guest_attachment: None,
+        })
+        .unwrap();
+        assert!(link.get("local_ip").is_none());
+        assert!(link.get("remote_ip").is_none());
+        assert!(link.get("speed_bps").is_none());
+        assert!(link.get("guest_attachment").is_none());
+
+        let attachment = serde_json::to_value(ViewGuestAttachment {
+            bridge_name: "vmbr0".to_string(),
+            vlan_tag: None,
+            trunk_vlans: Vec::new(),
+        })
+        .unwrap();
+        assert!(attachment.get("vlan_tag").is_none());
+        assert!(attachment.get("trunk_vlans").is_none());
     }
 
     #[test]

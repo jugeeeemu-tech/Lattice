@@ -8,7 +8,7 @@ describe('decodeViewSnapshot', () => {
     expect(EMPTY_SNAPSHOT.devices).toEqual([]);
     expect(EMPTY_SNAPSHOT.links).toEqual([]);
     expect(EMPTY_SNAPSHOT.auto_discovery_interval_seconds).toBe(60);
-    expect(EMPTY_SNAPSHOT.next_auto_discovery_at_ms).toBeNull();
+    expect(EMPTY_SNAPSHOT.next_auto_discovery_at_ms).toBeUndefined();
   });
 
   it('preserves valid API payloads while applying only structural guards', () => {
@@ -133,9 +133,9 @@ describe('decodeViewSnapshot', () => {
     expect(decoded.tree_rows).toEqual([]);
     expect(decoded.tree_edges).toEqual([]);
     expect(decoded.primary_row_by_device).toEqual({ guest: 'row-1' });
-    expect(decoded.discovery_status).toEqual({ state: 'loading', message: null });
+    expect(decoded.discovery_status).toEqual({ state: 'loading' });
     expect(decoded.auto_discovery_interval_seconds).toBe(60);
-    expect(decoded.next_auto_discovery_at_ms).toBeNull();
+    expect(decoded.next_auto_discovery_at_ms).toBeUndefined();
   });
 
   it('returns the stable empty snapshot for non-object payloads', () => {

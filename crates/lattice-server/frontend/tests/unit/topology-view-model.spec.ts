@@ -40,7 +40,6 @@ describe('buildTopologyModel', () => {
           protocol: 'proxmox_guest_link',
           guest_attachment: {
             bridge_name: 'vmbr0',
-            vlan_tag: null,
             trunk_vlans: [120, 130],
           },
         },

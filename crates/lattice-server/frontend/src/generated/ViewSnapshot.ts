@@ -5,4 +5,4 @@ import type { TreeRow } from "./TreeRow.ts";
 import type { ViewDevice } from "./ViewDevice.ts";
 import type { ViewLink } from "./ViewLink.ts";
 
-export type ViewSnapshot = { devices: Array<ViewDevice>, links: Array<ViewLink>, tree_rows: Array<TreeRow>, tree_edges: Array<TreeEdge>, primary_row_by_device: { [key in string]: string }, discovery_status: DiscoveryStatus, auto_discovery_interval_seconds: number, next_auto_discovery_at_ms?: number | null, };
+export type ViewSnapshot = { devices: Array<ViewDevice>, links: Array<ViewLink>, tree_rows: Array<TreeRow>, tree_edges: Array<TreeEdge>, primary_row_by_device: { [key in string]: string }, discovery_status: DiscoveryStatus, auto_discovery_interval_seconds: number, next_auto_discovery_at_ms?: number, };
