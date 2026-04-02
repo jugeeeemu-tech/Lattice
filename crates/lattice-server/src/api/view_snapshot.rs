@@ -416,7 +416,11 @@ fn interface_alias_from_proxmox_slot(device: &Device, interface_name: &str) -> O
     let mut seen = BTreeSet::new();
 
     for interface in &device.interfaces {
-        let base_name = interface.if_name.split('.').next().unwrap_or(&interface.if_name);
+        let base_name = interface
+            .if_name
+            .split('.')
+            .next()
+            .unwrap_or(&interface.if_name);
         if base_name == "lo" || base_name.is_empty() || !seen.insert(base_name.to_string()) {
             continue;
         }
@@ -428,7 +432,9 @@ fn interface_alias_from_proxmox_slot(device: &Device, interface_name: &str) -> O
     }
 
     ordered_bases.sort_by(|left, right| left.cmp(right));
-    ordered_bases.get(slot_index).map(|(_, _, name)| name.clone())
+    ordered_bases
+        .get(slot_index)
+        .map(|(_, _, name)| name.clone())
 }
 
 fn interface_base_priority(device: &Device, base_name: &str) -> u8 {
@@ -514,7 +520,11 @@ fn is_link_local(ip: IpAddr) -> bool {
 }
 
 fn dedup_sorted(values: Vec<String>) -> Vec<String> {
-    let mut deduped = values.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    let mut deduped = values
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
     deduped.sort();
     deduped
 }
@@ -536,6 +546,15 @@ fn build_tree(
 ) -> (Vec<TreeRow>, Vec<TreeEdge>, HashMap<String, String>) {
     let mut nodes = tree.nodes.clone();
     nodes.sort_by(node_order);
+
+    let parent_row_by_row = nodes
+        .iter()
+        .filter_map(|node| {
+            node.parent_row_id
+                .as_ref()
+                .map(|parent| (node.row_id.clone(), parent.clone()))
+        })
+        .collect::<HashMap<_, _>>();
 
     let tree_rows = nodes
         .iter()
@@ -561,22 +580,41 @@ fn build_tree(
 
     let mut primary_row_by_device = HashMap::new();
     let mut primary_depth_by_device = HashMap::new();
+    let mut primary_rank_by_device = HashMap::new();
     for node in &nodes {
+        let node_rank = primary_row_rank(&node.row_id, &parent_row_by_row);
         match primary_depth_by_device.get(&node.device_id).copied() {
             Some(existing_depth) if existing_depth < node.depth => {}
             Some(existing_depth)
                 if existing_depth == node.depth
-                    && primary_row_by_device
+                    && primary_rank_by_device
                         .get(&node.device_id)
-                        .is_some_and(|existing| existing <= &node.row_id) => {}
+                        .is_some_and(|existing| existing <= &node_rank) => {}
             _ => {
                 primary_depth_by_device.insert(node.device_id.clone(), node.depth);
+                primary_rank_by_device.insert(node.device_id.clone(), node_rank);
                 primary_row_by_device.insert(node.device_id.clone(), node.row_id.clone());
             }
         }
     }
 
     (tree_rows, tree_edges, primary_row_by_device)
+}
+
+fn primary_row_rank(
+    row_id: &str,
+    parent_row_by_row: &HashMap<String, String>,
+) -> (String, String) {
+    let root_row_id = root_row_id(row_id, parent_row_by_row);
+    (root_row_id, row_id.to_string())
+}
+
+fn root_row_id(row_id: &str, parent_row_by_row: &HashMap<String, String>) -> String {
+    let mut current = row_id;
+    while let Some(parent) = parent_row_by_row.get(current) {
+        current = parent;
+    }
+    current.to_string()
 }
 
 fn node_order(left: &DiscoveryTreeNode, right: &DiscoveryTreeNode) -> Ordering {
@@ -845,6 +883,96 @@ mod tests {
                 trunk_vlans: Vec::new(),
             })
         );
+    }
+
+    #[test]
+    fn snapshot_prefers_stable_root_branch_for_duplicated_rows() {
+        let mut topology = sample_topology();
+        topology.devices.insert(
+            "router-2".to_string(),
+            device(
+                "router-2",
+                "core-2",
+                DeviceRole::Router,
+                DeploymentType::Unknown,
+                None,
+                None,
+            ),
+        );
+        topology.devices.insert(
+            "switch-1".to_string(),
+            device(
+                "switch-1",
+                "dist-a",
+                DeviceRole::Switch,
+                DeploymentType::Unknown,
+                None,
+                None,
+            ),
+        );
+        topology.devices.insert(
+            "switch-2".to_string(),
+            device(
+                "switch-2",
+                "access-a1",
+                DeviceRole::Switch,
+                DeploymentType::Unknown,
+                None,
+                None,
+            ),
+        );
+
+        let tree = DiscoveryTree {
+            nodes: vec![
+                DiscoveryTreeNode {
+                    row_id: "router-1".to_string(),
+                    device_id: "router-1".to_string(),
+                    parent_row_id: None,
+                    label: Some("core".to_string()),
+                    depth: 0,
+                },
+                DiscoveryTreeNode {
+                    row_id: "router-2".to_string(),
+                    device_id: "router-2".to_string(),
+                    parent_row_id: None,
+                    label: Some("core-2".to_string()),
+                    depth: 0,
+                },
+                DiscoveryTreeNode {
+                    row_id: "switch-1".to_string(),
+                    device_id: "switch-1".to_string(),
+                    parent_row_id: Some("router-1".to_string()),
+                    label: Some("dist-a".to_string()),
+                    depth: 1,
+                },
+                DiscoveryTreeNode {
+                    row_id: "router-2/switch-1#1".to_string(),
+                    device_id: "switch-1".to_string(),
+                    parent_row_id: Some("router-2".to_string()),
+                    label: Some("dist-a".to_string()),
+                    depth: 1,
+                },
+                DiscoveryTreeNode {
+                    row_id: "switch-2".to_string(),
+                    device_id: "switch-2".to_string(),
+                    parent_row_id: Some("switch-1".to_string()),
+                    label: Some("access-a1".to_string()),
+                    depth: 2,
+                },
+                DiscoveryTreeNode {
+                    row_id: "router-2/switch-1#1/switch-2#1".to_string(),
+                    device_id: "switch-2".to_string(),
+                    parent_row_id: Some("router-2/switch-1#1".to_string()),
+                    label: Some("access-a1".to_string()),
+                    depth: 2,
+                },
+            ],
+        };
+
+        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
+
+        assert_eq!(snapshot.primary_row_by_device["switch-1"], "switch-1");
+        assert_eq!(snapshot.primary_row_by_device["switch-2"], "switch-2");
     }
 
     #[test]
