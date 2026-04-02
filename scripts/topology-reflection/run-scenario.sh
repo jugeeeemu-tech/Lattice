@@ -191,9 +191,28 @@ const expectedDeviceCount = expectedSnapshot.devices.length;
 const expectedLinkCount = expectedSnapshot.links.length;
 const expectedTreeRowCount = expectedSnapshot.tree_rows.length;
 const expectedTreeEdgeCount = expectedSnapshot.tree_edges.length;
+const maxAttempts = 20;
+const sleepMs = 2_000;
+const stableReadyTarget = 3;
 let snapshot = null;
+let previousReadySignature = null;
+let stableReadyIterations = 0;
 
-for (let attempt = 0; attempt < 90; attempt += 1) {
+function readySignature(candidate) {
+  const deviceLabels = Array.isArray(candidate.devices)
+    ? candidate.devices
+        .map((device) => device.label ?? device.id ?? 'unknown')
+        .sort((left, right) => left.localeCompare(right))
+    : [];
+  return JSON.stringify({
+    device_labels: deviceLabels,
+    link_count: Array.isArray(candidate.links) ? candidate.links.length : 0,
+    tree_edge_count: Array.isArray(candidate.tree_edges) ? candidate.tree_edges.length : 0,
+    tree_row_count: Array.isArray(candidate.tree_rows) ? candidate.tree_rows.length : 0,
+  });
+}
+
+for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
   const response = await fetch(`http://127.0.0.1:${port}/api/topology`, {
     headers: { Accept: 'application/json' },
   }).catch(() => null);
@@ -211,15 +230,42 @@ for (let attempt = 0; attempt < 90; attempt += 1) {
       snapshot.tree_rows.length >= expectedTreeRowCount &&
       snapshot.tree_edges.length >= expectedTreeEdgeCount;
 
+    if (state === 'ready') {
+      const signature = readySignature(snapshot);
+      stableReadyIterations =
+        signature === previousReadySignature ? stableReadyIterations + 1 : 1;
+      previousReadySignature = signature;
+    } else {
+      stableReadyIterations = 0;
+      previousReadySignature = null;
+    }
+
+    console.log(
+      JSON.stringify(
+        {
+          attempt: attempt + 1,
+          converged,
+          device_count: Array.isArray(snapshot.devices) ? snapshot.devices.length : 0,
+          link_count: Array.isArray(snapshot.links) ? snapshot.links.length : 0,
+          stable_ready_iterations: stableReadyIterations,
+          state,
+          tree_edge_count: Array.isArray(snapshot.tree_edges) ? snapshot.tree_edges.length : 0,
+          tree_row_count: Array.isArray(snapshot.tree_rows) ? snapshot.tree_rows.length : 0,
+        },
+        null,
+        2
+      )
+    );
+
     if (
       state === 'failed' ||
-      (state === 'ready' && converged)
+      (state === 'ready' && (converged || stableReadyIterations >= stableReadyTarget))
     ) {
       break;
     }
   }
 
-  await new Promise((resolve) => setTimeout(resolve, 2_000));
+  await new Promise((resolve) => setTimeout(resolve, sleepMs));
 }
 
 if (!snapshot) {

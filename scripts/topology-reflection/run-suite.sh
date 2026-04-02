@@ -31,6 +31,7 @@ for scenario in "${SCENARIOS[@]}"; do
   scenario_output="${ARTIFACT_DIR}/${scenario}"
   rm -rf "${scenario_output}"
   mkdir -p "${scenario_output}"
+  echo "=== topology reflection: ${scenario} ==="
 
   if ! "${SCRIPT_DIR}/run-scenario.sh" "${scenario}" "${scenario_output}" "${SERVER_PORT}"; then
     STATUS=1
