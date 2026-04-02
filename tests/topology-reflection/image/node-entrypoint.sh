@@ -73,6 +73,7 @@ configure_lldpd() {
       lldpcli configure lldp tx-hold 10 >/dev/null 2>&1 || true
       lldpcli configure lldp portidsubtype ifname >/dev/null 2>&1 || true
       lldpcli configure lldp portdescription-source ifname >/dev/null 2>&1 || true
+      lldpcli configure system interface promiscuous >/dev/null 2>&1 || true
       if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
         interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
         lldpcli configure ports "${interface_pattern}" lldp status rx-and-tx >/dev/null 2>&1 || true

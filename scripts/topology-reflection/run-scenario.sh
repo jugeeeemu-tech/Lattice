@@ -33,7 +33,19 @@ collect_root_diagnostics() {
     return 0
   fi
 
+  local labels
   local root_label
+  labels="$(
+    node --input-type=module - "${SCENARIO_METADATA}" <<'EOF'
+import { readFile } from 'node:fs/promises';
+
+const [metadataPath] = process.argv.slice(2);
+const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+for (const node of metadata.nodes ?? []) {
+  process.stdout.write(`${node.label ?? ''}\n`);
+}
+EOF
+  )"
   root_label="$(
     node --input-type=module - "${SCENARIO_METADATA}" <<'EOF'
 import { readFile } from 'node:fs/promises';
@@ -44,26 +56,37 @@ process.stdout.write(`${metadata.root ?? ''}\n`);
 EOF
   )"
 
-  if [[ -z "${root_label}" ]]; then
+  if [[ -z "${labels}" ]]; then
     return 0
   fi
 
-  local diagnostics_dir="${OUTPUT_DIR}/root-diagnostics"
-  local root_container="clab-${SCENARIO}-${root_label}"
-  mkdir -p "${diagnostics_dir}"
+  while IFS= read -r label; do
+    [[ -z "${label}" ]] && continue
 
-  docker exec "${root_container}" hostname \
-    >"${diagnostics_dir}/hostname.txt" 2>&1 || true
-  docker exec "${root_container}" sh -lc 'ip -o -4 addr show' \
-    >"${diagnostics_dir}/ip-addresses.txt" 2>&1 || true
-  docker exec "${root_container}" lldpcli -f keyvalue show neighbors details \
-    >"${diagnostics_dir}/lldp-neighbors.txt" 2>&1 || true
-  docker exec "${root_container}" lldpcli -f keyvalue show interfaces details \
-    >"${diagnostics_dir}/lldp-interfaces.txt" 2>&1 || true
-  docker exec "${root_container}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.4 \
-    >"${diagnostics_dir}/snmp-lldp-remote.txt" 2>&1 || true
-  docker exec "${root_container}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.3 \
-    >"${diagnostics_dir}/snmp-lldp-local.txt" 2>&1 || true
+    local diagnostics_dir="${OUTPUT_DIR}/node-diagnostics/${label}"
+    local container_name="clab-${SCENARIO}-${label}"
+    mkdir -p "${diagnostics_dir}"
+
+    docker exec "${container_name}" hostname \
+      >"${diagnostics_dir}/hostname.txt" 2>&1 || true
+    docker exec "${container_name}" sh -lc 'ip -o -4 addr show' \
+      >"${diagnostics_dir}/ip-addresses.txt" 2>&1 || true
+    docker exec "${container_name}" lldpcli -f keyvalue show neighbors details \
+      >"${diagnostics_dir}/lldp-neighbors.txt" 2>&1 || true
+    docker exec "${container_name}" lldpcli -f keyvalue show interfaces details \
+      >"${diagnostics_dir}/lldp-interfaces.txt" 2>&1 || true
+    docker exec "${container_name}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.4.1.1.9 \
+      >"${diagnostics_dir}/snmp-lldp-remote-sysname.txt" 2>&1 || true
+    docker exec "${container_name}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.4.2.1.3 \
+      >"${diagnostics_dir}/snmp-lldp-remote-mgmt.txt" 2>&1 || true
+    docker exec "${container_name}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.3 \
+      >"${diagnostics_dir}/snmp-lldp-local.txt" 2>&1 || true
+
+    if [[ "${label}" == "${root_label}" ]]; then
+      mkdir -p "${OUTPUT_DIR}/root-diagnostics"
+      cp "${diagnostics_dir}/"*.txt "${OUTPUT_DIR}/root-diagnostics/" 2>/dev/null || true
+    fi
+  done <<<"${labels}"
 }
 
 cleanup() {

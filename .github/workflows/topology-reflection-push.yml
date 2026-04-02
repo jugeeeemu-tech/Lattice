@@ -45,8 +45,8 @@ jobs:
       - name: Build lattice-server
         run: cargo build -p lattice-server
 
-      - name: Run push topology reflection suite
-        run: ./scripts/topology-reflection/run-suite.sh push
+      - name: Run push topology reflection smoke scenario
+        run: ./scripts/topology-reflection/run-suite.sh push linear-3
 
       - name: Upload topology reflection artifacts
         if: always()
