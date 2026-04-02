@@ -790,6 +790,29 @@ function preferredAccessGuestLinkForDevice(
   return taggedGuestLinks.length === 1 ? taggedGuestLinks[0] : null;
 }
 
+function preferredGuestLinkForDevice(
+  snapshot: ViewSnapshot,
+  model: DerivedTopologyModel,
+  deviceId: string
+): ViewLink | null {
+  const guestLinks = connectedLinksForDevice(snapshot, model, deviceId).filter(
+    (link) =>
+      link.protocol === 'proxmox_guest_link' &&
+      link.guest_attachment &&
+      guestDeviceIdForLink(snapshot, model, link) === deviceId
+  );
+
+  const plainGuestLinks = guestLinks.filter((link) => {
+    const attachment = link.guest_attachment;
+    return attachment?.vlan_tag === undefined && !(attachment?.trunk_vlans?.length ?? 0);
+  });
+  if (plainGuestLinks.length === 1) {
+    return plainGuestLinks[0];
+  }
+
+  return guestLinks.length === 1 ? guestLinks[0] : null;
+}
+
 function routerCandidateLinkForGuestLink(
   snapshot: ViewSnapshot,
   model: DerivedTopologyModel,
@@ -904,6 +927,25 @@ export function computeUpstreamPath(
   deviceIds.add(deviceId);
   const guestLink = preferredAccessGuestLinkForDevice(snapshot, model, deviceId);
   if (!guestLink) {
+    const fallbackGuestLink = preferredGuestLinkForDevice(snapshot, model, deviceId);
+    if (fallbackGuestLink) {
+      linkIds.add(fallbackGuestLink.id);
+      const bridgeDeviceId = bridgeDeviceIdForLink(snapshot, model, fallbackGuestLink);
+      if (bridgeDeviceId) {
+        deviceIds.add(bridgeDeviceId);
+        const continuation = physicalUpstreamPathFrom(
+          snapshot,
+          model,
+          bridgeDeviceId,
+          new Set([fallbackGuestLink.id]),
+          new Set(Array.from(deviceIds).filter((candidateId) => candidateId !== bridgeDeviceId))
+        );
+        continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
+        continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
+      }
+      return { deviceIds, guestHighlight, linkIds };
+    }
+
     const continuation = physicalUpstreamPathFrom(snapshot, model, deviceId);
     continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
     continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
@@ -944,7 +986,7 @@ export function computeUpstreamPath(
     model,
     routerDeviceId,
     new Set([guestLink.id, routerLink.id]),
-    new Set(deviceIds)
+    new Set(Array.from(deviceIds).filter((candidateId) => candidateId !== routerDeviceId))
   );
   continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
   continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));

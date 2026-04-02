@@ -58,6 +58,81 @@ describe('buildTopologyModel', () => {
     });
   });
 
+  it('includes untagged guest links in the upstream path and continues through the host uplink', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const untaggedSnapshot = {
+      ...snapshot,
+      links: [
+        snapshot.links[0],
+        {
+          ...snapshot.links[1],
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+            trunk_vlans: [120, 130],
+          },
+        },
+      ],
+    };
+    const model = buildTopologyModel(untaggedSnapshot, new Set());
+
+    const path = computeUpstreamPath(untaggedSnapshot, model, 'guest-app');
+
+    expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
+    expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-pve-guest']);
+    expect(path.guestHighlight).toBeNull();
+  });
+
+  it('prefers a plain guest uplink over a trunk guest uplink for virtual routers', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const routerGuestSnapshot = {
+      ...snapshot,
+      devices: [
+        {
+          ...snapshot.devices[2],
+          device_role: 'router' as const,
+          label: 'vyos01',
+        },
+        snapshot.devices[1],
+        snapshot.devices[0],
+      ],
+      links: [
+        snapshot.links[0],
+        {
+          id: 'link-vyos-net0',
+          local_device_id: 'guest-app',
+          local_interface: 'net0',
+          remote_device_id: 'proxmox-host',
+          remote_interface: 'vmbr0',
+          speed_bps: 1_000_000_000,
+          protocol: 'proxmox_guest_link',
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+          },
+        },
+        {
+          id: 'link-vyos-net1',
+          local_device_id: 'guest-app',
+          local_interface: 'net1',
+          remote_device_id: 'proxmox-host',
+          remote_interface: 'vmbr0',
+          speed_bps: 1_000_000_000,
+          protocol: 'proxmox_guest_link',
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+            trunk_vlans: [20, 30],
+          },
+        },
+      ],
+    };
+    const model = buildTopologyModel(routerGuestSnapshot, new Set());
+
+    const path = computeUpstreamPath(routerGuestSnapshot, model, 'guest-app');
+
+    expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
+    expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-vyos-net0']);
+    expect(path.guestHighlight).toBeNull();
+  });
+
   it('includes VM and container labels in device summaries when guest kind is present', async () => {
     const snapshot = await loadViewSnapshotFixture('populated');
     const vmSummary = deviceSummary(snapshot.devices.find((device) => device.id === 'guest-app')!);
