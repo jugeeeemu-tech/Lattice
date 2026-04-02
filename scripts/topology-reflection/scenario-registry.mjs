@@ -531,10 +531,47 @@ function normalizeLink(leftLabel, leftInterface, rightLabel, rightInterface) {
 
 function buildExpectedSnapshot(derivedScenario) {
   const tree = buildExpectedTree(derivedScenario);
+  const adjacency = adjacencyForScenario(derivedScenario);
   const discoveredSet = new Set(tree.discoveredLabels);
-  const devices = tree.discoveredLabels
+  const fallbackParentByLabel = new Map(
+    derivedScenario.disabledSnmp
+    .filter((label) => !discoveredSet.has(label))
+      .map((label) => {
+        const candidateParents = Array.from(
+          new Set(
+            (adjacency.get(label)?.edges ?? [])
+              .map((edge) => edge.peer)
+              .filter((peer) => discoveredSet.has(peer))
+          )
+        ).sort((left, right) => left.localeCompare(right));
+        return [label, candidateParents.length === 1 ? candidateParents[0] : null];
+      })
+  );
+  const visibleDisabledLabels = Array.from(fallbackParentByLabel.keys()).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const visibleLabels = [...tree.discoveredLabels, ...visibleDisabledLabels];
+  const visibleSet = new Set(visibleLabels);
+  const rowIdForLabel = new Map(
+    tree.discoveredLabels.map((label) => [label, tree.rowIdByLabel.get(label) ?? `seed/${label}`])
+  );
+  const depthForLabel = new Map(tree.discoveredLabels.map((label) => [label, tree.depthByLabel.get(label) ?? 0]));
+
+  for (const label of visibleDisabledLabels) {
+    const parentLabel = fallbackParentByLabel.get(label);
+    if (parentLabel && rowIdForLabel.has(parentLabel)) {
+      rowIdForLabel.set(label, `${rowIdForLabel.get(parentLabel)}/${label}`);
+      depthForLabel.set(label, (depthForLabel.get(parentLabel) ?? 0) + 1);
+      continue;
+    }
+
+    rowIdForLabel.set(label, `seed/${label}`);
+    depthForLabel.set(label, 0);
+  }
+
+  const devices = visibleLabels
     .map((label) => ({
-      depth: tree.depthByLabel.get(label) ?? 0,
+      depth: depthForLabel.get(label) ?? 0,
       deployment_type: 'unknown',
       device_role: inferDeviceRole(label),
       label,
@@ -543,7 +580,7 @@ function buildExpectedSnapshot(derivedScenario) {
 
   const links = derivedScenario.derivedLinks
     .filter((edge) => !edge.disabled)
-    .filter((edge) => discoveredSet.has(edge.a) && discoveredSet.has(edge.b))
+    .filter((edge) => visibleSet.has(edge.a) && visibleSet.has(edge.b))
     .map((edge) => normalizeLink(edge.a, edge.aInterface, edge.b, edge.bInterface))
     .sort((left, right) =>
       `${left.local_label}:${left.local_interface}:${left.remote_label}:${left.remote_interface}`.localeCompare(
@@ -551,19 +588,34 @@ function buildExpectedSnapshot(derivedScenario) {
       )
     );
 
-  const treeRows = tree.discoveredLabels
+  const treeRows = visibleLabels
     .map((label) => ({
       device_label: label,
-      id: tree.rowIdByLabel.get(label),
+      id: rowIdForLabel.get(label) ?? `seed/${label}`,
       label,
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
 
   const treeEdges = Array.from(tree.parentByLabel.entries())
     .map(([childLabel, parentLabel]) => ({
-      child_row_id: tree.rowIdByLabel.get(childLabel),
-      parent_row_id: tree.rowIdByLabel.get(parentLabel),
+      child_row_id: rowIdForLabel.get(childLabel),
+      parent_row_id: rowIdForLabel.get(parentLabel),
     }))
+    .concat(
+      visibleDisabledLabels
+        .map((label) => {
+          const parentLabel = fallbackParentByLabel.get(label);
+          if (!parentLabel) {
+            return null;
+          }
+
+          return {
+            child_row_id: rowIdForLabel.get(label),
+            parent_row_id: rowIdForLabel.get(parentLabel),
+          };
+        })
+        .filter((edge) => edge !== null)
+    )
     .sort((left, right) =>
       `${left.parent_row_id}/${left.child_row_id}`.localeCompare(
         `${right.parent_row_id}/${right.child_row_id}`
@@ -571,8 +623,8 @@ function buildExpectedSnapshot(derivedScenario) {
     );
 
   const primaryRowByLabel = Object.fromEntries(
-    tree.discoveredLabels
-      .map((label) => [label, tree.rowIdByLabel.get(label)])
+    visibleLabels
+      .map((label) => [label, rowIdForLabel.get(label) ?? `seed/${label}`])
       .sort(([left], [right]) => left.localeCompare(right))
   );
 
@@ -628,8 +680,8 @@ function buildRules(derivedScenario, expectedSnapshot) {
       current = parentLabel;
     }
 
-    return path;
-  });
+    return current === derivedScenario.root ? path : null;
+  }).filter((path) => Array.isArray(path));
 
   return {
     focus_labels: Array.from(new Set(focusLabels)).sort((left, right) => left.localeCompare(right)),

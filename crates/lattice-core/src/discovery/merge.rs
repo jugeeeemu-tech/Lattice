@@ -96,6 +96,7 @@ fn preserve_source_tree(
         .map(|node| (node.row_id.clone(), node))
         .collect::<HashMap<_, _>>();
     let mut chosen_node_by_device = HashMap::new();
+    let mut source_children_by_device: HashMap<String, Vec<String>> = HashMap::new();
 
     for node in &filtered_nodes {
         let parent_device_id = node.parent_row_id.as_ref().and_then(|parent_row_id| {
@@ -116,12 +117,48 @@ fn preserve_source_tree(
         }
     }
 
+    for (device_id, (_, parent_device_id)) in &chosen_node_by_device {
+        if let Some(parent_device_id) = parent_device_id {
+            if parent_device_id != device_id {
+                source_children_by_device
+                    .entry(parent_device_id.clone())
+                    .or_default()
+                    .push(device_id.clone());
+            }
+        }
+    }
+
+    let visible_device_ids = chosen_node_by_device
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let resolved_parent_by_device = chosen_node_by_device
+        .iter()
+        .filter_map(|(device_id, (_, parent_device_id))| {
+            let source_parent = parent_device_id
+                .as_ref()
+                .filter(|parent_id| {
+                    *parent_id != device_id && visible_device_ids.contains(*parent_id)
+                })
+                .cloned();
+            let inferred_parent = source_parent.or_else(|| {
+                if source_children_by_device.contains_key(device_id) {
+                    None
+                } else {
+                    unique_visible_lldp_parent(topology, device_id, &visible_device_ids)
+                }
+            });
+
+            inferred_parent.map(|parent_id| (device_id.clone(), parent_id))
+        })
+        .collect::<HashMap<_, _>>();
+
     let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
     let mut covered_device_ids = HashSet::new();
 
-    for (device_id, (node, parent_device_id)) in &chosen_node_by_device {
+    for (device_id, (node, _)) in &chosen_node_by_device {
         covered_device_ids.insert(device_id.clone());
-        if let Some(parent_device_id) = parent_device_id {
+        if let Some(parent_device_id) = resolved_parent_by_device.get(device_id) {
             if parent_device_id != device_id && chosen_node_by_device.contains_key(parent_device_id)
             {
                 children_by_parent
@@ -140,15 +177,7 @@ fn preserve_source_tree(
 
     let mut roots = chosen_node_by_device
         .keys()
-        .filter(|device_id| {
-            !chosen_node_by_device
-                .get(*device_id)
-                .and_then(|(_, parent_device_id)| parent_device_id.as_ref())
-                .is_some_and(|parent_device_id| {
-                    parent_device_id != *device_id
-                        && chosen_node_by_device.contains_key(parent_device_id)
-                })
-        })
+        .filter(|device_id| !resolved_parent_by_device.contains_key(*device_id))
         .cloned()
         .collect::<Vec<_>>();
     roots.sort_by(|left, right| {
@@ -190,6 +219,38 @@ fn source_node_sort_key(
         .unwrap_or_default();
     let device_key = device_sort_key(topology, &node.device_id).0;
     (node.depth, parent_key, device_key, node.row_id.clone())
+}
+
+fn unique_visible_lldp_parent(
+    topology: &Topology,
+    device_id: &str,
+    visible_device_ids: &HashSet<String>,
+) -> Option<String> {
+    let candidates = topology
+        .links
+        .iter()
+        .filter(|link| link.protocol == LinkProtocol::Lldp)
+        .filter_map(|link| {
+            if link.local_device_id == device_id {
+                Some(link.remote_device_id.clone())
+            } else if link.remote_device_id == device_id {
+                Some(link.local_device_id.clone())
+            } else {
+                None
+            }
+        })
+        .filter(|candidate_id| {
+            candidate_id != device_id
+                && visible_device_ids.contains(candidate_id)
+                && include_in_tree(topology, candidate_id)
+        })
+        .collect::<HashSet<_>>();
+
+    if candidates.len() == 1 {
+        candidates.into_iter().next()
+    } else {
+        None
+    }
 }
 
 fn build_internal_tree(topology: &Topology) -> DiscoveryTree {
@@ -723,6 +784,98 @@ mod tests {
             core_router_2.parent_row_id.as_deref(),
             Some("dist-switch-a")
         );
+    }
+
+    #[test]
+    fn merge_reparents_lldp_only_leaf_when_source_parent_is_missing() {
+        let result = SourceResult {
+            topology: Topology {
+                devices: HashMap::from([
+                    (
+                        "hub-router-1".to_string(),
+                        device("hub-router-1", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                    (
+                        "hub-router-2".to_string(),
+                        device("hub-router-2", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                    (
+                        "branch-router-07".to_string(),
+                        device(
+                            "branch-router-07",
+                            DeviceRole::Router,
+                            DeploymentType::Unknown,
+                        ),
+                    ),
+                ]),
+                links: vec![
+                    Link {
+                        id: "hub-1-to-hub-2".to_string(),
+                        local_device_id: "hub-router-1".to_string(),
+                        local_interface: "eth1".to_string(),
+                        local_ip: None,
+                        remote_device_id: "hub-router-2".to_string(),
+                        remote_interface: "eth1".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                    Link {
+                        id: "hub-2-to-branch-07".to_string(),
+                        local_device_id: "hub-router-2".to_string(),
+                        local_interface: "eth3".to_string(),
+                        local_ip: None,
+                        remote_device_id: "branch-router-07".to_string(),
+                        remote_interface: "eth1".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                ],
+                updated_at: Utc::now(),
+            },
+            tree: DiscoveryTree {
+                nodes: vec![
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/hub-router-1#1".to_string(),
+                        device_id: "hub-router-1".to_string(),
+                        parent_row_id: None,
+                        label: Some("hub-router-1".to_string()),
+                        depth: 0,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/hub-router-1#1/hub-router-2#1".to_string(),
+                        device_id: "hub-router-2".to_string(),
+                        parent_row_id: Some("seed:192.0.2.1/hub-router-1#1".to_string()),
+                        label: Some("hub-router-2".to_string()),
+                        depth: 1,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "source:0/branch-router-07#1".to_string(),
+                        device_id: "branch-router-07".to_string(),
+                        parent_row_id: None,
+                        label: Some("branch-router-07".to_string()),
+                        depth: 0,
+                    },
+                ],
+            },
+        };
+
+        let merged = merge_source_results(vec![result]);
+        let branch_router_07 = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "branch-router-07")
+            .expect("branch-router-07 should exist");
+
+        assert_eq!(
+            branch_router_07.parent_row_id.as_deref(),
+            Some("hub-router-2")
+        );
+        assert_eq!(branch_router_07.depth, 2);
     }
 
     #[test]
