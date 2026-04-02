@@ -7,7 +7,7 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::{
-    api::{routes::build_router, AppState, DiscoveryCoordinator},
+    api::{routes::{build_router, build_static_router}, AppState, DiscoveryCoordinator, StaticAppState, ViewSnapshot},
     observability::init_tracing,
 };
 
@@ -34,6 +34,14 @@ pub enum Commands {
         #[arg(long)]
         port: Option<u16>,
     },
+    ServeSnapshot {
+        #[arg(long)]
+        snapshot: PathBuf,
+        #[arg(long, default_value = "127.0.0.1")]
+        host: String,
+        #[arg(long, default_value_t = 8080)]
+        port: u16,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
@@ -45,6 +53,11 @@ pub async fn run() -> Result<()> {
     match Cli::parse().command {
         Commands::Discover { config, output } => run_discover(config, output).await,
         Commands::Serve { config, host, port } => run_serve(config, host, port).await,
+        Commands::ServeSnapshot {
+            snapshot,
+            host,
+            port,
+        } => run_serve_snapshot(snapshot, host, port).await,
     }
 }
 
@@ -95,4 +108,30 @@ async fn run_serve(
     axum::serve(listener, build_router(state)).await?;
 
     Ok(())
+}
+
+async fn run_serve_snapshot(
+    snapshot_path: PathBuf,
+    host: String,
+    port: u16,
+) -> Result<()> {
+    init_tracing();
+
+    let snapshot = load_snapshot(snapshot_path)?;
+    let bind_addr = format!("{host}:{port}");
+    let listener = TcpListener::bind(&bind_addr).await?;
+    info!(listen_addr = %bind_addr, "lattice snapshot viewer listening");
+
+    let state = StaticAppState {
+        snapshot: Arc::new(snapshot),
+    };
+    axum::serve(listener, build_static_router(state)).await?;
+
+    Ok(())
+}
+
+fn load_snapshot(snapshot_path: PathBuf) -> Result<ViewSnapshot> {
+    let raw = std::fs::read_to_string(&snapshot_path)?;
+    let snapshot = serde_json::from_str::<ViewSnapshot>(&raw)?;
+    Ok(snapshot)
 }

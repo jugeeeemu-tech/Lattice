@@ -14,11 +14,20 @@ use serde::Serialize;
 use tower_http::{classify::ServerErrorsFailureClass, trace::TraceLayer};
 use tracing::{info_span, Level};
 
-use super::{frontend_assets, ws::topology_socket, DiscoveryCoordinator, ViewSnapshot};
+use super::{
+    frontend_assets,
+    ws::{static_topology_socket, topology_socket},
+    DiscoveryCoordinator, ViewSnapshot,
+};
 
 #[derive(Clone)]
 pub struct AppState {
     pub coordinator: Arc<DiscoveryCoordinator>,
+}
+
+#[derive(Clone)]
+pub struct StaticAppState {
+    pub snapshot: Arc<ViewSnapshot>,
 }
 
 #[derive(Debug, Serialize)]
@@ -29,6 +38,27 @@ enum PostDiscoverResponse {
 }
 
 pub fn build_router(state: AppState) -> Router {
+    frontend_router()
+        .route("/api/topology", get(get_topology))
+        .route("/api/devices", get(get_devices))
+        .route("/api/discover", post(post_discover))
+        .route("/ws/topology", get(topology_socket))
+        .with_state(state)
+}
+
+pub fn build_static_router(state: StaticAppState) -> Router {
+    frontend_router()
+        .route("/api/topology", get(get_static_topology))
+        .route("/api/devices", get(get_static_devices))
+        .route("/api/discover", post(post_discover_static))
+        .route("/ws/topology", get(static_topology_socket))
+        .with_state(state)
+}
+
+fn frontend_router<S>() -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
     let trace_layer = TraceLayer::new_for_http()
         .make_span_with(|request: &axum::http::Request<Body>| {
             let matched_path = request
@@ -76,16 +106,11 @@ pub fn build_router(state: AppState) -> Router {
             },
         );
 
-    Router::new()
+    Router::<S>::new()
         .route("/health", get(health))
-        .route("/api/topology", get(get_topology))
-        .route("/api/devices", get(get_devices))
-        .route("/api/discover", post(post_discover))
-        .route("/ws/topology", get(topology_socket))
         .route("/", get(index_html))
         .route("/*asset_path", get(static_asset))
         .layer(trace_layer)
-        .with_state(state)
 }
 
 async fn health() -> &'static str {
@@ -100,6 +125,40 @@ async fn get_devices(State(state): State<AppState>) -> Json<Vec<Device>> {
     Json(state.coordinator.current_devices().await)
 }
 
+async fn get_static_topology(State(state): State<StaticAppState>) -> Json<ViewSnapshot> {
+    Json((*state.snapshot).clone())
+}
+
+async fn get_static_devices(State(state): State<StaticAppState>) -> Json<Vec<Device>> {
+    let mut devices = state
+        .snapshot
+        .devices
+        .iter()
+        .map(|device| Device {
+            id: device.id.clone(),
+            identity_keys: lattice_core::IdentityKeys::default(),
+            sys_descr: device.label.clone(),
+            vendor: String::new(),
+            model: None,
+            device_role: device.device_role.clone(),
+            deployment_type: device.deployment_type.clone(),
+            guest_kind: device.guest_kind,
+            interfaces: Vec::new(),
+            status: lattice_core::DeviceStatus::Unknown,
+            host_label: device.host_label.clone(),
+            host_mgmt_ip: None,
+            upstream_interface: device.upstream_interface.clone(),
+            last_seen: chrono::Utc::now(),
+        })
+        .collect::<Vec<_>>();
+    devices.sort_by(|left, right| {
+        left.label()
+            .cmp(&right.label())
+            .then_with(|| left.id.cmp(&right.id))
+    });
+    Json(devices)
+}
+
 async fn post_discover(State(state): State<AppState>) -> Response {
     match state.coordinator.trigger_manual_discovery().await {
         Some(snapshot) => (
@@ -109,6 +168,10 @@ async fn post_discover(State(state): State<AppState>) -> Response {
             .into_response(),
         None => (StatusCode::OK, Json(PostDiscoverResponse::Busy)).into_response(),
     }
+}
+
+async fn post_discover_static() -> Response {
+    (StatusCode::OK, Json(PostDiscoverResponse::Busy)).into_response()
 }
 
 async fn index_html() -> Html<&'static str> {
@@ -151,7 +214,7 @@ mod tests {
     use tower::ServiceExt;
 
     use super::*;
-    use crate::api::discovery_coordinator::DiscoveryRunner;
+    use crate::api::{discovery_coordinator::DiscoveryRunner, DiscoveryStatus};
 
     fn test_state() -> AppState {
         let config = DiscoveryConfig::default();
@@ -161,6 +224,12 @@ mod tests {
             config.auto_discovery_interval_seconds,
         ));
         AppState { coordinator }
+    }
+
+    fn static_test_state() -> StaticAppState {
+        StaticAppState {
+            snapshot: Arc::new(ViewSnapshot::empty(DiscoveryStatus::ready(), 60, None)),
+        }
     }
 
     #[derive(Clone)]
@@ -350,6 +419,62 @@ mod tests {
             discover_json["snapshot"]["discovery_status"]["state"],
             "discovering"
         );
+
+        let websocket = router
+            .oneshot(
+                Request::builder()
+                    .uri("/ws/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_ne!(websocket.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn static_snapshot_routes_remain_available() {
+        let router = build_static_router(static_test_state());
+
+        let health = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/health")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(health.status(), StatusCode::OK);
+
+        let topology = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/topology")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(topology.status(), StatusCode::OK);
+
+        let discover = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/discover")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(discover.status(), StatusCode::OK);
+        let discover_body = to_bytes(discover.into_body(), usize::MAX).await.unwrap();
+        let discover_json: Value = serde_json::from_slice(&discover_body).unwrap();
+        assert_eq!(discover_json["status"], "busy");
 
         let websocket = router
             .oneshot(
