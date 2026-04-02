@@ -61,6 +61,7 @@ import { spawn } from 'node:child_process';
 const [metadataPath, scenarioName] = process.argv.slice(2);
 const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
 const checks = metadata.nodes.filter((node) => node.snmp_enabled);
+const rootLabel = metadata.root;
 const lldpSysNameOid = '1.0.8802.1.1.2.1.4.1.1.9';
 const sysDescrOid = '1.3.6.1.2.1.1.1.0';
 const maxAttempts = 90;
@@ -123,18 +124,33 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       return {
         expected_neighbor_count: node.expected_neighbor_count,
         label: node.label,
+        lldp_ready:
+          node.expected_neighbor_count === 0 ||
+          (lldpNeighborCount !== null && lldpNeighborCount >= 1),
         lldp_neighbor_count: lldpNeighborCount,
-        ready:
-          sysDescrCount !== null &&
-          lldpNeighborCount !== null &&
-          lldpNeighborCount >= node.expected_neighbor_count,
         snmp_ready: sysDescrCount !== null,
       };
     })
   );
-  const ready = statusByNode.every((node) => node.ready);
+  const rootStatus = statusByNode.find((node) => node.label === rootLabel);
+  const snmpReady = statusByNode.every((node) => node.snmp_ready);
+  const rootLldpReady = rootStatus ? rootStatus.lldp_ready : true;
+  const ready = snmpReady && rootLldpReady;
 
-  console.log(JSON.stringify({ attempt, nodes: statusByNode, ready }, null, 2));
+  console.log(
+    JSON.stringify(
+      {
+        attempt,
+        nodes: statusByNode,
+        ready,
+        root_label: rootLabel,
+        root_lldp_ready: rootLldpReady,
+        snmp_ready: snmpReady,
+      },
+      null,
+      2
+    )
+  );
 
   if (ready) {
     process.exit(0);

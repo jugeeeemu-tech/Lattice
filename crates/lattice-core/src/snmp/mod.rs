@@ -16,9 +16,10 @@ pub mod oids {
     pub const LLDP_REM_PORT_ID: &str = "1.0.8802.1.1.2.1.4.1.1.7";
     pub const LLDP_REM_PORT_DESC: &str = "1.0.8802.1.1.2.1.4.1.1.8";
     pub const LLDP_REM_SYS_DESC: &str = "1.0.8802.1.1.2.1.4.1.1.10";
-    pub const LLDP_REM_MGMT_ADDR: &str = "1.0.8802.1.1.2.1.4.2.1.4";
+    pub const LLDP_REM_MGMT_ADDR: &str = "1.0.8802.1.1.2.1.4.2.1.2";
     pub const LLDP_REM_CHASSIS_ID: &str = "1.0.8802.1.1.2.1.4.1.1.5";
     pub const LLDP_LOC_PORT_ID: &str = "1.0.8802.1.1.2.1.3.7.1.3";
+    pub const LLDP_LOC_PORT_DESC: &str = "1.0.8802.1.1.2.1.3.7.1.4";
 
     pub const IF_DESCR: &str = "1.3.6.1.2.1.2.2.1.2";
     pub const IF_PHYS_ADDRESS: &str = "1.3.6.1.2.1.2.2.1.6";

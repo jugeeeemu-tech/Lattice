@@ -8,8 +8,9 @@ use crate::{
     collectors::{Collector, CollectorContext, GraphPatch, ObservedLink},
     snmp::{
         oids::{
-            IF_DESCR, IF_NAME, LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID, LLDP_REM_MGMT_ADDR,
-            LLDP_REM_PORT_DESC, LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC, LLDP_REM_SYS_NAME,
+            IF_DESCR, IF_NAME, LLDP_LOC_PORT_DESC, LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID,
+            LLDP_REM_MGMT_ADDR, LLDP_REM_PORT_DESC, LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC,
+            LLDP_REM_SYS_NAME,
         },
         SnmpSession, SnmpValue,
     },
@@ -50,6 +51,8 @@ impl Collector for LldpCollector {
             table_by_remote_index(session.walk(LLDP_REM_PORT_ID).await?, LLDP_REM_PORT_ID);
         let remote_port_descs =
             table_by_remote_index(session.walk(LLDP_REM_PORT_DESC).await?, LLDP_REM_PORT_DESC);
+        let local_port_descs =
+            table_by_local_index(session.walk(LLDP_LOC_PORT_DESC).await?, LLDP_LOC_PORT_DESC);
         let local_ports =
             table_by_local_index(session.walk(LLDP_LOC_PORT_ID).await?, LLDP_LOC_PORT_ID);
         let if_names = table_by_local_index(session.walk(IF_NAME).await?, IF_NAME);
@@ -114,6 +117,11 @@ impl Collector for LldpCollector {
                 .and_then(snmp_value_as_text)
                 .or_else(|| {
                     if_descrs
+                        .get(&index.local_port_num)
+                        .and_then(snmp_value_as_text)
+                })
+                .or_else(|| {
+                    local_port_descs
                         .get(&index.local_port_num)
                         .and_then(snmp_value_as_text)
                 })
@@ -250,6 +258,17 @@ mod tests {
             })
         );
         assert_eq!(remote_index_after_prefix("1.2.3", LLDP_REM_SYS_NAME), None);
+        assert_eq!(
+            remote_index_after_prefix(
+                "1.0.8802.1.1.2.1.4.2.1.2.0.7.42.1.4.172.31.10.42",
+                LLDP_REM_MGMT_ADDR
+            ),
+            Some(RemoteIndex {
+                time_mark: 0,
+                local_port_num: 7,
+                rem_index: 42,
+            })
+        );
     }
 
     #[test]
