@@ -81,7 +81,7 @@ impl Collector for LldpCollector {
 
         for index in indices {
             let identity = IdentityKeys {
-                chassis_id: chassis_ids.get(&index).and_then(snmp_value_as_text),
+                chassis_id: chassis_ids.get(&index).and_then(snmp_value_as_chassis_id),
                 sys_name: sys_names.get(&index).and_then(snmp_value_as_text),
                 mgmt_ip: mgmt_addrs.get(&index).cloned(),
                 mac_addresses: Vec::new(),
@@ -264,6 +264,35 @@ fn snmp_value_as_text(value: &SnmpValue) -> Option<String> {
     }
 }
 
+fn snmp_value_as_chassis_id(value: &SnmpValue) -> Option<String> {
+    match value {
+        SnmpValue::Null => None,
+        SnmpValue::OctetString(bytes) => {
+            if bytes.is_empty() {
+                return None;
+            }
+
+            if bytes
+                .iter()
+                .all(|byte| byte.is_ascii_graphic() || *byte == b' ')
+            {
+                return String::from_utf8(bytes.clone())
+                    .ok()
+                    .filter(|text| !text.trim().is_empty());
+            }
+
+            Some(
+                bytes
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(":"),
+            )
+        }
+        _ => snmp_value_as_text(value),
+    }
+}
+
 fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
     let mut combined = String::new();
     if let Some(value) = sys_name {
@@ -374,6 +403,18 @@ mod tests {
                 .as_ipv4()
                 .map(|ip| ip.to_string()),
             Some("192.0.2.1".to_string())
+        );
+    }
+
+    #[test]
+    fn chassis_id_helper_preserves_binary_identity() {
+        assert_eq!(
+            snmp_value_as_chassis_id(&SnmpValue::OctetString(vec![0x02, 0xf7, 0x44, 0x0b])),
+            Some("02:f7:44:0b".to_string())
+        );
+        assert_eq!(
+            snmp_value_as_chassis_id(&SnmpValue::OctetString(b"branch-router-2".to_vec())),
+            Some("branch-router-2".to_string())
         );
     }
 }
