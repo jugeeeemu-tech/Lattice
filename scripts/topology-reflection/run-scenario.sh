@@ -103,8 +103,11 @@ const checks = metadata.nodes.filter((node) => node.snmp_enabled);
 const rootLabel = metadata.root;
 const lldpSysNameOid = '1.0.8802.1.1.2.1.4.1.1.9';
 const sysDescrOid = '1.3.6.1.2.1.1.1.0';
-const maxAttempts = 90;
+const maxAttempts = 150;
 const sleepMs = 1_000;
+const stableReadyTarget = 3;
+let stableReadyIterations = 0;
+let previousSignature = null;
 
 function run(command, args) {
   return new Promise((resolve) => {
@@ -165,7 +168,7 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
         label: node.label,
         lldp_ready:
           node.expected_neighbor_count === 0 ||
-          (lldpNeighborCount !== null && lldpNeighborCount >= 1),
+          (lldpNeighborCount !== null && lldpNeighborCount >= node.expected_neighbor_count),
         lldp_neighbor_count: lldpNeighborCount,
         snmp_ready: sysDescrCount !== null,
       };
@@ -173,25 +176,36 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
   );
   const rootStatus = statusByNode.find((node) => node.label === rootLabel);
   const snmpReady = statusByNode.every((node) => node.snmp_ready);
-  const rootLldpReady = rootStatus ? rootStatus.lldp_ready : true;
-  const ready = snmpReady && rootLldpReady;
+  const lldpReady = statusByNode.every((node) => node.lldp_ready);
+  const ready = snmpReady && lldpReady;
+  const signature = JSON.stringify(
+    statusByNode.map((node) => ({
+      label: node.label,
+      lldp_neighbor_count: node.lldp_neighbor_count,
+      snmp_ready: node.snmp_ready,
+    }))
+  );
+  stableReadyIterations = ready && signature === previousSignature ? stableReadyIterations + 1 : ready ? 1 : 0;
+  previousSignature = signature;
 
   console.log(
     JSON.stringify(
       {
         attempt,
+        lldp_ready: lldpReady,
         nodes: statusByNode,
         ready,
         root_label: rootLabel,
-        root_lldp_ready: rootLldpReady,
+        root_lldp_ready: rootStatus ? rootStatus.lldp_ready : true,
         snmp_ready: snmpReady,
+        stable_ready_iterations: stableReadyIterations,
       },
       null,
       2
     )
   );
 
-  if (ready) {
+  if (ready && stableReadyIterations >= stableReadyTarget) {
     process.exit(0);
   }
 
