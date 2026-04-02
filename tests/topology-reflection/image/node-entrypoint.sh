@@ -55,6 +55,20 @@ wait_for_path() {
   return 1
 }
 
+wait_for_socket() {
+  local socket_path="$1"
+  local attempts="${2:-40}"
+
+  for _ in $(seq 1 "${attempts}"); do
+    if [[ -S "${socket_path}" ]]; then
+      return 0
+    fi
+    sleep 0.25
+  done
+
+  return 1
+}
+
 management_ipv4() {
   ip -o -4 addr show dev eth0 scope global 2>/dev/null \
     | awk '{print $4}' \
@@ -81,7 +95,24 @@ start_lldpd() {
   fi
 
   mkdir -p /var/log/topology-reflection
-  lldpd -d "${args[@]}" >/var/log/topology-reflection/lldpd.log 2>&1 &
+
+  for _ in $(seq 1 5); do
+    pkill -x lldpd >/dev/null 2>&1 || true
+    rm -f /run/lldpd.socket /var/run/lldpd.socket
+
+    lldpd -d "${args[@]}" >/var/log/topology-reflection/lldpd.log 2>&1 &
+    local lldpd_pid=$!
+
+    if wait_for_socket /run/lldpd.socket 20 || wait_for_socket /var/run/lldpd.socket 20; then
+      return 0
+    fi
+
+    kill "${lldpd_pid}" >/dev/null 2>&1 || true
+    wait "${lldpd_pid}" >/dev/null 2>&1 || true
+    sleep 1
+  done
+
+  return 1
 }
 
 configure_lldpd() {
@@ -161,7 +192,10 @@ agentXSocket /var/agentx/master
 EOF
 
 if [[ "${DISABLE_SNMP}" == "1" ]]; then
-  start_lldpd 0 "${MGMT_IP}"
+  start_lldpd 0 "${MGMT_IP}" || {
+    echo "failed to start lldpd" >&2
+    exit 1
+  }
   configure_lldpd || true
   exec tail -f /dev/null
 fi
@@ -171,7 +205,10 @@ SNMPD_PID=$!
 
 wait_for_path /var/agentx/master
 
-start_lldpd 1 "${MGMT_IP}"
+start_lldpd 1 "${MGMT_IP}" || {
+  echo "failed to start lldpd" >&2
+  exit 1
+}
 
 configure_lldpd || true
 
