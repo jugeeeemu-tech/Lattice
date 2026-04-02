@@ -650,7 +650,6 @@ function renderTopologyYaml(derivedScenario) {
     '  defaults:',
     '    kind: linux',
     '    image: lattice/topology-reflection-node:local',
-    '    privileged: true',
     '    cap-add:',
     '      - NET_ADMIN',
     '      - NET_RAW',

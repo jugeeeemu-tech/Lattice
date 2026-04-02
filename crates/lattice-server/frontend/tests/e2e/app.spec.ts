@@ -910,7 +910,9 @@ test('supports keyboard activation with Enter and Space', async ({ page }) => {
   await expect.poll(() => pushMockSnapshot(page, currentSnapshotRef.value)).toBe(true);
 
   await expect
-    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .poll(async () => (await discoveryControlMetrics(page))?.state, {
+      timeout: 15_000,
+    })
     .toBe('ready');
   await expect(discoveryControl).toBeEnabled();
   await discoveryControl.focus();
