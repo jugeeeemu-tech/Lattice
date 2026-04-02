@@ -82,22 +82,91 @@ fn preserve_source_tree(
     topology: &Topology,
     source_nodes: Vec<DiscoveryTreeNode>,
 ) -> DiscoveryTree {
-    let mut nodes = Vec::new();
+    let filtered_nodes = source_nodes
+        .into_iter()
+        .filter(|node| include_in_tree(topology, &node.device_id))
+        .collect::<Vec<_>>();
+
+    if filtered_nodes.is_empty() {
+        return build_internal_tree(topology);
+    }
+
+    let source_node_by_row_id = filtered_nodes
+        .iter()
+        .map(|node| (node.row_id.clone(), node))
+        .collect::<HashMap<_, _>>();
+    let mut chosen_node_by_device = HashMap::new();
+
+    for node in &filtered_nodes {
+        let parent_device_id = node.parent_row_id.as_ref().and_then(|parent_row_id| {
+            source_node_by_row_id
+                .get(parent_row_id)
+                .map(|parent| parent.device_id.clone())
+        });
+        let should_replace = chosen_node_by_device
+            .get(&node.device_id)
+            .map(|current: &(DiscoveryTreeNode, Option<String>)| {
+                source_node_sort_key(topology, node, parent_device_id.as_deref())
+                    < source_node_sort_key(topology, &current.0, current.1.as_deref())
+            })
+            .unwrap_or(true);
+
+        if should_replace {
+            chosen_node_by_device.insert(node.device_id.clone(), (node.clone(), parent_device_id));
+        }
+    }
+
+    let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
     let mut covered_device_ids = HashSet::new();
 
-    for mut node in source_nodes {
-        if !include_in_tree(topology, &node.device_id) {
-            continue;
+    for (device_id, (node, parent_device_id)) in &chosen_node_by_device {
+        covered_device_ids.insert(device_id.clone());
+        if let Some(parent_device_id) = parent_device_id {
+            if parent_device_id != device_id && chosen_node_by_device.contains_key(parent_device_id)
+            {
+                children_by_parent
+                    .entry(parent_device_id.clone())
+                    .or_default()
+                    .push(node.device_id.clone());
+            }
         }
-        if covered_device_ids.contains(&node.device_id) {
-            continue;
-        }
-        node.label = topology
-            .devices
-            .get(&node.device_id)
-            .map(|device| device.label());
-        covered_device_ids.insert(node.device_id.clone());
-        nodes.push(node);
+    }
+
+    for children in children_by_parent.values_mut() {
+        children.sort_by(|left, right| {
+            device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+        });
+    }
+
+    let mut roots = chosen_node_by_device
+        .keys()
+        .filter(|device_id| {
+            !chosen_node_by_device
+                .get(*device_id)
+                .and_then(|(_, parent_device_id)| parent_device_id.as_ref())
+                .is_some_and(|parent_device_id| {
+                    parent_device_id != *device_id
+                        && chosen_node_by_device.contains_key(parent_device_id)
+                })
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    roots.sort_by(|left, right| {
+        device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+    });
+
+    let mut visited = HashSet::new();
+    let mut nodes = Vec::new();
+    for root_id in roots {
+        walk_tree(
+            topology,
+            &root_id,
+            None,
+            0,
+            &children_by_parent,
+            &mut visited,
+            &mut nodes,
+        );
     }
 
     let fallback_tree = build_internal_tree(topology);
@@ -109,6 +178,18 @@ fn preserve_source_tree(
     }
 
     DiscoveryTree { nodes }
+}
+
+fn source_node_sort_key(
+    topology: &Topology,
+    node: &DiscoveryTreeNode,
+    parent_device_id: Option<&str>,
+) -> (u32, String, String, String) {
+    let parent_key = parent_device_id
+        .map(|device_id| device_sort_key(topology, device_id).0)
+        .unwrap_or_default();
+    let device_key = device_sort_key(topology, &node.device_id).0;
+    (node.depth, parent_key, device_key, node.row_id.clone())
 }
 
 fn build_internal_tree(topology: &Topology) -> DiscoveryTree {
@@ -419,12 +500,22 @@ mod tests {
 
         assert_eq!(merged.topology.devices.len(), 2);
         assert_eq!(merged.tree.nodes.len(), 2);
-        assert_eq!(merged.tree.nodes[0].row_id, "source:0/router-1#1");
-        assert_eq!(merged.tree.nodes[0].parent_row_id, None);
-        assert_eq!(
-            merged.tree.nodes[1].row_id,
-            "source:1/proxmox:pve-1:bridge:vmbr0#1"
-        );
+        let router = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "router-1")
+            .expect("router-1 should exist");
+        let bridge = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "proxmox:pve-1:bridge:vmbr0")
+            .expect("bridge should exist");
+        assert_eq!(router.row_id, "router-1");
+        assert_eq!(router.parent_row_id, None);
+        assert_eq!(bridge.row_id, "proxmox:pve-1:bridge:vmbr0");
+        assert_eq!(bridge.parent_row_id, None);
     }
 
     #[test]
@@ -500,6 +591,141 @@ mod tests {
     }
 
     #[test]
+    fn merge_prefers_stable_parent_for_redundant_source_paths() {
+        let result = SourceResult {
+            topology: Topology {
+                devices: HashMap::from([
+                    (
+                        "core-router-1".to_string(),
+                        device("core-router-1", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                    (
+                        "dist-switch-a".to_string(),
+                        device("dist-switch-a", DeviceRole::Switch, DeploymentType::Unknown),
+                    ),
+                    (
+                        "dist-switch-b".to_string(),
+                        device("dist-switch-b", DeviceRole::Switch, DeploymentType::Unknown),
+                    ),
+                    (
+                        "core-router-2".to_string(),
+                        device("core-router-2", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                ]),
+                links: vec![
+                    Link {
+                        id: "core-router-1:eth1->dist-switch-a:eth1:lldp".to_string(),
+                        local_device_id: "core-router-1".to_string(),
+                        local_interface: "eth1".to_string(),
+                        local_ip: None,
+                        remote_device_id: "dist-switch-a".to_string(),
+                        remote_interface: "eth1".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                    Link {
+                        id: "core-router-1:eth2->dist-switch-b:eth1:lldp".to_string(),
+                        local_device_id: "core-router-1".to_string(),
+                        local_interface: "eth2".to_string(),
+                        local_ip: None,
+                        remote_device_id: "dist-switch-b".to_string(),
+                        remote_interface: "eth1".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                    Link {
+                        id: "core-router-2:eth1->dist-switch-a:eth2:lldp".to_string(),
+                        local_device_id: "core-router-2".to_string(),
+                        local_interface: "eth1".to_string(),
+                        local_ip: None,
+                        remote_device_id: "dist-switch-a".to_string(),
+                        remote_interface: "eth2".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                    Link {
+                        id: "core-router-2:eth2->dist-switch-b:eth2:lldp".to_string(),
+                        local_device_id: "core-router-2".to_string(),
+                        local_interface: "eth2".to_string(),
+                        local_ip: None,
+                        remote_device_id: "dist-switch-b".to_string(),
+                        remote_interface: "eth2".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::Lldp,
+                        guest_attachment: None,
+                    },
+                ],
+                updated_at: Utc::now(),
+            },
+            tree: DiscoveryTree {
+                nodes: vec![
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/core-router-1#1".to_string(),
+                        device_id: "core-router-1".to_string(),
+                        parent_row_id: None,
+                        label: Some("core-router-1".to_string()),
+                        depth: 0,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/core-router-1#1/dist-switch-b#1".to_string(),
+                        device_id: "dist-switch-b".to_string(),
+                        parent_row_id: Some("seed:192.0.2.1/core-router-1#1".to_string()),
+                        label: Some("dist-switch-b".to_string()),
+                        depth: 1,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/core-router-1#1/dist-switch-b#1/core-router-2#1"
+                            .to_string(),
+                        device_id: "core-router-2".to_string(),
+                        parent_row_id: Some(
+                            "seed:192.0.2.1/core-router-1#1/dist-switch-b#1".to_string(),
+                        ),
+                        label: Some("core-router-2".to_string()),
+                        depth: 2,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/core-router-1#1/dist-switch-a#1".to_string(),
+                        device_id: "dist-switch-a".to_string(),
+                        parent_row_id: Some("seed:192.0.2.1/core-router-1#1".to_string()),
+                        label: Some("dist-switch-a".to_string()),
+                        depth: 1,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/core-router-1#1/dist-switch-a#1/core-router-2#1"
+                            .to_string(),
+                        device_id: "core-router-2".to_string(),
+                        parent_row_id: Some(
+                            "seed:192.0.2.1/core-router-1#1/dist-switch-a#1".to_string(),
+                        ),
+                        label: Some("core-router-2".to_string()),
+                        depth: 2,
+                    },
+                ],
+            },
+        };
+
+        let merged = merge_source_results(vec![result]);
+        let core_router_2 = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "core-router-2")
+            .expect("core-router-2 should exist");
+
+        assert_eq!(
+            core_router_2.parent_row_id.as_deref(),
+            Some("dist-switch-a")
+        );
+    }
+
+    #[test]
     fn merge_remaps_child_rows_using_canonical_ids() {
         let source = SourceResult {
             topology: Topology {
@@ -539,15 +765,12 @@ mod tests {
         let merged = merge_source_results(vec![source]);
 
         assert_eq!(merged.tree.nodes.len(), 2);
-        assert_eq!(merged.tree.nodes[0].row_id, "source:0/seed-router#1");
+        assert_eq!(merged.tree.nodes[0].row_id, "seed-router");
         assert_eq!(
             merged.tree.nodes[1].parent_row_id.as_deref(),
-            Some("source:0/seed-router#1")
+            Some("seed-router")
         );
-        assert_eq!(
-            merged.tree.nodes[1].row_id,
-            "source:0/seed-router#1/child-switch#1"
-        );
+        assert_eq!(merged.tree.nodes[1].row_id, "child-switch");
     }
 
     #[test]
