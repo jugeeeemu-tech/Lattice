@@ -175,7 +175,9 @@ async function snmpLineCount(containerName, oid) {
   return result.stdout
     .split('\n')
     .map((line) => line.trim())
-    .filter(Boolean).length;
+    .filter((line) => Boolean(line))
+    .filter((line) => !/^No Such (Object|Instance)/i.test(line))
+    .filter((line) => !/^End of MIB/i.test(line)).length;
 }
 
 for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {

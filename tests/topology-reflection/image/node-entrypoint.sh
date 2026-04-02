@@ -100,6 +100,7 @@ if [[ -n "${INTERFACE_CONFIG}" ]]; then
     cidr="${entry#*=}"
     wait_for_interface "${iface}"
     ip link set "${iface}" up
+    ip link set "${iface}" promisc on multicast on || true
     ip addr flush dev "${iface}" >/dev/null 2>&1 || true
     ip addr add "${cidr}" dev "${iface}"
     active_interfaces+=("${iface}")
