@@ -30,6 +30,9 @@ jobs:
           cache: npm
           cache-dependency-path: crates/lattice-server/frontend/package-lock.json
 
+      - name: Install npm
+        run: npm install --global npm@11.11.0
+
       - name: Install frontend dependencies
         working-directory: crates/lattice-server/frontend
         run: npm ci
