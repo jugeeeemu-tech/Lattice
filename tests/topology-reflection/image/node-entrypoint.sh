@@ -8,7 +8,21 @@ DISABLE_SNMP="${DISABLE_SNMP:-0}"
 SNMP_COMMUNITY="${SNMP_COMMUNITY:-public}"
 SYS_DESCR="${SYS_DESCR:-Linux ${NODE_SYSNAME}}"
 
-hostname "${NODE_SYSNAME}"
+wait_for_interface() {
+  local iface="$1"
+  local attempts="${2:-60}"
+
+  for _ in $(seq 1 "${attempts}"); do
+    if ip link show "${iface}" >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  return 1
+}
+
+hostname "${NODE_SYSNAME}" || true
 
 declare -a active_interfaces=()
 
@@ -18,6 +32,7 @@ if [[ -n "${INTERFACE_CONFIG}" ]]; then
     [[ -z "${entry}" ]] && continue
     iface="${entry%%=*}"
     cidr="${entry#*=}"
+    wait_for_interface "${iface}"
     ip link set "${iface}" up
     ip addr flush dev "${iface}" >/dev/null 2>&1 || true
     ip addr add "${cidr}" dev "${iface}"
