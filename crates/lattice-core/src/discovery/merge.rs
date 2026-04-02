@@ -244,8 +244,7 @@ fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> Discover
         .iter()
         .map(|node| (node.row_id.clone(), node.device_id.clone()))
         .collect::<HashMap<_, _>>();
-    let forced_root_ids = infer_internet_facing_roots(topology, &visible_device_ids);
-    let parent_by_device = base_tree
+    let base_parent_by_device = base_tree
         .nodes
         .iter()
         .filter_map(|node| {
@@ -253,6 +252,11 @@ fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> Discover
                 .get(node.parent_row_id.as_ref()?)
                 .map(|parent_id| (node.device_id.clone(), parent_id.clone()))
         })
+        .collect::<HashMap<_, _>>();
+    let forced_root_ids =
+        infer_additional_root_routers(topology, &visible_device_ids, &base_parent_by_device);
+    let parent_by_device = base_parent_by_device
+        .into_iter()
         .filter(|(device_id, _)| !forced_root_ids.contains(device_id))
         .collect::<HashMap<_, _>>();
 
@@ -294,14 +298,7 @@ fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> Discover
 
     let mut emitted_nodes = Vec::new();
     for root_id in &roots {
-        emit_display_tree(
-            root_id,
-            &node_by_device,
-            &children_by_parent,
-            None,
-            0,
-            &mut emitted_nodes,
-        );
+        emit_display_tree(root_id, &node_by_device, &children_by_parent, None, 0, &mut emitted_nodes);
     }
 
     let mut duplicate_scope_counts = HashMap::<String, usize>::new();
@@ -334,48 +331,193 @@ fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> Discover
     }
 }
 
-fn infer_internet_facing_roots(
+fn infer_additional_root_routers(
     topology: &Topology,
     visible_device_ids: &HashSet<String>,
+    base_parent_by_device: &HashMap<String, String>,
 ) -> HashSet<String> {
-    visible_device_ids
+    let router_ids = visible_device_ids
         .iter()
         .filter(|device_id| {
-            let Some(device) = topology.devices.get(*device_id) else {
-                return false;
-            };
-            if device.device_role != crate::DeviceRole::Router {
-                return false;
-            }
-            if proxmox_bridge_parent(topology, device_id).is_some() {
-                return false;
-            }
-            let Some(upstream_interface) = device.upstream_interface.as_deref().map(str::trim)
-            else {
-                return false;
-            };
-            if upstream_interface.is_empty() {
-                return false;
-            }
-
-            unique_parent_from_links(
-                topology,
-                device_id,
-                |link| link.protocol == LinkProtocol::Lldp,
-                |link, is_local| {
-                    if is_local {
-                        (link.local_interface == upstream_interface)
-                            .then(|| link.remote_device_id.clone())
-                    } else {
-                        (link.remote_interface == upstream_interface)
-                            .then(|| link.local_device_id.clone())
-                    }
-                },
-            )
-            .is_none()
+            topology
+                .devices
+                .get(*device_id)
+                .is_some_and(|device| device.device_role == crate::DeviceRole::Router)
         })
         .cloned()
-        .collect::<HashSet<_>>()
+        .collect::<HashSet<_>>();
+
+    let mut promoted = infer_router_cycle_roots(topology, &router_ids);
+    promoted.extend(infer_shared_downstream_roots(topology, visible_device_ids, &router_ids));
+    promoted.extend(infer_router_backbone_pair_roots(
+        topology,
+        &router_ids,
+        base_parent_by_device,
+    ));
+
+    promoted.retain(|device_id| {
+        visible_device_ids.contains(device_id)
+            && router_ids.contains(device_id)
+            && !proxmox_bridge_parent(topology, device_id).is_some()
+            && base_parent_by_device.contains_key(device_id)
+    });
+
+    promoted
+}
+
+fn infer_router_backbone_pair_roots(
+    topology: &Topology,
+    router_ids: &HashSet<String>,
+    base_parent_by_device: &HashMap<String, String>,
+) -> HashSet<String> {
+    let router_child_counts = router_ids
+        .iter()
+        .map(|router_id| {
+            let count = base_parent_by_device
+                .iter()
+                .filter(|(device_id, parent_id)| {
+                    *parent_id == router_id
+                        && topology
+                            .devices
+                            .get(*device_id)
+                            .is_some_and(|device| device.device_role == crate::DeviceRole::Router)
+                })
+                .count();
+            (router_id.clone(), count)
+        })
+        .collect::<HashMap<_, _>>();
+
+    let mut promoted = HashSet::new();
+    for link in topology
+        .links
+        .iter()
+        .filter(|link| link.protocol == LinkProtocol::Lldp)
+    {
+        if !router_ids.contains(&link.local_device_id) || !router_ids.contains(&link.remote_device_id) {
+            continue;
+        }
+
+        let left_children = router_child_counts.get(&link.local_device_id).copied().unwrap_or(0);
+        let right_children = router_child_counts.get(&link.remote_device_id).copied().unwrap_or(0);
+        if left_children >= 2 && right_children >= 2 {
+            promoted.insert(link.local_device_id.clone());
+            promoted.insert(link.remote_device_id.clone());
+        }
+    }
+
+    promoted
+}
+
+fn infer_router_cycle_roots(topology: &Topology, router_ids: &HashSet<String>) -> HashSet<String> {
+    let mut router_neighbors = HashMap::<String, Vec<String>>::new();
+    for link in topology
+        .links
+        .iter()
+        .filter(|link| link.protocol == LinkProtocol::Lldp)
+    {
+        if router_ids.contains(&link.local_device_id) && router_ids.contains(&link.remote_device_id) {
+            router_neighbors
+                .entry(link.local_device_id.clone())
+                .or_default()
+                .push(link.remote_device_id.clone());
+            router_neighbors
+                .entry(link.remote_device_id.clone())
+                .or_default()
+                .push(link.local_device_id.clone());
+        }
+    }
+
+    let mut visited = HashSet::new();
+    let mut promoted = HashSet::new();
+
+    for router_id in router_ids {
+        if !visited.insert(router_id.clone()) {
+            continue;
+        }
+
+        let mut stack = vec![router_id.clone()];
+        let mut component = Vec::new();
+        let mut edge_count_twice = 0usize;
+
+        while let Some(current) = stack.pop() {
+            component.push(current.clone());
+            for neighbor in router_neighbors.get(&current).into_iter().flatten() {
+                edge_count_twice += 1;
+                if visited.insert(neighbor.clone()) {
+                    stack.push(neighbor.clone());
+                }
+            }
+        }
+
+        let node_count = component.len();
+        let edge_count = edge_count_twice / 2;
+        if node_count >= 2 && edge_count >= node_count {
+            promoted.extend(component);
+        }
+    }
+
+    promoted
+}
+
+fn infer_shared_downstream_roots(
+    topology: &Topology,
+    visible_device_ids: &HashSet<String>,
+    router_ids: &HashSet<String>,
+) -> HashSet<String> {
+    let mut shared_counts = HashMap::<(String, String), usize>::new();
+
+    for device_id in visible_device_ids {
+        let Some(device) = topology.devices.get(device_id) else {
+            continue;
+        };
+        if device.device_role == crate::DeviceRole::Router {
+            continue;
+        }
+
+        let mut router_neighbors = topology
+            .links
+            .iter()
+            .filter(|link| link.protocol == LinkProtocol::Lldp)
+            .filter_map(|link| {
+                if link.local_device_id == *device_id && router_ids.contains(&link.remote_device_id) {
+                    return Some(link.remote_device_id.clone());
+                }
+                if link.remote_device_id == *device_id && router_ids.contains(&link.local_device_id) {
+                    return Some(link.local_device_id.clone());
+                }
+                None
+            })
+            .collect::<Vec<_>>();
+
+        router_neighbors.sort();
+        router_neighbors.dedup();
+        if router_neighbors.len() < 2 {
+            continue;
+        }
+
+        for index in 0..router_neighbors.len() {
+            for other_index in (index + 1)..router_neighbors.len() {
+                let pair = (
+                    router_neighbors[index].clone(),
+                    router_neighbors[other_index].clone(),
+                );
+                shared_counts
+                    .entry(pair)
+                    .and_modify(|count| *count += 1)
+                    .or_insert(1);
+            }
+        }
+    }
+
+    let mut promoted = HashSet::new();
+    for ((left, right), count) in shared_counts {
+        if count >= 2 {
+            promoted.insert(left);
+            promoted.insert(right);
+        }
+    }
+
+    promoted
 }
 
 fn infer_shared_children_by_root(
@@ -1119,14 +1261,12 @@ mod tests {
             .find(|node| node.device_id == "core-router-2")
             .expect("core-router-2 should exist");
 
-        assert_eq!(
-            core_router_2.parent_row_id.as_deref(),
-            Some("dist-switch-a")
-        );
+        assert!(core_router_2.parent_row_id.is_none());
+        assert_eq!(core_router_2.depth, 0);
     }
 
     #[test]
-    fn merge_promotes_internet_facing_router_and_duplicates_shared_subtree() {
+    fn merge_keeps_single_shared_child_router_below_distribution() {
         let mut core_router_1 =
             device("core-router-1", DeviceRole::Router, DeploymentType::Unknown);
         core_router_1.upstream_interface = Some("eth0".to_string());
@@ -1240,8 +1380,11 @@ mod tests {
             .filter(|node| node.device_id == "core-router-2")
             .collect::<Vec<_>>();
         assert_eq!(core_router_2_rows.len(), 1);
-        assert!(core_router_2_rows[0].parent_row_id.is_none());
-        assert_eq!(core_router_2_rows[0].depth, 0);
+        assert_eq!(
+            core_router_2_rows[0].parent_row_id.as_deref(),
+            Some("dist-switch-a")
+        );
+        assert_eq!(core_router_2_rows[0].depth, 2);
 
         let dist_rows = merged
             .tree
@@ -1249,14 +1392,8 @@ mod tests {
             .iter()
             .filter(|node| node.device_id == "dist-switch-a")
             .collect::<Vec<_>>();
-        assert_eq!(dist_rows.len(), 2);
-        assert_eq!(
-            dist_rows
-                .iter()
-                .filter_map(|node| node.parent_row_id.as_deref())
-                .collect::<HashSet<_>>(),
-            HashSet::from(["core-router-1", "core-router-2"])
-        );
+        assert_eq!(dist_rows.len(), 1);
+        assert_eq!(dist_rows[0].parent_row_id.as_deref(), Some("core-router-1"));
 
         let access_rows = merged
             .tree
@@ -1264,17 +1401,8 @@ mod tests {
             .iter()
             .filter(|node| node.device_id == "access-switch-a1")
             .collect::<Vec<_>>();
-        assert_eq!(access_rows.len(), 2);
-        assert!(access_rows.iter().any(|node| {
-            node.parent_row_id
-                .as_deref()
-                .is_some_and(|parent| parent == "dist-switch-a")
-        }));
-        assert!(access_rows.iter().any(|node| {
-            node.parent_row_id
-                .as_deref()
-                .is_some_and(|parent| parent.contains("core-router-2/dist-switch-a#"))
-        }));
+        assert_eq!(access_rows.len(), 1);
+        assert_eq!(access_rows[0].parent_row_id.as_deref(), Some("dist-switch-a"));
     }
 
     #[test]

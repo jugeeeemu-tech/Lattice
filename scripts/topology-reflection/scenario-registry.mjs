@@ -26,6 +26,7 @@ function scenario({
   name,
   suite,
   root,
+  rootLabels = [root],
   links,
   focusLabels,
   disabledLinks = [],
@@ -39,6 +40,7 @@ function scenario({
     name,
     suite,
     root,
+    rootLabels: [...rootLabels].sort((left, right) => left.localeCompare(right)),
     nodes,
     links,
     focusLabels,
@@ -75,6 +77,7 @@ function ringScenario() {
     name: 'ring-4',
     suite: 'push',
     root: 'ring-router-1',
+    rootLabels: ['ring-router-1', 'ring-router-2', 'ring-router-3', 'ring-router-4'],
     links: [
       link('ring-router-1', 'ring-router-2'),
       link('ring-router-2', 'ring-router-3'),
@@ -89,18 +92,21 @@ function campusScenario() {
     name: 'campus-12',
     suite: 'push',
     root: 'core-router-1',
+    rootLabels: ['core-router-1', 'core-router-2'],
     links: [
       link('core-router-1', 'dist-switch-a'),
+      link('core-router-2', 'dist-switch-a'),
       link('core-router-1', 'dist-switch-b'),
+      link('core-router-2', 'dist-switch-b'),
       link('core-router-1', 'dist-switch-c'),
+      link('core-router-2', 'dist-switch-c'),
       link('dist-switch-a', 'access-switch-a1'),
       link('dist-switch-a', 'access-switch-a2'),
       link('dist-switch-b', 'access-switch-b1'),
-      link('dist-switch-b', 'access-switch-b2'),
       link('dist-switch-c', 'access-switch-c1'),
-      link('dist-switch-c', 'access-switch-c2'),
       link('access-switch-a1', 'app-server-a'),
       link('access-switch-b1', 'app-server-b'),
+      link('access-switch-c1', 'app-server-c'),
     ],
   });
 }
@@ -150,6 +156,7 @@ function redundantUplinkScenario() {
     name: 'redundant-uplink-18',
     suite: 'push',
     root: 'core-router-1',
+    rootLabels: ['core-router-1', 'core-router-2'],
     links,
   });
 }
@@ -179,6 +186,7 @@ function enterpriseCampusScenario() {
     name: 'enterprise-campus-36',
     suite: 'nightly',
     root: 'core-router-1',
+    rootLabels: ['core-router-1', 'core-router-2'],
     links,
     focusLabels: [
       'core-router-1',
@@ -225,6 +233,7 @@ function multiBranchScenario() {
     name: 'multi-branch-48',
     suite: 'nightly',
     root: 'hub-router-1',
+    rootLabels: ['hub-router-1', 'hub-router-2'],
     links,
     focusLabels: [
       'hub-router-1',
@@ -277,6 +286,7 @@ function mixedHierarchyScenario() {
     name: 'mixed-hierarchy-42',
     suite: 'nightly',
     root: 'core-router-1',
+    rootLabels: ['core-router-1', 'core-router-2', 'core-router-3', 'core-router-4'],
     links,
     focusLabels: [
       'core-router-1',
@@ -640,16 +650,17 @@ function adjacencyForScenario(derivedScenario, { includeDisabledSnmp = false } =
   return adjacency;
 }
 
-function buildExpectedTree(derivedScenario) {
+function buildBaseExpectedTree(derivedScenario) {
   const adjacency = adjacencyForScenario(derivedScenario);
-  const root = derivedScenario.root;
-  const queue = [root];
+  const rootLabels = derivedScenario.rootLabels ?? [derivedScenario.root];
+  const queue = [];
   const discovered = new Set();
   const parentByLabel = new Map();
   const depthByLabel = new Map();
   const rowIdByLabel = new Map();
 
-  if (adjacency.get(root)?.disabledSnmp) {
+  const enabledRoots = rootLabels.filter((label) => !adjacency.get(label)?.disabledSnmp);
+  if (enabledRoots.length === 0) {
     return {
       depthByLabel,
       discoveredLabels: [],
@@ -658,9 +669,12 @@ function buildExpectedTree(derivedScenario) {
     };
   }
 
-  discovered.add(root);
-  depthByLabel.set(root, 0);
-  rowIdByLabel.set(root, `seed/${root}`);
+  for (const root of enabledRoots) {
+    discovered.add(root);
+    depthByLabel.set(root, 0);
+    rowIdByLabel.set(root, `seed/${root}`);
+    queue.push(root);
+  }
 
   while (queue.length > 0) {
     const current = queue.shift();
@@ -690,6 +704,263 @@ function buildExpectedTree(derivedScenario) {
   };
 }
 
+function inferRouterCycleRoots(derivedScenario, visibleLabels) {
+  const routerLabels = visibleLabels.filter((label) => inferDeviceRole(label) === 'router');
+  const routerSet = new Set(routerLabels);
+  const routerAdjacency = new Map(routerLabels.map((label) => [label, []]));
+
+  for (const edge of derivedScenario.derivedLinks) {
+    if (edge.disabled) {
+      continue;
+    }
+    if (routerSet.has(edge.a) && routerSet.has(edge.b)) {
+      routerAdjacency.get(edge.a)?.push(edge.b);
+      routerAdjacency.get(edge.b)?.push(edge.a);
+    }
+  }
+
+  const visited = new Set();
+  const promoted = new Set();
+
+  for (const routerLabel of routerLabels) {
+    if (visited.has(routerLabel)) {
+      continue;
+    }
+
+    const stack = [routerLabel];
+    const component = [];
+    let edgeCountTwice = 0;
+    visited.add(routerLabel);
+
+    while (stack.length > 0) {
+      const current = stack.pop();
+      component.push(current);
+      for (const neighbor of routerAdjacency.get(current) ?? []) {
+        edgeCountTwice += 1;
+        if (!visited.has(neighbor)) {
+          visited.add(neighbor);
+          stack.push(neighbor);
+        }
+      }
+    }
+
+    const nodeCount = component.length;
+    const edgeCount = Math.floor(edgeCountTwice / 2);
+    if (nodeCount >= 2 && edgeCount >= nodeCount) {
+      for (const label of component) {
+        promoted.add(label);
+      }
+    }
+  }
+
+  return promoted;
+}
+
+function inferSharedDownstreamRoots(derivedScenario, visibleLabels) {
+  const visibleSet = new Set(visibleLabels);
+  const sharedCounts = new Map();
+
+  for (const label of visibleLabels) {
+    if (inferDeviceRole(label) === 'router') {
+      continue;
+    }
+
+    const routerNeighbors = derivedScenario.derivedLinks
+      .filter((edge) => !edge.disabled)
+      .flatMap((edge) => {
+        if (edge.a === label && visibleSet.has(edge.b) && inferDeviceRole(edge.b) === 'router') {
+          return [edge.b];
+        }
+        if (edge.b === label && visibleSet.has(edge.a) && inferDeviceRole(edge.a) === 'router') {
+          return [edge.a];
+        }
+        return [];
+      })
+      .sort((left, right) => left.localeCompare(right))
+      .filter((candidate, index, values) => index === 0 || values[index - 1] !== candidate);
+
+    if (routerNeighbors.length < 2) {
+      continue;
+    }
+
+    for (let index = 0; index < routerNeighbors.length; index += 1) {
+      for (let otherIndex = index + 1; otherIndex < routerNeighbors.length; otherIndex += 1) {
+        const pairKey = sortedPair(routerNeighbors[index], routerNeighbors[otherIndex]);
+        sharedCounts.set(pairKey, (sharedCounts.get(pairKey) ?? 0) + 1);
+      }
+    }
+  }
+
+  const promoted = new Set();
+  for (const [pairKey, count] of sharedCounts.entries()) {
+    if (count < 2) {
+      continue;
+    }
+    const [left, right] = pairKey.split('::');
+    promoted.add(left);
+    promoted.add(right);
+  }
+
+  return promoted;
+}
+
+function inferSharedChildrenByRoot(derivedScenario, visibleLabels, rootLabels) {
+  const visibleSet = new Set(visibleLabels);
+  const rootSet = new Set(rootLabels.filter((label) => inferDeviceRole(label) === 'router'));
+  const rootsByChild = new Map();
+
+  for (const edge of derivedScenario.derivedLinks) {
+    if (edge.disabled) {
+      continue;
+    }
+
+    const [rootLabel, childLabel] = rootSet.has(edge.a)
+      ? [edge.a, edge.b]
+      : rootSet.has(edge.b)
+        ? [edge.b, edge.a]
+        : [null, null];
+
+    if (!rootLabel || !childLabel || !visibleSet.has(childLabel) || inferDeviceRole(childLabel) === 'router') {
+      continue;
+    }
+
+    const current = rootsByChild.get(childLabel) ?? [];
+    current.push(rootLabel);
+    rootsByChild.set(childLabel, current);
+  }
+
+  const sharedChildrenByRoot = new Map();
+  for (const [childLabel, rootCandidates] of rootsByChild.entries()) {
+    const uniqueRoots = [...new Set(rootCandidates)].sort((left, right) => left.localeCompare(right));
+    if (uniqueRoots.length < 2) {
+      continue;
+    }
+    for (const rootLabel of uniqueRoots) {
+      const current = sharedChildrenByRoot.get(rootLabel) ?? [];
+      current.push(childLabel);
+      sharedChildrenByRoot.set(rootLabel, current);
+    }
+  }
+
+  for (const [rootLabel, children] of sharedChildrenByRoot.entries()) {
+    sharedChildrenByRoot.set(
+      rootLabel,
+      [...new Set(children)].sort((left, right) => left.localeCompare(right))
+    );
+  }
+
+  return sharedChildrenByRoot;
+}
+
+function buildDisplayExpectedTree(derivedScenario) {
+  const baseTree = buildBaseExpectedTree(derivedScenario);
+  const adjacency = adjacencyForScenario(derivedScenario);
+  const discoveredSet = new Set(baseTree.discoveredLabels);
+  const fallbackParentByLabel = new Map(
+    derivedScenario.disabledSnmp
+      .filter((label) => !discoveredSet.has(label))
+      .map((label) => {
+        const candidateParents = Array.from(
+          new Set(
+            (adjacency.get(label)?.edges ?? [])
+              .map((edge) => edge.peer)
+              .filter((peer) => discoveredSet.has(peer))
+          )
+        ).sort((left, right) => left.localeCompare(right));
+        return [label, candidateParents.length === 1 ? candidateParents[0] : null];
+      })
+  );
+  const visibleDisabledLabels = Array.from(fallbackParentByLabel.keys()).sort((left, right) =>
+    left.localeCompare(right)
+  );
+  const visibleLabels = [...baseTree.discoveredLabels, ...visibleDisabledLabels];
+  const visibleSet = new Set(visibleLabels);
+  const baseParentByLabel = new Map(baseTree.parentByLabel);
+  for (const [label, parentLabel] of fallbackParentByLabel.entries()) {
+    if (parentLabel) {
+      baseParentByLabel.set(label, parentLabel);
+    }
+  }
+
+  const explicitRoots = new Set(
+    (derivedScenario.rootLabels ?? [derivedScenario.root]).filter((label) => visibleSet.has(label))
+  );
+  const parentByLabel = new Map(
+    Array.from(baseParentByLabel.entries()).filter(([label]) => !explicitRoots.has(label))
+  );
+  const rootLabels = visibleLabels
+    .filter((label) => explicitRoots.has(label) || !parentByLabel.has(label))
+    .sort((left, right) => left.localeCompare(right));
+  const childrenByParent = buildChildrenByParentMap(visibleLabels, parentByLabel);
+  const sharedChildrenByRoot = inferSharedChildrenByRoot(derivedScenario, visibleLabels, rootLabels);
+
+  const rows = [];
+
+  function emit(label, parentRowId = null, depth = 0) {
+    const rowId = parentRowId ? `${parentRowId}/${label}` : `seed/${label}`;
+    rows.push({
+      depth,
+      device_label: label,
+      id: rowId,
+      label,
+      parent_row_id: parentRowId,
+    });
+    for (const childLabel of childrenByParent.get(label) ?? []) {
+      emit(childLabel, rowId, depth + 1);
+    }
+  }
+
+  function emitDuplicate(label, parentRowId, parentDepth) {
+    const rowId = `${parentRowId}/${label}`;
+    rows.push({
+      depth: parentDepth + 1,
+      device_label: label,
+      id: rowId,
+      label,
+      parent_row_id: parentRowId,
+    });
+    for (const childLabel of childrenByParent.get(label) ?? []) {
+      emitDuplicate(childLabel, rowId, parentDepth + 1);
+    }
+  }
+
+  for (const rootLabel of rootLabels) {
+    emit(rootLabel, null, 0);
+  }
+
+  for (const rootLabel of rootLabels) {
+    for (const childLabel of sharedChildrenByRoot.get(rootLabel) ?? []) {
+      if (parentByLabel.get(childLabel) === rootLabel) {
+        continue;
+      }
+      emitDuplicate(childLabel, `seed/${rootLabel}`, 0);
+    }
+  }
+
+  rows.sort((left, right) => left.depth - right.depth || left.id.localeCompare(right.id));
+
+  const primaryRowByLabel = {};
+  const primaryDepthByLabel = new Map();
+  for (const row of rows) {
+    const currentDepth = primaryDepthByLabel.get(row.label);
+    const currentRowId = primaryRowByLabel[row.label];
+    if (
+      currentDepth === undefined ||
+      row.depth < currentDepth ||
+      (row.depth === currentDepth && row.id.localeCompare(currentRowId) < 0)
+    ) {
+      primaryDepthByLabel.set(row.label, row.depth);
+      primaryRowByLabel[row.label] = row.id;
+    }
+  }
+
+  return {
+    primaryRowByLabel,
+    rows,
+    visibleLabels: [...visibleSet].sort((left, right) => left.localeCompare(right)),
+  };
+}
+
 function normalizeLink(leftLabel, leftInterface, rightLabel, rightInterface) {
   const leftKey = `${leftLabel}::${leftInterface}`;
   const rightKey = `${rightLabel}::${rightInterface}`;
@@ -713,48 +984,15 @@ function normalizeLink(leftLabel, leftInterface, rightLabel, rightInterface) {
 }
 
 function buildExpectedSnapshot(derivedScenario) {
-  const tree = buildExpectedTree(derivedScenario);
-  const adjacency = adjacencyForScenario(derivedScenario);
-  const discoveredSet = new Set(tree.discoveredLabels);
-  const fallbackParentByLabel = new Map(
-    derivedScenario.disabledSnmp
-    .filter((label) => !discoveredSet.has(label))
-      .map((label) => {
-        const candidateParents = Array.from(
-          new Set(
-            (adjacency.get(label)?.edges ?? [])
-              .map((edge) => edge.peer)
-              .filter((peer) => discoveredSet.has(peer))
-          )
-        ).sort((left, right) => left.localeCompare(right));
-        return [label, candidateParents.length === 1 ? candidateParents[0] : null];
-      })
-  );
-  const visibleDisabledLabels = Array.from(fallbackParentByLabel.keys()).sort((left, right) =>
-    left.localeCompare(right)
-  );
-  const visibleLabels = [...tree.discoveredLabels, ...visibleDisabledLabels];
+  const displayTree = buildDisplayExpectedTree(derivedScenario);
+  const visibleLabels = displayTree.visibleLabels;
   const visibleSet = new Set(visibleLabels);
-  const rowIdForLabel = new Map(
-    tree.discoveredLabels.map((label) => [label, tree.rowIdByLabel.get(label) ?? `seed/${label}`])
-  );
-  const depthForLabel = new Map(tree.discoveredLabels.map((label) => [label, tree.depthByLabel.get(label) ?? 0]));
-
-  for (const label of visibleDisabledLabels) {
-    const parentLabel = fallbackParentByLabel.get(label);
-    if (parentLabel && rowIdForLabel.has(parentLabel)) {
-      rowIdForLabel.set(label, `${rowIdForLabel.get(parentLabel)}/${label}`);
-      depthForLabel.set(label, (depthForLabel.get(parentLabel) ?? 0) + 1);
-      continue;
-    }
-
-    rowIdForLabel.set(label, `seed/${label}`);
-    depthForLabel.set(label, 0);
-  }
 
   const devices = visibleLabels
     .map((label) => ({
-      depth: depthForLabel.get(label) ?? 0,
+      depth: displayTree.rows
+        .filter((row) => row.label === label)
+        .reduce((best, row) => Math.min(best, row.depth), Number.POSITIVE_INFINITY),
       deployment_type: 'unknown',
       device_role: inferDeviceRole(label),
       label,
@@ -771,34 +1009,20 @@ function buildExpectedSnapshot(derivedScenario) {
       )
     );
 
-  const treeRows = visibleLabels
-    .map((label) => ({
-      device_label: label,
-      id: rowIdForLabel.get(label) ?? `seed/${label}`,
-      label,
+  const treeRows = displayTree.rows
+    .map((row) => ({
+      device_label: row.device_label,
+      id: row.id,
+      label: row.label,
     }))
     .sort((left, right) => left.id.localeCompare(right.id));
 
-  const treeEdges = Array.from(tree.parentByLabel.entries())
-    .map(([childLabel, parentLabel]) => ({
-      child_row_id: rowIdForLabel.get(childLabel),
-      parent_row_id: rowIdForLabel.get(parentLabel),
+  const treeEdges = displayTree.rows
+    .filter((row) => row.parent_row_id)
+    .map((row) => ({
+      child_row_id: row.id,
+      parent_row_id: row.parent_row_id,
     }))
-    .concat(
-      visibleDisabledLabels
-        .map((label) => {
-          const parentLabel = fallbackParentByLabel.get(label);
-          if (!parentLabel) {
-            return null;
-          }
-
-          return {
-            child_row_id: rowIdForLabel.get(label),
-            parent_row_id: rowIdForLabel.get(parentLabel),
-          };
-        })
-        .filter((edge) => edge !== null)
-    )
     .sort((left, right) =>
       `${left.parent_row_id}/${left.child_row_id}`.localeCompare(
         `${right.parent_row_id}/${right.child_row_id}`
@@ -806,9 +1030,7 @@ function buildExpectedSnapshot(derivedScenario) {
     );
 
   const primaryRowByLabel = Object.fromEntries(
-    visibleLabels
-      .map((label) => [label, rowIdForLabel.get(label) ?? `seed/${label}`])
-      .sort(([left], [right]) => left.localeCompare(right))
+    Object.entries(displayTree.primaryRowByLabel).sort(([left], [right]) => left.localeCompare(right))
   );
 
   return {
@@ -824,12 +1046,13 @@ function buildExpectedSnapshot(derivedScenario) {
 }
 
 function buildRules(derivedScenario, expectedSnapshot) {
+  const rootLabels = new Set(derivedScenario.rootLabels ?? [derivedScenario.root]);
   const leaves = expectedSnapshot.devices
     .map((device) => device.label)
     .filter((label) =>
       !expectedSnapshot.tree_edges.some((edge) => edge.parent_row_id === expectedSnapshot.primary_row_by_label[label])
     )
-    .filter((label) => label !== derivedScenario.root);
+    .filter((label) => !rootLabels.has(label));
 
   const focusLabels =
     derivedScenario.focusLabels ??
@@ -845,7 +1068,7 @@ function buildRules(derivedScenario, expectedSnapshot) {
     const path = [leafLabel];
     let current = leafLabel;
 
-    while (current !== derivedScenario.root) {
+    while (!rootLabels.has(current)) {
       const edge = expectedSnapshot.tree_edges.find(
         (candidate) =>
           candidate.child_row_id === expectedSnapshot.primary_row_by_label[current]
@@ -863,11 +1086,13 @@ function buildRules(derivedScenario, expectedSnapshot) {
       current = parentLabel;
     }
 
-    return current === derivedScenario.root ? path : null;
+    return rootLabels.has(current) ? path : null;
   }).filter((path) => Array.isArray(path));
 
   return {
-    focus_labels: Array.from(new Set(focusLabels)).sort((left, right) => left.localeCompare(right)),
+    focus_labels: Array.from(new Set([...(derivedScenario.rootLabels ?? [derivedScenario.root]), ...focusLabels])).sort(
+      (left, right) => left.localeCompare(right)
+    ),
     required_paths: requiredPaths,
     root_label: derivedScenario.root,
     scenario: derivedScenario.name,
