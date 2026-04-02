@@ -734,7 +734,7 @@ function renderLatticeConfigYaml(derivedScenario, serverPort) {
     '  timeout_seconds: 3',
     '  retries: 1',
     '  concurrent_devices: 1',
-    '  auto_discovery_interval_seconds: 300',
+    '  auto_discovery_interval_seconds: 3',
     'sources:',
     '  - kind: "snmp"',
     '    version: "2c"',

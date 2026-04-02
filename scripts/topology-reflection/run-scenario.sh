@@ -182,22 +182,38 @@ if [[ "${server_healthy}" -ne 1 ]]; then
   exit 1
 fi
 
-node --input-type=module - "${SERVER_PORT}" "${ACTUAL_SNAPSHOT}" <<'EOF'
-import { writeFile } from 'node:fs/promises';
+node --input-type=module - "${SERVER_PORT}" "${ACTUAL_SNAPSHOT}" "${EXPECTED_SNAPSHOT}" <<'EOF'
+import { readFile, writeFile } from 'node:fs/promises';
 
-const [port, outputPath] = process.argv.slice(2);
+const [port, outputPath, expectedPath] = process.argv.slice(2);
+const expectedSnapshot = JSON.parse(await readFile(expectedPath, 'utf8'));
+const expectedDeviceCount = expectedSnapshot.devices.length;
+const expectedLinkCount = expectedSnapshot.links.length;
+const expectedTreeRowCount = expectedSnapshot.tree_rows.length;
+const expectedTreeEdgeCount = expectedSnapshot.tree_edges.length;
 let snapshot = null;
 
-for (let attempt = 0; attempt < 60; attempt += 1) {
+for (let attempt = 0; attempt < 90; attempt += 1) {
   const response = await fetch(`http://127.0.0.1:${port}/api/topology`, {
     headers: { Accept: 'application/json' },
   }).catch(() => null);
 
   if (response?.ok) {
     snapshot = await response.json();
-    if (
+    const state = snapshot?.discovery_status?.state ?? '';
+    const converged =
       Array.isArray(snapshot.devices) &&
-      ['ready', 'failed'].includes(snapshot?.discovery_status?.state ?? '')
+      Array.isArray(snapshot.links) &&
+      Array.isArray(snapshot.tree_rows) &&
+      Array.isArray(snapshot.tree_edges) &&
+      snapshot.devices.length >= expectedDeviceCount &&
+      snapshot.links.length >= expectedLinkCount &&
+      snapshot.tree_rows.length >= expectedTreeRowCount &&
+      snapshot.tree_edges.length >= expectedTreeEdgeCount;
+
+    if (
+      state === 'failed' ||
+      (state === 'ready' && converged)
     ) {
       break;
     }
