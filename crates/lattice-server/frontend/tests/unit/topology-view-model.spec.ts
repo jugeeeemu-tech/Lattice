@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
+import type { ViewSnapshot } from '../../src/generated';
 import {
   buildTopologyModel,
   computeUpstreamPath,
@@ -186,6 +187,143 @@ describe('buildTopologyModel', () => {
     expect(path.resolvedNetworkCidrByLink).toEqual({
       'link-pve-guest': '10.120.0.0/24',
       'link-pve-router-trunk': '10.120.0.0/24',
+    });
+  });
+
+  it('continues from intermediate physical devices to their primary tree parent', () => {
+    const snapshot: ViewSnapshot = {
+      auto_discovery_interval_seconds: 30,
+      next_auto_discovery_at_ms: 0,
+      discovery_status: {
+        state: 'ready',
+      },
+      devices: [
+        {
+          id: 'core-router',
+          label: 'core-router',
+          depth: 0,
+          device_role: 'router',
+          deployment_type: 'physical',
+          upstream_interface: 'wan0',
+          identity_keys: {
+            sys_name: 'core-router',
+            mgmt_ip: '10.0.0.1',
+            mac_addresses: ['00:00:5e:00:53:01'],
+          },
+        },
+        {
+          id: 'dist-switch',
+          label: 'dist-switch',
+          depth: 1,
+          device_role: 'switch',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'dist-switch',
+            mgmt_ip: '10.0.1.2',
+            mac_addresses: ['00:00:5e:00:53:02'],
+          },
+        },
+        {
+          id: 'access-switch',
+          label: 'access-switch',
+          depth: 2,
+          device_role: 'switch',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'access-switch',
+            mgmt_ip: '10.0.1.3',
+            mac_addresses: ['00:00:5e:00:53:03'],
+          },
+        },
+        {
+          id: 'app-server',
+          label: 'app-server',
+          depth: 3,
+          device_role: 'server',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'app-server',
+            mgmt_ip: '10.0.1.4',
+            mac_addresses: ['00:00:5e:00:53:04'],
+          },
+        },
+      ],
+      links: [
+        {
+          id: 'core-dist',
+          local_device_id: 'core-router',
+          local_interface: 'lan0',
+          local_ip: '10.0.1.1/24',
+          remote_device_id: 'dist-switch',
+          remote_interface: 'eth1',
+          remote_ip: '10.0.1.2/24',
+          speed_bps: 1_000_000_000,
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+        },
+        {
+          id: 'dist-access',
+          local_device_id: 'dist-switch',
+          local_interface: 'eth2',
+          local_ip: '10.0.1.2/24',
+          remote_device_id: 'access-switch',
+          remote_interface: 'eth1',
+          remote_ip: '10.0.1.3/24',
+          speed_bps: 1_000_000_000,
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+        },
+        {
+          id: 'dist-app',
+          local_device_id: 'dist-switch',
+          local_interface: 'eth3',
+          local_ip: '10.0.1.2/24',
+          remote_device_id: 'app-server',
+          remote_interface: 'eth0',
+          remote_ip: '10.0.1.4/24',
+          speed_bps: 1_000_000_000,
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+        },
+      ],
+      tree_rows: [
+        { id: 'row-core', device_id: 'core-router', label: 'core-router' },
+        { id: 'row-dist', device_id: 'dist-switch', label: 'dist-switch' },
+        { id: 'row-access', device_id: 'access-switch', label: 'access-switch' },
+        { id: 'row-app', device_id: 'app-server', label: 'app-server' },
+      ],
+      tree_edges: [
+        { parent_row_id: 'row-core', child_row_id: 'row-dist' },
+        { parent_row_id: 'row-dist', child_row_id: 'row-access' },
+        { parent_row_id: 'row-dist', child_row_id: 'row-app' },
+      ],
+      primary_row_by_device: {
+        'core-router': 'row-core',
+        'dist-switch': 'row-dist',
+        'access-switch': 'row-access',
+        'app-server': 'row-app',
+      },
+    };
+    const model = buildTopologyModel(snapshot, new Set());
+
+    const distPath = computeUpstreamPath(snapshot, model, 'dist-switch');
+    const accessPath = computeUpstreamPath(snapshot, model, 'access-switch');
+
+    expect(Array.from(distPath.deviceIds).sort()).toEqual(['core-router', 'dist-switch']);
+    expect(Array.from(distPath.linkIds)).toEqual(['core-dist']);
+    expect(distPath.resolvedNetworkCidrByLink).toEqual({
+      'core-dist': '10.0.1.0/24',
+    });
+
+    expect(Array.from(accessPath.deviceIds).sort()).toEqual([
+      'access-switch',
+      'core-router',
+      'dist-switch',
+    ]);
+    expect(Array.from(accessPath.linkIds).sort()).toEqual(['core-dist', 'dist-access']);
+    expect(accessPath.resolvedNetworkCidrByLink).toEqual({
+      'core-dist': '10.0.1.0/24',
+      'dist-access': '10.0.1.0/24',
     });
   });
 

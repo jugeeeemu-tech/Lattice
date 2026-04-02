@@ -756,6 +756,34 @@ function interfaceForDevice(link: ViewLink, deviceId: string): string | null {
   return null;
 }
 
+function choosePhysicalUpstreamLink(
+  model: DerivedTopologyModel,
+  currentDeviceId: string,
+  currentDevice: ViewDevice | null,
+  candidates: ViewLink[]
+): ViewLink | null {
+  if (currentDevice?.upstream_interface) {
+    const upstreamMatches = candidates.filter(
+      (link) => interfaceForDevice(link, currentDeviceId) === currentDevice.upstream_interface
+    );
+    if (upstreamMatches.length === 1) {
+      return upstreamMatches[0];
+    }
+  }
+
+  const primaryParentDeviceId = model.primaryParentDeviceById.get(currentDeviceId) ?? null;
+  if (primaryParentDeviceId) {
+    const parentMatches = candidates.filter(
+      (link) => otherDeviceId(link, currentDeviceId) === primaryParentDeviceId
+    );
+    if (parentMatches.length === 1) {
+      return parentMatches[0];
+    }
+  }
+
+  return candidates.length === 1 ? candidates[0] : null;
+}
+
 function guestDeviceIdForLink(
   snapshot: ViewSnapshot,
   model: DerivedTopologyModel,
@@ -916,19 +944,13 @@ function physicalUpstreamPathFrom(
       break;
     }
 
-    let chosenLink: ViewLink | null = null;
-    if (currentDevice?.upstream_interface) {
-      const upstreamMatches = candidates.filter(
-        (link) =>
-          interfaceForDevice(link, currentDeviceId as string) === currentDevice.upstream_interface
-      );
-      if (upstreamMatches.length !== 1) {
-        break;
-      }
-      chosenLink = upstreamMatches[0];
-    } else if (candidates.length === 1) {
-      chosenLink = candidates[0];
-    } else {
+    const chosenLink = choosePhysicalUpstreamLink(
+      model,
+      currentDeviceId,
+      currentDevice,
+      candidates
+    );
+    if (!chosenLink) {
       break;
     }
 
