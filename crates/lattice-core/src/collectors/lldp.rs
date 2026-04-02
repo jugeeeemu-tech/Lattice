@@ -232,11 +232,11 @@ fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceR
     let lowered = combined.to_lowercase();
     if lowered.contains("router") || lowered.contains("vyos") {
         DeviceRole::Router
+    } else if lowered.contains("switch") {
+        DeviceRole::Switch
     } else if lowered.contains("proxmox") || lowered.contains("linux") || lowered.contains("server")
     {
         DeviceRole::Server
-    } else if lowered.contains("switch") {
-        DeviceRole::Switch
     } else {
         DeviceRole::Unknown
     }
@@ -289,6 +289,10 @@ mod tests {
         assert_eq!(
             infer_device_role(Some("vyos"), Some("router os")),
             DeviceRole::Router
+        );
+        assert_eq!(
+            infer_device_role(Some("dist-switch-a"), Some("Linux dist-switch-a")),
+            DeviceRole::Switch
         );
     }
 

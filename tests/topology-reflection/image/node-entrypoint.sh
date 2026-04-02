@@ -36,14 +36,29 @@ wait_for_path() {
   return 1
 }
 
+management_ipv4() {
+  ip -o -4 addr show dev eth0 scope global 2>/dev/null \
+    | awk '{print $4}' \
+    | cut -d/ -f1 \
+    | head -n 1
+}
+
 configure_lldpd() {
   local attempts="${1:-20}"
+  local mgmt_ip=""
 
   for _ in $(seq 1 "${attempts}"); do
     if lldpcli configure lldp tx-interval 1 >/dev/null 2>&1; then
       lldpcli configure lldp portidsubtype ifname >/dev/null 2>&1 || true
-      lldpcli configure system ip management pattern eth0 >/dev/null 2>&1 || true
+      lldpcli configure lldp portdescription-source ifname >/dev/null 2>&1 || true
+      mgmt_ip="$(management_ipv4)"
+      if [[ -n "${mgmt_ip}" ]]; then
+        lldpcli configure system ip management pattern "${mgmt_ip}" >/dev/null 2>&1 || true
+      else
+        lldpcli configure system ip management pattern eth0 >/dev/null 2>&1 || true
+      fi
       lldpcli configure lldp management-addresses-advertisements >/dev/null 2>&1 || true
+      lldpcli update >/dev/null 2>&1 || true
       return 0
     fi
     sleep 0.5
