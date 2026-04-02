@@ -758,6 +758,7 @@ dependencies = [
  "serde_yaml",
  "snmp",
  "tokio",
+ "tracing",
  "ts-rs",
 ]
 

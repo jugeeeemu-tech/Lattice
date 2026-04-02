@@ -16,6 +16,7 @@ chrono.workspace = true
 snmp.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 axum.workspace = true

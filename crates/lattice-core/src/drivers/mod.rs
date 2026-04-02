@@ -1,4 +1,5 @@
 use async_trait::async_trait;
+use tracing::warn;
 
 use crate::{
     collectors::{Collector, GraphPatch},
@@ -23,8 +24,16 @@ pub trait NetworkDriver: Send + Sync {
         let mut patch = GraphPatch::default();
         for collector in self.build_collectors() {
             if collector.is_available(session).await {
-                let output = collector.collect(session, ctx).await?;
-                patch.merge(output);
+                match collector.collect(session, ctx).await {
+                    Ok(output) => patch.merge(output),
+                    Err(error) => {
+                        warn!(
+                            collector = collector.name(),
+                            error = %error,
+                            "collector failed; continuing with partial discovery"
+                        );
+                    }
+                }
             }
         }
         Ok(patch)
@@ -56,6 +65,61 @@ pub fn get_driver(vendor: &str) -> Box<dyn NetworkDriver> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        collectors::{Collector, CollectorContext, GraphPatch},
+        snmp::SnmpSession,
+    };
+    use anyhow::anyhow;
+
+    struct SuccessCollector;
+
+    #[async_trait]
+    impl Collector for SuccessCollector {
+        fn name(&self) -> &'static str {
+            "success"
+        }
+
+        async fn is_available(&self, _session: &SnmpSession) -> bool {
+            true
+        }
+
+        async fn collect(
+            &self,
+            _session: &SnmpSession,
+            _ctx: &CollectorContext,
+        ) -> anyhow::Result<GraphPatch> {
+            Ok(GraphPatch::default())
+        }
+    }
+
+    struct FailingCollector;
+
+    #[async_trait]
+    impl Collector for FailingCollector {
+        fn name(&self) -> &'static str {
+            "failing"
+        }
+
+        async fn is_available(&self, _session: &SnmpSession) -> bool {
+            true
+        }
+
+        async fn collect(
+            &self,
+            _session: &SnmpSession,
+            _ctx: &CollectorContext,
+        ) -> anyhow::Result<GraphPatch> {
+            Err(anyhow!("boom"))
+        }
+    }
+
+    struct MixedDriver;
+
+    impl NetworkDriver for MixedDriver {
+        fn build_collectors(&self) -> Vec<Box<dyn Collector>> {
+            vec![Box::new(FailingCollector), Box::new(SuccessCollector)]
+        }
+    }
 
     #[test]
     fn vendor_detection_handles_vyos_and_fallbacks() {
@@ -67,5 +131,21 @@ mod tests {
     fn registry_returns_generic_for_vyos() {
         assert_eq!(get_driver("vyos").name(), "generic");
         assert_eq!(get_driver("generic").name(), "generic");
+    }
+
+    #[tokio::test]
+    async fn collect_continues_when_one_collector_fails() {
+        let session = SnmpSession::new("127.0.0.1", &crate::snmp::SnmpConfig::default());
+        let ctx = CollectorContext {
+            local_device_id: "device-1".to_string(),
+            target_ip: "127.0.0.1".to_string(),
+            seed_ip: "127.0.0.1".to_string(),
+            depth: 0,
+        };
+
+        let patch = MixedDriver.collect(&session, &ctx).await.unwrap();
+
+        assert!(patch.devices.is_empty());
+        assert!(patch.observed_links.is_empty());
     }
 }

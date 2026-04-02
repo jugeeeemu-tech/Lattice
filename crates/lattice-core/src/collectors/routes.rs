@@ -23,6 +23,10 @@ impl RouteCollector {
 
 #[async_trait]
 impl Collector for RouteCollector {
+    fn name(&self) -> &'static str {
+        "routes"
+    }
+
     async fn is_available(&self, session: &SnmpSession) -> bool {
         session
             .bulk_walk(IP_CIDR_ROUTE_IF_INDEX)

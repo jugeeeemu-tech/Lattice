@@ -41,6 +41,10 @@ impl GraphPatch {
 
 #[async_trait]
 pub trait Collector: Send + Sync {
+    fn name(&self) -> &'static str {
+        "collector"
+    }
+
     async fn is_available(&self, session: &SnmpSession) -> bool;
     async fn collect(&self, session: &SnmpSession, ctx: &CollectorContext) -> Result<GraphPatch>;
 }

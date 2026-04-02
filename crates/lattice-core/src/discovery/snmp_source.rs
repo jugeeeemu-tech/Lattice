@@ -4,6 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
+use tracing::warn;
 
 use crate::{
     collectors::CollectorContext,
@@ -131,7 +132,14 @@ impl DiscoverySource for SnmpDiscoverySource {
             };
             let patch = match driver.collect(&session, &ctx).await {
                 Ok(patch) => patch,
-                Err(_) => continue,
+                Err(error) => {
+                    warn!(
+                        target_ip = %item.target_ip,
+                        error = %error,
+                        "snmp driver collection failed"
+                    );
+                    continue;
+                }
             };
 
             for device in patch.devices.iter().cloned() {
@@ -139,7 +147,13 @@ impl DiscoverySource for SnmpDiscoverySource {
             }
 
             for link in patch.observed_links {
-                let _ = store.upsert_observed_link(link);
+                if let Err(error) = store.upsert_observed_link(link) {
+                    warn!(
+                        target_ip = %item.target_ip,
+                        error = %error,
+                        "failed to record observed link"
+                    );
+                }
             }
 
             for device in patch.devices {

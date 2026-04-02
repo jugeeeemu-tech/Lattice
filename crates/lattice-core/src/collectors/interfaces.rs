@@ -28,6 +28,10 @@ impl InterfaceCollector {
 
 #[async_trait]
 impl Collector for InterfaceCollector {
+    fn name(&self) -> &'static str {
+        "interfaces"
+    }
+
     async fn is_available(&self, session: &SnmpSession) -> bool {
         session
             .walk(IF_NAME)

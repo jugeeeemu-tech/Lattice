@@ -9,8 +9,8 @@ use crate::{
     snmp::{
         oids::{
             IF_DESCR, IF_NAME, LLDP_LOC_PORT_DESC, LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID,
-            LLDP_REM_MGMT_ADDR, LLDP_REM_MGMT_ADDR_IF_SUBTYPE, LLDP_REM_PORT_DESC,
-            LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC, LLDP_REM_SYS_NAME,
+            LLDP_REM_MGMT_ADDR_IF_SUBTYPE, LLDP_REM_PORT_DESC, LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC,
+            LLDP_REM_SYS_NAME,
         },
         SnmpSession, SnmpValue,
     },
@@ -28,6 +28,10 @@ impl LldpCollector {
 
 #[async_trait]
 impl Collector for LldpCollector {
+    fn name(&self) -> &'static str {
+        "lldp"
+    }
+
     async fn is_available(&self, session: &SnmpSession) -> bool {
         session
             .walk(LLDP_REM_SYS_NAME)
@@ -260,10 +264,6 @@ fn snmp_value_as_text(value: &SnmpValue) -> Option<String> {
     }
 }
 
-fn snmp_value_as_ipv4_text(value: &SnmpValue) -> Option<String> {
-    value.as_ipv4().map(|ip| ip.to_string())
-}
-
 fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
     let mut combined = String::new();
     if let Some(value) = sys_name {
@@ -290,7 +290,7 @@ fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceR
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::snmp::SnmpValue;
+    use crate::snmp::{oids::LLDP_REM_MGMT_ADDR, SnmpValue};
 
     #[test]
     fn remote_indexes_are_extracted_from_walk_oids() {
@@ -370,7 +370,9 @@ mod tests {
     fn text_helpers_accept_empty_values() {
         assert_eq!(snmp_value_as_text(&SnmpValue::Null), None);
         assert_eq!(
-            snmp_value_as_ipv4_text(&SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 0, 2, 1))),
+            SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 0, 2, 1))
+                .as_ipv4()
+                .map(|ip| ip.to_string()),
             Some("192.0.2.1".to_string())
         );
     }
