@@ -65,7 +65,7 @@ async function main() {
   const outDir = path.resolve(args.outDir);
   await mkdir(outDir, { recursive: true });
 
-  const { expectedSnapshot, rendered, rules } = deriveScenario(args.scenario, {
+  const { expectedSnapshot, metadata, rendered, rules } = deriveScenario(args.scenario, {
     serverPort: args.serverPort,
   });
 
@@ -79,6 +79,11 @@ async function main() {
   await writeFile(
     path.join(outDir, 'expected.rules.json'),
     `${JSON.stringify(rules, null, 2)}\n`,
+    'utf8'
+  );
+  await writeFile(
+    path.join(outDir, 'scenario.metadata.json'),
+    `${JSON.stringify(metadata, null, 2)}\n`,
     'utf8'
   );
 }

@@ -24,6 +24,7 @@ TOPOLOGY_FILE="${SCENARIO_DIR}/topology.clab.yml"
 CONFIG_FILE="${SCENARIO_DIR}/lattice.ci.yaml"
 EXPECTED_SNAPSHOT="${SCENARIO_DIR}/expected.snapshot.json"
 EXPECTED_RULES="${SCENARIO_DIR}/expected.rules.json"
+SCENARIO_METADATA="${SCENARIO_DIR}/scenario.metadata.json"
 
 mkdir -p "${OUTPUT_DIR}"
 
@@ -52,6 +53,98 @@ if ! docker image inspect "${IMAGE_TAG}" >/dev/null 2>&1; then
 fi
 
 containerlab deploy -t "${TOPOLOGY_FILE}" --reconfigure >"${OUTPUT_DIR}/containerlab-deploy.log" 2>&1
+
+node --input-type=module - "${SCENARIO_METADATA}" "${SCENARIO}" >"${OUTPUT_DIR}/topology-preflight.log" 2>&1 <<'EOF'
+import { readFile } from 'node:fs/promises';
+import { spawn } from 'node:child_process';
+
+const [metadataPath, scenarioName] = process.argv.slice(2);
+const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+const checks = metadata.nodes.filter((node) => node.snmp_enabled);
+const lldpSysNameOid = '1.0.8802.1.1.2.1.4.1.1.9';
+const sysDescrOid = '1.3.6.1.2.1.1.1.0';
+const maxAttempts = 90;
+const sleepMs = 1_000;
+
+function run(command, args) {
+  return new Promise((resolve) => {
+    const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+    let stdout = '';
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk.toString();
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('close', (code) => {
+      resolve({ code: code ?? 1, stderr, stdout });
+    });
+  });
+}
+
+async function snmpLineCount(containerName, oid) {
+  const result = await run('docker', [
+    'exec',
+    containerName,
+    'snmpwalk',
+    '-v2c',
+    '-c',
+    'public',
+    '-On',
+    '-Oqv',
+    '-t',
+    '1',
+    '-r',
+    '0',
+    'localhost',
+    oid,
+  ]);
+
+  if (result.code !== 0) {
+    return null;
+  }
+
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean).length;
+}
+
+for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  const statusByNode = await Promise.all(
+    checks.map(async (node) => {
+      const containerName = `clab-${scenarioName}-${node.label}`;
+      const sysDescrCount = await snmpLineCount(containerName, sysDescrOid);
+      const lldpNeighborCount =
+        sysDescrCount === null ? null : await snmpLineCount(containerName, lldpSysNameOid);
+
+      return {
+        expected_neighbor_count: node.expected_neighbor_count,
+        label: node.label,
+        lldp_neighbor_count: lldpNeighborCount,
+        ready:
+          sysDescrCount !== null &&
+          lldpNeighborCount !== null &&
+          lldpNeighborCount >= node.expected_neighbor_count,
+        snmp_ready: sysDescrCount !== null,
+      };
+    })
+  );
+  const ready = statusByNode.every((node) => node.ready);
+
+  console.log(JSON.stringify({ attempt, nodes: statusByNode, ready }, null, 2));
+
+  if (ready) {
+    process.exit(0);
+  }
+
+  await new Promise((resolve) => setTimeout(resolve, sleepMs));
+}
+
+throw new Error(`Topology preflight did not converge for scenario ${scenarioName}.`);
+EOF
 
 "${SERVER_BIN}" serve --config "${CONFIG_FILE}" --host 127.0.0.1 --port "${SERVER_PORT}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!

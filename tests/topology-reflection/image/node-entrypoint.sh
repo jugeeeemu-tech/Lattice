@@ -22,6 +22,20 @@ wait_for_interface() {
   return 1
 }
 
+wait_for_path() {
+  local target_path="$1"
+  local attempts="${2:-60}"
+
+  for _ in $(seq 1 "${attempts}"); do
+    if [[ -e "${target_path}" ]]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  return 1
+}
+
 hostname "${NODE_SYSNAME}" || true
 
 declare -a active_interfaces=()
@@ -66,6 +80,21 @@ master agentx
 agentXSocket /var/agentx/master
 EOF
 
+if [[ "${DISABLE_SNMP}" == "1" ]]; then
+  if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
+    interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
+    lldpd -I "${interface_pattern}"
+  else
+    lldpd
+  fi
+  exec tail -f /dev/null
+fi
+
+snmpd -f -Lo -C -c /etc/snmp/snmpd.conf &
+SNMPD_PID=$!
+
+wait_for_path /var/agentx/master
+
 if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
   interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
   lldpd -x -I "${interface_pattern}"
@@ -73,8 +102,4 @@ else
   lldpd -x
 fi
 
-if [[ "${DISABLE_SNMP}" == "1" ]]; then
-  exec tail -f /dev/null
-fi
-
-exec snmpd -f -Lo -C -c /etc/snmp/snmpd.conf
+wait "${SNMPD_PID}"

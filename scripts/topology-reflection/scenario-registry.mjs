@@ -640,6 +640,44 @@ function buildRules(derivedScenario, expectedSnapshot) {
   };
 }
 
+function buildMetadata(derivedScenario) {
+  const expectedNeighborCountByLabel = new Map(derivedScenario.nodes.map((label) => [label, 0]));
+
+  for (const edge of derivedScenario.derivedLinks) {
+    if (edge.disabled) {
+      continue;
+    }
+    expectedNeighborCountByLabel.set(
+      edge.a,
+      (expectedNeighborCountByLabel.get(edge.a) ?? 0) + 1
+    );
+    expectedNeighborCountByLabel.set(
+      edge.b,
+      (expectedNeighborCountByLabel.get(edge.b) ?? 0) + 1
+    );
+  }
+
+  return {
+    name: derivedScenario.name,
+    nodes: derivedScenario.nodes
+      .map((label) => {
+        const state = derivedScenario.interfaceStateByNode.get(label);
+        if (!state) {
+          throw new Error(`Missing interface state for ${label}`);
+        }
+
+        return {
+          expected_neighbor_count: expectedNeighborCountByLabel.get(label) ?? 0,
+          label,
+          mgmt_ip: state.mgmtIp,
+          snmp_enabled: !derivedScenario.disabledSnmp.includes(label),
+        };
+      })
+      .sort((left, right) => left.label.localeCompare(right.label)),
+    root: derivedScenario.root,
+  };
+}
+
 function renderTopologyYaml(derivedScenario) {
   const lines = [
     `name: ${derivedScenario.name}`,
@@ -719,11 +757,13 @@ export function deriveScenario(name, options = {}) {
     interfaceStateByNode: topology.interfaceStateByNode,
   };
   const expectedSnapshot = buildExpectedSnapshot(derivedScenario);
+  const metadata = buildMetadata(derivedScenario);
   const rules = buildRules(derivedScenario, expectedSnapshot);
 
   return {
     derivedScenario,
     expectedSnapshot,
+    metadata,
     rules,
     rendered: {
       latticeConfigYaml: renderLatticeConfigYaml(derivedScenario, serverPort),
