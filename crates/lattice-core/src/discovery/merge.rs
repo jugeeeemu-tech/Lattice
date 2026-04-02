@@ -11,20 +11,101 @@ use super::{DiscoveryResult, DiscoveryTree, DiscoveryTreeNode, SourceResult};
 
 pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
     let mut store = GraphStore::default();
+    let mut merged_source_nodes = Vec::new();
 
-    for result in results {
-        store.absorb_topology(&result.topology);
+    for (source_index, result) in results.into_iter().enumerate() {
+        let id_map = store.absorb_topology(&result.topology);
+        merged_source_nodes.extend(remap_tree_nodes(&result.tree, &id_map, source_index));
     }
 
     let mut topology = store.topology();
     attach_proxmox_uplinks(&mut topology);
-    let tree = build_internal_tree(&topology);
+    let tree = if merged_source_nodes.is_empty() {
+        build_internal_tree(&topology)
+    } else {
+        preserve_source_tree(&topology, merged_source_nodes)
+    };
 
     DiscoveryResult {
         topology,
         tree,
         discovered_at: Utc::now(),
     }
+}
+
+fn remap_tree_nodes(
+    tree: &DiscoveryTree,
+    id_map: &HashMap<String, String>,
+    source_index: usize,
+) -> Vec<DiscoveryTreeNode> {
+    let mut row_id_by_original = HashMap::new();
+    let mut occurrence_by_scope_device = HashMap::new();
+    let mut nodes = Vec::new();
+
+    for node in &tree.nodes {
+        let canonical_device_id = id_map
+            .get(&node.device_id)
+            .cloned()
+            .unwrap_or_else(|| node.device_id.clone());
+        let parent_row_id = node
+            .parent_row_id
+            .as_ref()
+            .and_then(|row_id| row_id_by_original.get(row_id))
+            .cloned();
+        let scope_key = parent_row_id
+            .clone()
+            .unwrap_or_else(|| format!("source:{source_index}"));
+        let occurrence_key = format!("{scope_key}::{canonical_device_id}");
+        let occurrence = occurrence_by_scope_device
+            .entry(occurrence_key)
+            .and_modify(|value| *value += 1)
+            .or_insert(1usize);
+        let row_id = parent_row_id
+            .as_ref()
+            .map(|parent| format!("{parent}/{canonical_device_id}#{occurrence}"))
+            .unwrap_or_else(|| format!("source:{source_index}/{canonical_device_id}#{occurrence}"));
+
+        row_id_by_original.insert(node.row_id.clone(), row_id.clone());
+        nodes.push(DiscoveryTreeNode {
+            row_id,
+            device_id: canonical_device_id,
+            parent_row_id,
+            label: node.label.clone(),
+            depth: node.depth,
+        });
+    }
+
+    nodes
+}
+
+fn preserve_source_tree(
+    topology: &Topology,
+    source_nodes: Vec<DiscoveryTreeNode>,
+) -> DiscoveryTree {
+    let mut nodes = Vec::new();
+    let mut covered_device_ids = HashSet::new();
+
+    for mut node in source_nodes {
+        if !include_in_tree(topology, &node.device_id) {
+            continue;
+        }
+        node.label = topology
+            .devices
+            .get(&node.device_id)
+            .map(|device| device.label());
+        covered_device_ids.insert(node.device_id.clone());
+        nodes.push(node);
+    }
+
+    let fallback_tree = build_internal_tree(topology);
+    for node in fallback_tree.nodes {
+        if covered_device_ids.contains(&node.device_id) {
+            continue;
+        }
+        nodes.push(node);
+    }
+
+    DiscoveryTree { nodes }
 }
 
 fn build_internal_tree(topology: &Topology) -> DiscoveryTree {
@@ -287,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn merge_keeps_all_tree_nodes() {
+    fn merge_preserves_source_tree_structure() {
         let first = SourceResult {
             topology: Topology {
                 devices: HashMap::from([(
@@ -335,6 +416,63 @@ mod tests {
 
         assert_eq!(merged.topology.devices.len(), 2);
         assert_eq!(merged.tree.nodes.len(), 2);
+        assert_eq!(merged.tree.nodes[0].row_id, "source:0/router-1#1");
+        assert_eq!(merged.tree.nodes[0].parent_row_id, None);
+        assert_eq!(
+            merged.tree.nodes[1].row_id,
+            "source:1/proxmox:pve-1:bridge:vmbr0#1"
+        );
+    }
+
+    #[test]
+    fn merge_remaps_child_rows_using_canonical_ids() {
+        let source = SourceResult {
+            topology: Topology {
+                devices: HashMap::from([
+                    (
+                        "seed-router".to_string(),
+                        device("seed-router", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                    (
+                        "child-switch".to_string(),
+                        device("child-switch", DeviceRole::Switch, DeploymentType::Unknown),
+                    ),
+                ]),
+                links: Vec::new(),
+                updated_at: Utc::now(),
+            },
+            tree: DiscoveryTree {
+                nodes: vec![
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/seed-router#1".to_string(),
+                        device_id: "seed-router".to_string(),
+                        parent_row_id: None,
+                        label: Some("seed-router".to_string()),
+                        depth: 0,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/seed-router#1/child-switch#1".to_string(),
+                        device_id: "child-switch".to_string(),
+                        parent_row_id: Some("seed:192.0.2.1/seed-router#1".to_string()),
+                        label: Some("child-switch".to_string()),
+                        depth: 1,
+                    },
+                ],
+            },
+        };
+
+        let merged = merge_source_results(vec![source]);
+
+        assert_eq!(merged.tree.nodes.len(), 2);
+        assert_eq!(merged.tree.nodes[0].row_id, "source:0/seed-router#1");
+        assert_eq!(
+            merged.tree.nodes[1].parent_row_id.as_deref(),
+            Some("source:0/seed-router#1")
+        );
+        assert_eq!(
+            merged.tree.nodes[1].row_id,
+            "source:0/seed-router#1/child-switch#1"
+        );
     }
 
     #[test]
