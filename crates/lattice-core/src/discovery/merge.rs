@@ -89,6 +89,9 @@ fn preserve_source_tree(
         if !include_in_tree(topology, &node.device_id) {
             continue;
         }
+        if covered_device_ids.contains(&node.device_id) {
+            continue;
+        }
         node.label = topology
             .devices
             .get(&node.device_id)
@@ -421,6 +424,78 @@ mod tests {
         assert_eq!(
             merged.tree.nodes[1].row_id,
             "source:1/proxmox:pve-1:bridge:vmbr0#1"
+        );
+    }
+
+    #[test]
+    fn merge_deduplicates_revisited_devices_in_source_tree() {
+        let result = SourceResult {
+            topology: Topology {
+                devices: HashMap::from([
+                    (
+                        "seed-router".to_string(),
+                        device("seed-router", DeviceRole::Router, DeploymentType::Unknown),
+                    ),
+                    (
+                        "child-switch".to_string(),
+                        device("child-switch", DeviceRole::Switch, DeploymentType::Unknown),
+                    ),
+                ]),
+                links: vec![Link {
+                    id: "seed-router:eth1->child-switch:eth1:lldp".to_string(),
+                    local_device_id: "seed-router".to_string(),
+                    local_interface: "eth1".to_string(),
+                    local_ip: None,
+                    remote_device_id: "child-switch".to_string(),
+                    remote_interface: "eth1".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
+                }],
+                updated_at: Utc::now(),
+            },
+            tree: DiscoveryTree {
+                nodes: vec![
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/seed-router#1".to_string(),
+                        device_id: "seed-router".to_string(),
+                        parent_row_id: None,
+                        label: Some("seed-router".to_string()),
+                        depth: 0,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/seed-router#1/child-switch#1".to_string(),
+                        device_id: "child-switch".to_string(),
+                        parent_row_id: Some("seed:192.0.2.1/seed-router#1".to_string()),
+                        label: Some("child-switch".to_string()),
+                        depth: 1,
+                    },
+                    crate::discovery::DiscoveryTreeNode {
+                        row_id: "seed:192.0.2.1/seed-router#1/child-switch#1/seed-router#1"
+                            .to_string(),
+                        device_id: "seed-router".to_string(),
+                        parent_row_id: Some(
+                            "seed:192.0.2.1/seed-router#1/child-switch#1".to_string(),
+                        ),
+                        label: Some("seed-router".to_string()),
+                        depth: 2,
+                    },
+                ],
+            },
+        };
+
+        let merged = merge_source_results(vec![result]);
+
+        assert_eq!(merged.tree.nodes.len(), 2);
+        assert_eq!(
+            merged
+                .tree
+                .nodes
+                .iter()
+                .map(|node| node.device_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["seed-router", "child-switch"]
         );
     }
 
