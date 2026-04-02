@@ -898,6 +898,9 @@ test('supports keyboard activation with Enter and Space', async ({ page }) => {
   await page.keyboard.press('Enter');
 
   await expect.poll(() => api.getDiscoverCount()).toBe(1);
+  await expect
+    .poll(async () => (await discoveryControlMetrics(page))?.state)
+    .toBe('discovering');
   await expect(discoveryControl).toBeDisabled();
 
   currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {

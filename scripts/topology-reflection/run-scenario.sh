@@ -56,12 +56,22 @@ containerlab deploy -t "${TOPOLOGY_FILE}" --reconfigure >"${OUTPUT_DIR}/containe
 "${SERVER_BIN}" serve --config "${CONFIG_FILE}" --host 127.0.0.1 --port "${SERVER_PORT}" >"${SERVER_LOG}" 2>&1 &
 SERVER_PID=$!
 
+server_healthy=0
 for _ in $(seq 1 60); do
   if curl --fail --silent --show-error "http://127.0.0.1:${SERVER_PORT}/health" >/dev/null 2>&1; then
+    server_healthy=1
+    break
+  fi
+  if ! kill -0 "${SERVER_PID}" >/dev/null 2>&1; then
     break
   fi
   sleep 2
 done
+
+if [[ "${server_healthy}" -ne 1 ]]; then
+  echo "lattice-server did not become healthy on port ${SERVER_PORT}" >&2
+  exit 1
+fi
 
 node --input-type=module - "${SERVER_PORT}" "${ACTUAL_SNAPSHOT}" <<'EOF'
 import { writeFile } from 'node:fs/promises';
@@ -76,7 +86,10 @@ for (let attempt = 0; attempt < 60; attempt += 1) {
 
   if (response?.ok) {
     snapshot = await response.json();
-    if (snapshot?.discovery_status?.state === 'ready' && Array.isArray(snapshot.devices)) {
+    if (
+      Array.isArray(snapshot.devices) &&
+      ['ready', 'failed'].includes(snapshot?.discovery_status?.state ?? '')
+    ) {
       break;
     }
   }
