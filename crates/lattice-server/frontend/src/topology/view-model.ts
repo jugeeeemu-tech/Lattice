@@ -46,7 +46,6 @@ export interface SidebarEntry {
 
 export interface GuestHighlight {
   accessLinkId: string;
-  color: number | null;
   trunkLinkId: string | null;
 }
 
@@ -54,6 +53,7 @@ export interface PathState {
   deviceIds: Set<string>;
   guestHighlight: GuestHighlight | null;
   linkIds: Set<string>;
+  resolvedNetworkCidrByLink: Record<string, string>;
 }
 
 export interface EmptyState {
@@ -660,14 +660,44 @@ function hslToHex(h: number, s: number, l: number): number {
   return (red << 16) | (green << 8) | blue;
 }
 
-export function guestAttachmentNetworkColor(
-  attachment: ViewLink['guest_attachment']
+export function networkCidrColor(
+  networkCidr: string | null | undefined
 ): number | null {
-  if (!attachment?.bridge_name || attachment.vlan_tag === undefined) {
+  if (!networkCidr) {
     return null;
   }
 
-  return hslToHex(hash01(`${attachment.bridge_name}:${attachment.vlan_tag}`), 0.68, 0.56);
+  return hslToHex(hash01(networkCidr), 0.68, 0.56);
+}
+
+export function primaryNetworkCidr(link: ViewLink): string | null {
+  return link.network_cidrs?.length === 1 ? link.network_cidrs[0] : null;
+}
+
+function resolvedNetworkCidrForTaggedGuestPath(
+  accessLink: ViewLink,
+  routerLink: ViewLink | null
+): string | null {
+  const accessNetworkCidr = primaryNetworkCidr(accessLink);
+  if (accessNetworkCidr) {
+    return accessNetworkCidr;
+  }
+  if (!routerLink) {
+    return null;
+  }
+
+  const vlanTag = accessLink.guest_attachment?.vlan_tag;
+  const trunkVlans = routerLink.guest_attachment?.trunk_vlans ?? [];
+  if (vlanTag === undefined || trunkVlans.length === 0) {
+    return primaryNetworkCidr(routerLink);
+  }
+
+  const vlanIndex = trunkVlans.indexOf(vlanTag);
+  if (vlanIndex >= 0 && vlanIndex < routerLink.network_cidrs.length) {
+    return routerLink.network_cidrs[vlanIndex] ?? null;
+  }
+
+  return primaryNetworkCidr(routerLink);
 }
 
 export function formatSpeed(speedBps: number | null | undefined): string | null {
@@ -864,9 +894,14 @@ function physicalUpstreamPathFrom(
   deviceId: string,
   excludeLinkIds = new Set<string>(),
   seenDeviceIds = new Set<string>()
-): { deviceIds: Set<string>; linkIds: Set<string> } {
+): {
+  deviceIds: Set<string>;
+  linkIds: Set<string>;
+  resolvedNetworkCidrByLink: Record<string, string>;
+} {
   const deviceIds = new Set<string>();
   const linkIds = new Set<string>();
+  const resolvedNetworkCidrByLink: Record<string, string> = {};
   let currentDeviceId: string | null = deviceId;
   const visitedDeviceIds = new Set(seenDeviceIds);
 
@@ -903,12 +938,16 @@ function physicalUpstreamPathFrom(
     }
 
     linkIds.add(chosenLink.id);
+    const resolvedNetworkCidr = primaryNetworkCidr(chosenLink);
+    if (resolvedNetworkCidr) {
+      resolvedNetworkCidrByLink[chosenLink.id] = resolvedNetworkCidr;
+    }
     deviceIds.add(nextDeviceId);
     excludeLinkIds.add(chosenLink.id);
     currentDeviceId = nextDeviceId;
   }
 
-  return { deviceIds, linkIds };
+  return { deviceIds, linkIds, resolvedNetworkCidrByLink };
 }
 
 export function computeUpstreamPath(
@@ -918,10 +957,11 @@ export function computeUpstreamPath(
 ): PathState {
   const deviceIds = new Set<string>();
   const linkIds = new Set<string>();
+  const resolvedNetworkCidrByLink: Record<string, string> = {};
   let guestHighlight: GuestHighlight | null = null;
 
   if (!deviceId) {
-    return { deviceIds, guestHighlight, linkIds };
+    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
   }
 
   deviceIds.add(deviceId);
@@ -930,6 +970,10 @@ export function computeUpstreamPath(
     const fallbackGuestLink = preferredGuestLinkForDevice(snapshot, model, deviceId);
     if (fallbackGuestLink) {
       linkIds.add(fallbackGuestLink.id);
+      const fallbackNetworkCidr = primaryNetworkCidr(fallbackGuestLink);
+      if (fallbackNetworkCidr) {
+        resolvedNetworkCidrByLink[fallbackGuestLink.id] = fallbackNetworkCidr;
+      }
       const bridgeDeviceId = bridgeDeviceIdForLink(snapshot, model, fallbackGuestLink);
       if (bridgeDeviceId) {
         deviceIds.add(bridgeDeviceId);
@@ -942,20 +986,25 @@ export function computeUpstreamPath(
         );
         continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
         continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
+        Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
       }
-      return { deviceIds, guestHighlight, linkIds };
+      return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
     }
 
     const continuation = physicalUpstreamPathFrom(snapshot, model, deviceId);
     continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
     continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-    return { deviceIds, guestHighlight, linkIds };
+    Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
+    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
   }
 
   linkIds.add(guestLink.id);
+  const accessNetworkCidr = primaryNetworkCidr(guestLink);
+  if (accessNetworkCidr) {
+    resolvedNetworkCidrByLink[guestLink.id] = accessNetworkCidr;
+  }
   guestHighlight = {
     accessLinkId: guestLink.id,
-    color: guestAttachmentNetworkColor(guestLink.guest_attachment),
     trunkLinkId: null,
   };
 
@@ -966,16 +1015,21 @@ export function computeUpstreamPath(
 
   const routerLink = routerCandidateLinkForGuestLink(snapshot, model, guestLink);
   if (!routerLink) {
-    return { deviceIds, guestHighlight, linkIds };
+    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
   }
 
   const routerDeviceId = guestDeviceIdForLink(snapshot, model, routerLink);
   if (!routerDeviceId) {
-    return { deviceIds, guestHighlight, linkIds };
+    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
   }
 
   linkIds.add(routerLink.id);
   deviceIds.add(routerDeviceId);
+  const resolvedGuestNetworkCidr = resolvedNetworkCidrForTaggedGuestPath(guestLink, routerLink);
+  if (resolvedGuestNetworkCidr) {
+    resolvedNetworkCidrByLink[guestLink.id] = resolvedGuestNetworkCidr;
+    resolvedNetworkCidrByLink[routerLink.id] = resolvedGuestNetworkCidr;
+  }
   guestHighlight = {
     ...guestHighlight,
     trunkLinkId: routerLink.id,
@@ -990,8 +1044,9 @@ export function computeUpstreamPath(
   );
   continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
   continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
+  Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
 
-  return { deviceIds, guestHighlight, linkIds };
+  return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
 }
 
 export function buildHoverCardForEntry(

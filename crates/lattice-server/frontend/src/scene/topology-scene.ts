@@ -38,7 +38,8 @@ import type { TopologyStoreState } from '../state/topology-store';
 import { projectionInsetFromDesktopInset } from './scene-layout';
 import {
   deploymentColor,
-  guestAttachmentNetworkColor,
+  networkCidrColor,
+  primaryNetworkCidr,
 } from '../topology/view-model';
 import { deviceVisualSpec, layoutRadiusForDevice } from '../topology/device-visuals';
 
@@ -1721,32 +1722,25 @@ export class TopologySceneAdapter {
   }
 
   #baseLinkColor(link: ViewLink): number {
-    if (this.#isGuestAccessLink(link)) {
-      return guestAttachmentNetworkColor(link.guest_attachment) ?? 0x64748b;
-    }
     if (this.#isGuestTrunkLink(link)) {
       return 0x4b5563;
     }
-    if (link.protocol === 'proxmox_guest_link') {
-      return 0x64748b;
-    }
-    if (link.protocol === 'proxmox_uplink') {
-      return 0x43556d;
+    const networkColor = networkCidrColor(primaryNetworkCidr(link));
+    if (networkColor !== null) {
+      return networkColor;
     }
     return 0x4b5563;
   }
 
-  #guestHighlightColorForLink(
+  #pathHighlightColorForLink(
     link: ViewLink,
     state: TopologyStoreState
   ): number | null {
     for (const pathState of [state.hoveredPath, state.selectedPath]) {
-      const highlight = pathState.guestHighlight;
-      if (!highlight) {
-        continue;
-      }
-      if (link.id === highlight.accessLinkId || link.id === highlight.trunkLinkId) {
-        return highlight.color ?? 0x0f62fe;
+      const resolvedNetworkCidr = pathState.resolvedNetworkCidrByLink[link.id];
+      const resolvedColor = networkCidrColor(resolvedNetworkCidr);
+      if (resolvedColor !== null) {
+        return resolvedColor;
       }
     }
     return null;
@@ -1832,7 +1826,7 @@ export class TopologySceneAdapter {
       !isHoveredLink &&
       !isOnHoveredPath &&
       state.selectedPath.linkIds.has(link.id);
-    const guestHighlightColor = this.#guestHighlightColorForLink(link, state);
+    const guestHighlightColor = this.#pathHighlightColorForLink(link, state);
     const baseColor = this.#baseLinkColor(link);
     const activeColor = guestHighlightColor ?? baseColor;
     const fillColor = isOnHoveredPath || isOnSelectedPath ? mixColor(activeColor, 0xffffff, 0.08) : baseColor;

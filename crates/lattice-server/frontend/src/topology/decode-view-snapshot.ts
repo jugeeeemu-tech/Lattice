@@ -57,6 +57,10 @@ function asRecordOfStrings(value: unknown): Record<string, string> {
   return Object.fromEntries(entries);
 }
 
+function asStringArray(value: unknown): string[] {
+  return asArray<unknown>(value).filter((entry): entry is string => typeof entry === 'string');
+}
+
 function asDiscoveryState(value: unknown): DiscoveryState {
   switch (value) {
     case 'loading':
@@ -87,7 +91,10 @@ export function decodeViewSnapshot(rawSnapshot: unknown): ViewSnapshot {
 
   return {
     devices: asArray<ViewDevice>(snapshot.devices),
-    links: asArray<ViewLink>(snapshot.links),
+    links: asArray<Record<string, unknown>>(snapshot.links).map((link) => ({
+      ...(link as ViewLink),
+      network_cidrs: asStringArray(link.network_cidrs),
+    })),
     tree_rows: asArray<TreeRow>(snapshot.tree_rows),
     tree_edges: asArray<TreeEdge>(snapshot.tree_edges),
     primary_row_by_device: asRecordOfStrings(snapshot.primary_row_by_device),

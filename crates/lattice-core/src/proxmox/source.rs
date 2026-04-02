@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::{HashMap, HashSet}, net::IpAddr, sync::Arc};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -11,8 +11,18 @@ use crate::{
         DeploymentType, Device, DeviceRole, DeviceStatus, GuestAttachment, GuestKind, IdentityKeys,
         Interface, Link, LinkProtocol, OperStatus, Topology,
     },
-    proxmox::{ClusterResource, GuestNetworkAttachment, ProxmoxApi, ProxmoxApiClient},
+    proxmox::{
+        ClusterResource, GuestAgentNetworkInterface, GuestNetworkAttachment, ProxmoxApi,
+        ProxmoxApiClient,
+    },
 };
+use tracing::debug;
+
+#[derive(Debug, Clone)]
+struct ResolvedGuestAttachment {
+    attachment: GuestNetworkAttachment,
+    guest_interface_name: String,
+}
 
 #[derive(Clone)]
 pub struct ProxmoxDiscoverySource {
@@ -113,11 +123,34 @@ impl DiscoverySource for ProxmoxDiscoverySource {
             };
 
             let attachments = config.network_attachments();
-            let guest =
-                build_guest_device(&resource, &attachments, node_resource_by_name.get(&node));
+            let guest_agent_interfaces = if resource.is_qemu() {
+                match self.api.qemu_agent_network_interfaces(&node, vmid).await {
+                    Ok(interfaces) => interfaces,
+                    Err(error) => {
+                        debug!(
+                            node = %node,
+                            vmid,
+                            guest = resource.name.as_deref().unwrap_or("unknown"),
+                            "failed to read proxmox guest agent interfaces: {error}"
+                        );
+                        Vec::new()
+                    }
+                }
+            } else {
+                Vec::new()
+            };
+            let resolved_attachments =
+                resolve_guest_attachments(&attachments, &guest_agent_interfaces);
+            let guest = build_guest_device(
+                &resource,
+                &resolved_attachments,
+                &guest_agent_interfaces,
+                node_resource_by_name.get(&node),
+            );
             topology_devices.insert(guest.id.clone(), guest.clone());
 
-            for attachment in attachments {
+            for resolved_attachment in resolved_attachments {
+                let attachment = &resolved_attachment.attachment;
                 let bridge = ensure_bridge_device(
                     &mut topology_devices,
                     &mut tree_nodes,
@@ -140,8 +173,11 @@ impl DiscoverySource for ProxmoxDiscoverySource {
                         .find(|interface| interface.if_name == attachment.bridge)
                         .and_then(|interface| interface.ip_addresses.first().cloned()),
                     remote_device_id: guest.id.clone(),
-                    remote_interface: attachment.interface_name.clone(),
-                    remote_ip: None,
+                    remote_interface: resolved_attachment.guest_interface_name.clone(),
+                    remote_ip: guest_interface_primary_ip(
+                        &guest,
+                        &resolved_attachment.guest_interface_name,
+                    ),
                     speed_bps: None,
                     protocol: LinkProtocol::ProxmoxGuestLink,
                     guest_attachment: Some(GuestAttachment {
@@ -155,7 +191,7 @@ impl DiscoverySource for ProxmoxDiscoverySource {
                         &node,
                         &attachment.bridge,
                         &guest.id,
-                        &attachment.interface_name,
+                        &resolved_attachment.guest_interface_name,
                     ),
                     device_id: guest.id.clone(),
                     parent_row_id: Some(bridge_row_id(&node, &attachment.bridge)),
@@ -266,24 +302,50 @@ fn build_node_device(node: &str, node_resource: Option<&ClusterResource>) -> Dev
 
 fn build_guest_device(
     resource: &ClusterResource,
-    attachments: &[GuestNetworkAttachment],
+    attachments: &[ResolvedGuestAttachment],
+    guest_agent_interfaces: &[GuestAgentNetworkInterface],
     node_resource: Option<&ClusterResource>,
 ) -> Device {
-    let interfaces = attachments
-        .into_iter()
-        .enumerate()
-        .map(|(index, attachment)| Interface {
-            if_index: index as u32,
-            if_name: attachment.interface_name.clone(),
-            ip_addresses: Vec::new(),
-            speed_bps: None,
-            oper_status: OperStatus::Up,
-        })
-        .collect();
+    let mut interfaces_by_name = HashMap::new();
+    for (index, interface) in guest_agent_interfaces.iter().enumerate() {
+        interfaces_by_name.insert(
+            interface.name.clone(),
+            Interface {
+                if_index: index as u32,
+                if_name: interface.name.clone(),
+                ip_addresses: interface.cidr_addresses(),
+                speed_bps: None,
+                oper_status: OperStatus::Up,
+            },
+        );
+    }
+    for attachment in attachments {
+        let next_index = interfaces_by_name.len() as u32;
+        interfaces_by_name
+            .entry(attachment.guest_interface_name.clone())
+            .or_insert_with(|| Interface {
+                if_index: next_index,
+                if_name: attachment.guest_interface_name.clone(),
+                ip_addresses: Vec::new(),
+                speed_bps: None,
+                oper_status: OperStatus::Up,
+            });
+    }
+    let mut interfaces = interfaces_by_name.into_values().collect::<Vec<_>>();
+    interfaces.sort_by(|left, right| left.if_name.cmp(&right.if_name));
+    for (index, interface) in interfaces.iter_mut().enumerate() {
+        interface.if_index = index as u32;
+    }
+
     let mut mac_addresses = attachments
         .iter()
-        .filter_map(|attachment| attachment.mac_address.clone())
+        .filter_map(|attachment| attachment.attachment.mac_address.clone())
         .collect::<Vec<_>>();
+    mac_addresses.extend(
+        guest_agent_interfaces
+            .iter()
+            .filter_map(GuestAgentNetworkInterface::normalized_mac_address),
+    );
     mac_addresses.sort();
     mac_addresses.dedup();
     let node = resource.node.as_deref().unwrap_or("unknown");
@@ -298,7 +360,7 @@ fn build_guest_device(
         identity_keys: IdentityKeys {
             chassis_id: None,
             sys_name: Some(name.clone()),
-            mgmt_ip: None,
+            mgmt_ip: guest_management_ip(&interfaces),
             mac_addresses,
         },
         sys_descr: format!("Proxmox {} {name}", resource.resource_type),
@@ -322,6 +384,80 @@ fn build_guest_device(
         },
         last_seen: Utc::now(),
     }
+}
+
+fn resolve_guest_attachments(
+    attachments: &[GuestNetworkAttachment],
+    guest_agent_interfaces: &[GuestAgentNetworkInterface],
+) -> Vec<ResolvedGuestAttachment> {
+    let mut used_names = HashSet::new();
+    let mut resolved = Vec::with_capacity(attachments.len());
+
+    for attachment in attachments {
+        let guest_interface_name =
+            resolve_guest_interface_name(attachment, guest_agent_interfaces, &used_names);
+        used_names.insert(guest_interface_name.clone());
+        resolved.push(ResolvedGuestAttachment {
+            attachment: attachment.clone(),
+            guest_interface_name,
+        });
+    }
+
+    resolved
+}
+
+fn resolve_guest_interface_name(
+    attachment: &GuestNetworkAttachment,
+    guest_agent_interfaces: &[GuestAgentNetworkInterface],
+    used_names: &HashSet<String>,
+) -> String {
+    if guest_agent_interfaces
+        .iter()
+        .any(|interface| interface.name == attachment.interface_name)
+    {
+        return attachment.interface_name.clone();
+    }
+
+    if let Some(mac_address) = attachment.mac_address.as_deref() {
+        if let Some(interface) = guest_agent_interfaces.iter().find(|interface| {
+            interface
+                .normalized_mac_address()
+                .as_deref()
+                .is_some_and(|candidate| candidate == mac_address)
+                && !used_names.contains(&interface.name)
+        }) {
+            return interface.name.clone();
+        }
+    }
+
+    attachment.interface_name.clone()
+}
+
+fn guest_interface_primary_ip(device: &Device, interface_name: &str) -> Option<String> {
+    device
+        .interfaces
+        .iter()
+        .find(|interface| interface.if_name == interface_name)
+        .and_then(|interface| interface.ip_addresses.iter().find(|cidr| !is_loopback_cidr(cidr)))
+        .cloned()
+}
+
+fn guest_management_ip(interfaces: &[Interface]) -> Option<String> {
+    interfaces
+        .iter()
+        .flat_map(|interface| interface.ip_addresses.iter())
+        .find(|cidr| !is_loopback_cidr(cidr))
+        .map(|cidr| strip_prefix_len(cidr))
+}
+
+fn is_loopback_cidr(value: &str) -> bool {
+    let Some((address, _)) = value.split_once('/') else {
+        return false;
+    };
+    let Ok(ip) = address.parse::<IpAddr>() else {
+        return false;
+    };
+    ip.is_loopback()
 }
 
 fn ensure_bridge_device(
@@ -488,6 +624,37 @@ mod tests {
                 )]),
             })
         }
+
+        async fn qemu_agent_network_interfaces(
+            &self,
+            _node: &str,
+            vmid: u64,
+        ) -> Result<Vec<GuestAgentNetworkInterface>> {
+            if vmid != 100 {
+                return Ok(Vec::new());
+            }
+
+            Ok(vec![
+                GuestAgentNetworkInterface {
+                    name: "ens18".to_string(),
+                    hardware_address: Some("DE:AD:BE:EF:00:01".to_string()),
+                    ip_addresses: vec![crate::proxmox::GuestAgentIpAddress {
+                        ip_address: "192.0.2.101".to_string(),
+                        ip_address_type: "ipv4".to_string(),
+                        prefix: 24,
+                    }],
+                },
+                GuestAgentNetworkInterface {
+                    name: "lo".to_string(),
+                    hardware_address: None,
+                    ip_addresses: vec![crate::proxmox::GuestAgentIpAddress {
+                        ip_address: "127.0.0.1".to_string(),
+                        ip_address_type: "ipv4".to_string(),
+                        prefix: 8,
+                    }],
+                },
+            ])
+        }
     }
 
     #[tokio::test]
@@ -511,6 +678,7 @@ mod tests {
             .any(|device| device.device_role == DeviceRole::Server
                 && device.deployment_type == DeploymentType::Virtual
                 && device.guest_kind == Some(GuestKind::Vm)
+                && device.identity_keys.mgmt_ip.as_deref() == Some("192.0.2.101")
                 && device.identity_keys.mac_addresses.as_slice() == ["de:ad:be:ef:00:01"]
                 && device.host_mgmt_ip.as_deref() == Some("192.0.2.10")));
         assert!(result.topology.devices.values().any(|device| {
@@ -545,6 +713,8 @@ mod tests {
             .all(|link| link.protocol == LinkProtocol::ProxmoxGuestLink));
         assert!(result.topology.links.iter().any(|link| {
             link.remote_device_id == "proxmox:pve-1:qemu:100"
+                && link.remote_interface == "ens18"
+                && link.remote_ip.as_deref() == Some("192.0.2.101/24")
                 && link.guest_attachment
                     == Some(GuestAttachment {
                         bridge_name: "vmbr0".to_string(),

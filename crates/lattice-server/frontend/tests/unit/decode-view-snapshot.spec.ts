@@ -52,6 +52,7 @@ describe('decodeViewSnapshot', () => {
           remote_interface: 'eth0',
           remote_ip: null,
           speed_bps: 1000,
+          network_cidrs: ['192.0.2.0/24'],
           id: 'link-1',
         },
       ],
@@ -103,6 +104,7 @@ describe('decodeViewSnapshot', () => {
           remote_interface: 'eth0',
           remote_ip: null,
           speed_bps: 1000,
+          network_cidrs: ['192.0.2.0/24'],
         },
       ],
       primary_row_by_device: { 'guest-app': 'row-1' },
@@ -136,6 +138,31 @@ describe('decodeViewSnapshot', () => {
     expect(decoded.discovery_status).toEqual({ state: 'loading' });
     expect(decoded.auto_discovery_interval_seconds).toBe(60);
     expect(decoded.next_auto_discovery_at_ms).toBeUndefined();
+  });
+
+  it('defaults missing link network cidrs to an empty array', () => {
+    const decoded = decodeViewSnapshot({
+      devices: [],
+      links: [
+        {
+          id: 'link-1',
+          local_device_id: 'device-a',
+          local_interface: 'eth0',
+          protocol: 'lldp',
+          remote_device_id: 'device-b',
+          remote_interface: 'eth1',
+        },
+      ],
+      tree_rows: [],
+      tree_edges: [],
+      primary_row_by_device: {},
+      discovery_status: {
+        state: 'ready',
+      },
+      auto_discovery_interval_seconds: 60,
+    });
+
+    expect(decoded.links[0]?.network_cidrs).toEqual([]);
   });
 
   it('returns the stable empty snapshot for non-object payloads', () => {

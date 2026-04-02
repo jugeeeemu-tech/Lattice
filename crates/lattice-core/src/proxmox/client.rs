@@ -17,6 +17,11 @@ pub trait ProxmoxApi: Send + Sync {
     async fn node_network(&self, node: &str) -> Result<Vec<NodeNetworkInterface>>;
     async fn qemu_config(&self, node: &str, vmid: u64) -> Result<GuestConfig>;
     async fn lxc_config(&self, node: &str, vmid: u64) -> Result<GuestConfig>;
+    async fn qemu_agent_network_interfaces(
+        &self,
+        node: &str,
+        vmid: u64,
+    ) -> Result<Vec<GuestAgentNetworkInterface>>;
 }
 
 #[derive(Debug, Clone)]
@@ -93,6 +98,19 @@ impl ProxmoxApi for ProxmoxApiClient {
 
     async fn lxc_config(&self, node: &str, vmid: u64) -> Result<GuestConfig> {
         self.get(&format!("/nodes/{node}/lxc/{vmid}/config")).await
+    }
+
+    async fn qemu_agent_network_interfaces(
+        &self,
+        node: &str,
+        vmid: u64,
+    ) -> Result<Vec<GuestAgentNetworkInterface>> {
+        let response = self
+            .get::<GuestAgentNetworkInterfacesResponse>(&format!(
+                "/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
+            ))
+            .await?;
+        Ok(response.result)
     }
 }
 
@@ -182,6 +200,56 @@ impl NodeNetworkInterface {
 pub struct GuestConfig {
     #[serde(flatten)]
     pub entries: HashMap<String, serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GuestAgentNetworkInterfacesResponse {
+    #[serde(default)]
+    pub result: Vec<GuestAgentNetworkInterface>,
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GuestAgentNetworkInterface {
+    pub name: String,
+    #[serde(default, rename = "hardware-address")]
+    pub hardware_address: Option<String>,
+    #[serde(default, rename = "ip-addresses")]
+    pub ip_addresses: Vec<GuestAgentIpAddress>,
+}
+
+impl GuestAgentNetworkInterface {
+    pub fn normalized_mac_address(&self) -> Option<String> {
+        self.hardware_address
+            .as_deref()
+            .and_then(normalize_mac_address)
+    }
+
+    pub fn cidr_addresses(&self) -> Vec<String> {
+        self.ip_addresses
+            .iter()
+            .filter_map(GuestAgentIpAddress::cidr_address)
+            .collect()
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct GuestAgentIpAddress {
+    #[serde(rename = "ip-address")]
+    pub ip_address: String,
+    #[serde(rename = "ip-address-type")]
+    pub ip_address_type: String,
+    pub prefix: u8,
+}
+
+impl GuestAgentIpAddress {
+    pub fn cidr_address(&self) -> Option<String> {
+        let address = self.ip_address.trim();
+        if address.is_empty() {
+            return None;
+        }
+
+        Some(format!("{address}/{}", self.prefix))
+    }
 }
 
 impl GuestConfig {
@@ -382,6 +450,28 @@ mod tests {
                     }))
                 }),
             )
+            .route(
+                "/api2/json/nodes/pve-1/qemu/100/agent/network-get-interfaces",
+                get(|| async {
+                    Json(serde_json::json!({
+                        "data": {
+                            "result": [
+                                {
+                                    "name": "ens18",
+                                    "hardware-address": "DE:AD:BE:EF:00:01",
+                                    "ip-addresses": [
+                                        {
+                                            "ip-address": "192.0.2.101",
+                                            "ip-address-type": "ipv4",
+                                            "prefix": 24
+                                        }
+                                    ]
+                                }
+                            ]
+                        }
+                    }))
+                }),
+            )
             .with_state(state.clone());
 
         let addr = spawn_server(router).await;
@@ -397,6 +487,10 @@ mod tests {
         let networks = client.node_network("pve-1").await.unwrap();
         let vm = client.qemu_config("pve-1", 100).await.unwrap();
         let ct = client.lxc_config("pve-1", 200).await.unwrap();
+        let guest_interfaces = client
+            .qemu_agent_network_interfaces("pve-1", 100)
+            .await
+            .unwrap();
 
         assert_eq!(resources.len(), 1);
         assert_eq!(networks[0].bridge_ports_list(), vec!["eno1".to_string()]);
@@ -407,6 +501,15 @@ mod tests {
             Some("de:ad:be:ef:00:01")
         );
         assert_eq!(ct.network_attachments()[0].interface_name, "eth0");
+        assert_eq!(guest_interfaces[0].name, "ens18");
+        assert_eq!(
+            guest_interfaces[0].normalized_mac_address().as_deref(),
+            Some("de:ad:be:ef:00:01")
+        );
+        assert_eq!(
+            guest_interfaces[0].cidr_addresses(),
+            vec!["192.0.2.101/24".to_string()]
+        );
         assert_eq!(
             state.headers.lock().await[0],
             "PVEAPIToken=root@pam!token=secret"

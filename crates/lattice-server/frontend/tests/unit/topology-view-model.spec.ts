@@ -5,7 +5,7 @@ import {
   computeUpstreamPath,
   deviceSummary,
   entryMetaText,
-  guestAttachmentNetworkColor,
+  networkCidrColor,
 } from '../../src/topology/view-model';
 import { loadViewSnapshotFixture } from '../helpers/load-view-snapshot-fixture';
 
@@ -38,6 +38,7 @@ describe('buildTopologyModel', () => {
           remote_interface: 'vlan120',
           speed_bps: 1_000_000_000,
           protocol: 'proxmox_guest_link',
+          network_cidrs: ['192.0.2.0/24', '198.51.100.0/24'],
           guest_attachment: {
             bridge_name: 'vmbr0',
             trunk_vlans: [120, 130],
@@ -53,8 +54,11 @@ describe('buildTopologyModel', () => {
     expect(Array.from(path.linkIds).sort()).toEqual(['link-pve-guest', 'link-pve-router-trunk']);
     expect(path.guestHighlight).toEqual({
       accessLinkId: 'link-pve-guest',
-      color: guestAttachmentNetworkColor(extendedSnapshot.links[1]?.guest_attachment),
       trunkLinkId: 'link-pve-router-trunk',
+    });
+    expect(path.resolvedNetworkCidrByLink).toEqual({
+      'link-pve-guest': '192.0.2.0/24',
+      'link-pve-router-trunk': '192.0.2.0/24',
     });
   });
 
@@ -80,6 +84,10 @@ describe('buildTopologyModel', () => {
     expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
     expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-pve-guest']);
     expect(path.guestHighlight).toBeNull();
+    expect(path.resolvedNetworkCidrByLink).toEqual({
+      'link-core-pve': '192.0.2.0/24',
+      'link-pve-guest': '192.0.2.0/24',
+    });
   });
 
   it('prefers a plain guest uplink over a trunk guest uplink for virtual routers', async () => {
@@ -105,6 +113,7 @@ describe('buildTopologyModel', () => {
           remote_interface: 'vmbr0',
           speed_bps: 1_000_000_000,
           protocol: 'proxmox_guest_link',
+          network_cidrs: ['10.20.0.0/24'],
           guest_attachment: {
             bridge_name: 'vmbr0',
           },
@@ -117,6 +126,7 @@ describe('buildTopologyModel', () => {
           remote_interface: 'vmbr0',
           speed_bps: 1_000_000_000,
           protocol: 'proxmox_guest_link',
+          network_cidrs: ['10.20.30.0/24', '10.20.40.0/24'],
           guest_attachment: {
             bridge_name: 'vmbr0',
             trunk_vlans: [20, 30],
@@ -131,6 +141,52 @@ describe('buildTopologyModel', () => {
     expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
     expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-vyos-net0']);
     expect(path.guestHighlight).toBeNull();
+    expect(path.resolvedNetworkCidrByLink).toEqual({
+      'link-core-pve': '192.0.2.0/24',
+      'link-vyos-net0': '10.20.0.0/24',
+    });
+  });
+
+  it('derives stable colors from L3 network cidrs', () => {
+    expect(networkCidrColor('192.0.2.0/24')).toBe(networkCidrColor('192.0.2.0/24'));
+    expect(networkCidrColor('192.0.2.0/24')).not.toBe(networkCidrColor('198.51.100.0/24'));
+    expect(networkCidrColor(null)).toBeNull();
+  });
+
+  it('maps tagged guest access to the matching trunk network when access ip data is absent', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const mappedSnapshot = {
+      ...snapshot,
+      links: [
+        snapshot.links[0],
+        {
+          ...snapshot.links[1],
+          network_cidrs: [],
+        },
+        {
+          id: 'link-pve-router-trunk',
+          local_device_id: 'proxmox-host',
+          local_interface: 'vmbr0',
+          remote_device_id: 'router-core',
+          remote_interface: 'vlan120',
+          speed_bps: 1_000_000_000,
+          protocol: 'proxmox_guest_link',
+          network_cidrs: ['10.120.0.0/24', '10.130.0.0/24'],
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+            trunk_vlans: [120, 130],
+          },
+        },
+      ],
+    };
+    const model = buildTopologyModel(mappedSnapshot, new Set());
+
+    const path = computeUpstreamPath(mappedSnapshot, model, 'guest-app');
+
+    expect(path.resolvedNetworkCidrByLink).toEqual({
+      'link-pve-guest': '10.120.0.0/24',
+      'link-pve-router-trunk': '10.120.0.0/24',
+    });
   });
 
   it('includes VM and container labels in device summaries when guest kind is present', async () => {

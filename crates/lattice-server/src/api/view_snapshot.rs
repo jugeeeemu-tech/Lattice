@@ -1,4 +1,8 @@
-use std::{cmp::Ordering, collections::HashMap};
+use std::{
+    cmp::Ordering,
+    collections::{BTreeSet, HashMap},
+    net::{IpAddr, Ipv4Addr, Ipv6Addr},
+};
 
 use lattice_core::{
     DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode,
@@ -93,6 +97,8 @@ pub struct ViewLink {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub guest_attachment: Option<ViewGuestAttachment>,
+    #[serde(default)]
+    pub network_cidrs: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -161,7 +167,7 @@ pub fn build_view_snapshot(
 ) -> ViewSnapshot {
     let min_depth_by_device = build_min_depths(tree);
     let devices = build_devices(topology, &min_depth_by_device);
-    let links = build_links(&topology.links);
+    let links = build_links(topology);
     let (tree_rows, tree_edges, primary_row_by_device) = build_tree(topology, tree);
 
     ViewSnapshot {
@@ -215,8 +221,9 @@ fn build_devices(
     devices
 }
 
-fn build_links(links: &[Link]) -> Vec<ViewLink> {
-    let mut view_links: Vec<ViewLink> = links
+fn build_links(topology: &Topology) -> Vec<ViewLink> {
+    let mut view_links: Vec<ViewLink> = topology
+        .links
         .iter()
         .map(|link| ViewLink {
             id: link.id.clone(),
@@ -229,10 +236,298 @@ fn build_links(links: &[Link]) -> Vec<ViewLink> {
             speed_bps: link.speed_bps,
             protocol: link.protocol.as_str().to_string(),
             guest_attachment: link.guest_attachment.as_ref().map(view_guest_attachment),
+            network_cidrs: link_network_cidrs(topology, link),
         })
         .collect();
     view_links.sort_by(|left, right| left.id.cmp(&right.id));
     view_links
+}
+
+fn link_network_cidrs(topology: &Topology, link: &Link) -> Vec<String> {
+    if link.protocol.as_str() != "proxmox_guest_link" {
+        return point_to_point_network_cidrs(
+            link.local_ip.as_deref(),
+            link.remote_ip.as_deref(),
+        );
+    }
+
+    let Some(attachment) = link.guest_attachment.as_ref() else {
+        return point_to_point_network_cidrs(
+            link.local_ip.as_deref(),
+            link.remote_ip.as_deref(),
+        );
+    };
+
+    let Some((guest_device_id, guest_interface_name, bridge_ip)) =
+        proxmox_guest_link_endpoints(link, attachment.bridge_name.as_str())
+    else {
+        return Vec::new();
+    };
+    let Some(guest_device) = topology.devices.get(guest_device_id) else {
+        return Vec::new();
+    };
+    let guest_candidates = guest_network_candidates(
+        guest_device,
+        guest_interface_name,
+        attachment,
+    );
+    if guest_candidates.is_empty() {
+        return Vec::new();
+    }
+
+    if !attachment.trunk_vlans.is_empty() && attachment.vlan_tag.is_none() {
+        return guest_candidates;
+    }
+
+    let bridge_network = bridge_ip.and_then(normalize_cidr);
+    if let Some(bridge_network) = bridge_network {
+        let filtered = guest_candidates
+            .iter()
+            .filter(|candidate| *candidate == &bridge_network)
+            .cloned()
+            .collect::<Vec<_>>();
+        if filtered.len() == 1 {
+            return filtered;
+        }
+        if filtered.len() > 1 {
+            return dedup_sorted(filtered);
+        }
+    }
+
+    if guest_candidates.len() == 1 {
+        guest_candidates
+    } else {
+        Vec::new()
+    }
+}
+
+fn point_to_point_network_cidrs(local_ip: Option<&str>, remote_ip: Option<&str>) -> Vec<String> {
+    match (
+        local_ip.and_then(normalize_cidr),
+        remote_ip.and_then(normalize_cidr),
+    ) {
+        (Some(local), Some(remote)) if local == remote => vec![local],
+        _ => Vec::new(),
+    }
+}
+
+fn proxmox_guest_link_endpoints<'a>(
+    link: &'a Link,
+    bridge_name: &'a str,
+) -> Option<(&'a str, &'a str, Option<&'a str>)> {
+    let local_is_bridge = link.local_interface == bridge_name;
+    let remote_is_bridge = link.remote_interface == bridge_name;
+
+    if local_is_bridge && !remote_is_bridge {
+        return Some((
+            link.remote_device_id.as_str(),
+            link.remote_interface.as_str(),
+            link.local_ip.as_deref(),
+        ));
+    }
+    if remote_is_bridge && !local_is_bridge {
+        return Some((
+            link.local_device_id.as_str(),
+            link.local_interface.as_str(),
+            link.remote_ip.as_deref(),
+        ));
+    }
+
+    None
+}
+
+fn guest_network_candidates(
+    device: &Device,
+    base_interface_name: &str,
+    attachment: &CoreGuestAttachment,
+) -> Vec<String> {
+    let include_subinterfaces = !attachment.trunk_vlans.is_empty() && attachment.vlan_tag.is_none();
+    let interface_names =
+        resolve_guest_interface_names(device, base_interface_name, include_subinterfaces);
+    if interface_names.is_empty() {
+        return Vec::new();
+    }
+
+    if include_subinterfaces {
+        let vlan_candidates = attachment
+            .trunk_vlans
+            .iter()
+            .filter_map(|vlan| {
+                interface_names
+                    .iter()
+                    .find_map(|interface_name| {
+                        network_for_interface(device, &format!("{interface_name}.{vlan}"))
+                    })
+            })
+            .collect::<Vec<_>>();
+        if !vlan_candidates.is_empty() {
+            return dedup_preserving_order(vlan_candidates);
+        }
+    }
+
+    let mut candidates = Vec::new();
+    for interface_name in interface_names {
+        for interface in &device.interfaces {
+            let matches = interface.if_name == interface_name
+                || (include_subinterfaces
+                    && interface.if_name.starts_with(&format!("{interface_name}.")));
+            if !matches {
+                continue;
+            }
+            for cidr in &interface.ip_addresses {
+                if let Some(normalized) = normalize_cidr(cidr) {
+                    candidates.push(normalized);
+                }
+            }
+        }
+    }
+
+    dedup_preserving_order(candidates)
+}
+
+fn resolve_guest_interface_names(
+    device: &Device,
+    base_interface_name: &str,
+    include_subinterfaces: bool,
+) -> Vec<String> {
+    let mut names = vec![base_interface_name.to_string()];
+
+    let exact_has_network_data = device.interfaces.iter().any(|interface| {
+        interface.if_name == base_interface_name
+            && !interface.ip_addresses.is_empty()
+            || (include_subinterfaces
+                && interface.if_name.starts_with(&format!("{base_interface_name}.")))
+                && !interface.ip_addresses.is_empty()
+    });
+    if exact_has_network_data {
+        return names;
+    }
+
+    if let Some(alias_name) = interface_alias_from_proxmox_slot(device, base_interface_name) {
+        names.push(alias_name);
+    }
+
+    dedup_preserving_order(names)
+}
+
+fn interface_alias_from_proxmox_slot(device: &Device, interface_name: &str) -> Option<String> {
+    let slot_index = interface_name.strip_prefix("net")?.parse::<usize>().ok()?;
+    let mut ordered_bases = Vec::new();
+    let mut seen = BTreeSet::new();
+
+    for interface in &device.interfaces {
+        let base_name = interface.if_name.split('.').next().unwrap_or(&interface.if_name);
+        if base_name == "lo" || base_name.is_empty() || !seen.insert(base_name.to_string()) {
+            continue;
+        }
+        ordered_bases.push((
+            interface_base_priority(device, base_name),
+            interface.if_index,
+            base_name.to_string(),
+        ));
+    }
+
+    ordered_bases.sort_by(|left, right| left.cmp(right));
+    ordered_bases.get(slot_index).map(|(_, _, name)| name.clone())
+}
+
+fn interface_base_priority(device: &Device, base_name: &str) -> u8 {
+    if is_primary_guest_nic_name(base_name) {
+        return 0;
+    }
+    if device.interfaces.iter().any(|interface| {
+        interface.if_name.starts_with(&format!("{base_name}."))
+            && !interface.ip_addresses.is_empty()
+    }) {
+        return 1;
+    }
+    if device
+        .interfaces
+        .iter()
+        .any(|interface| interface.if_name == base_name && !interface.ip_addresses.is_empty())
+    {
+        return 2;
+    }
+    3
+}
+
+fn is_primary_guest_nic_name(interface_name: &str) -> bool {
+    interface_name.starts_with("eth")
+        || interface_name.starts_with("ens")
+        || interface_name.starts_with("enp")
+        || interface_name.starts_with("eno")
+        || interface_name.starts_with("em")
+        || interface_name.starts_with("bond")
+        || interface_name.starts_with("lan")
+        || interface_name.starts_with("wan")
+}
+
+fn network_for_interface(device: &Device, interface_name: &str) -> Option<String> {
+    device
+        .interfaces
+        .iter()
+        .find(|interface| interface.if_name == interface_name)
+        .and_then(|interface| {
+            interface
+                .ip_addresses
+                .iter()
+                .find_map(|cidr| normalize_cidr(cidr))
+        })
+}
+
+fn normalize_cidr(value: &str) -> Option<String> {
+    let (address, prefix) = value.trim().split_once('/')?;
+    let prefix = prefix.parse::<u8>().ok()?;
+    let ip = address.parse::<IpAddr>().ok()?;
+    if ip.is_loopback() || is_link_local(ip) {
+        return None;
+    }
+
+    match ip {
+        IpAddr::V4(address) if prefix <= 32 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u32::MAX << (32 - prefix)
+            };
+            let network = u32::from(address) & mask;
+            Some(format!("{}/{}", Ipv4Addr::from(network), prefix))
+        }
+        IpAddr::V6(address) if prefix <= 128 => {
+            let mask = if prefix == 0 {
+                0
+            } else {
+                u128::MAX << (128 - prefix)
+            };
+            let network = u128::from(address) & mask;
+            Some(format!("{}/{}", Ipv6Addr::from(network), prefix))
+        }
+        _ => None,
+    }
+}
+
+fn is_link_local(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(address) => address.is_link_local(),
+        IpAddr::V6(address) => address.is_unicast_link_local(),
+    }
+}
+
+fn dedup_sorted(values: Vec<String>) -> Vec<String> {
+    let mut deduped = values.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    deduped.sort();
+    deduped
+}
+
+fn dedup_preserving_order(values: Vec<String>) -> Vec<String> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for value in values {
+        if seen.insert(value.clone()) {
+            deduped.push(value);
+        }
+    }
+    deduped
 }
 
 fn build_tree(
@@ -616,12 +911,14 @@ mod tests {
             speed_bps: None,
             protocol: "lldp".to_string(),
             guest_attachment: None,
+            network_cidrs: Vec::new(),
         })
         .unwrap();
         assert!(link.get("local_ip").is_none());
         assert!(link.get("remote_ip").is_none());
         assert!(link.get("speed_bps").is_none());
         assert!(link.get("guest_attachment").is_none());
+        assert_eq!(link["network_cidrs"], serde_json::json!([]));
 
         let attachment = serde_json::to_value(ViewGuestAttachment {
             bridge_name: "vmbr0".to_string(),
@@ -854,5 +1151,186 @@ mod tests {
         assert_eq!(snapshot.links.len(), 1);
         assert_eq!(snapshot.links[0].protocol, "lldp");
         assert_eq!(snapshot.links[0].guest_attachment, None);
+        assert_eq!(snapshot.links[0].network_cidrs, vec!["198.51.100.0/24"]);
+    }
+
+    #[test]
+    fn snapshot_maps_proxmox_net_slot_to_guest_subinterface_networks() {
+        let bridge_id = "proxmox:pve-1:bridge:vmbr0".to_string();
+        let router_id = "router-1".to_string();
+
+        let topology = Topology {
+            devices: HashMap::from([
+                (
+                    bridge_id.clone(),
+                    device(
+                        &bridge_id,
+                        "vmbr0",
+                        DeviceRole::Bridge,
+                        DeploymentType::Virtual,
+                        None,
+                        Some("pve-1"),
+                    ),
+                ),
+                (
+                    router_id.clone(),
+                    Device {
+                        id: router_id.clone(),
+                        identity_keys: IdentityKeys {
+                            chassis_id: None,
+                            sys_name: Some("vyos01".to_string()),
+                            mgmt_ip: Some("192.168.10.72".to_string()),
+                            mac_addresses: Vec::new(),
+                        },
+                        sys_descr: "VyOS".to_string(),
+                        vendor: "vyos".to_string(),
+                        model: None,
+                        device_role: DeviceRole::Router,
+                        deployment_type: DeploymentType::Virtual,
+                        guest_kind: Some(GuestKind::Vm),
+                        interfaces: vec![
+                            Interface {
+                                if_index: 1,
+                                if_name: "eth0".to_string(),
+                                ip_addresses: vec!["192.168.10.72/24".to_string()],
+                                speed_bps: None,
+                                oper_status: OperStatus::Up,
+                            },
+                            Interface {
+                                if_index: 2,
+                                if_name: "eth1.20".to_string(),
+                                ip_addresses: vec!["10.20.20.1/24".to_string()],
+                                speed_bps: None,
+                                oper_status: OperStatus::Up,
+                            },
+                            Interface {
+                                if_index: 3,
+                                if_name: "eth1.30".to_string(),
+                                ip_addresses: vec!["10.20.30.1/24".to_string()],
+                                speed_bps: None,
+                                oper_status: OperStatus::Up,
+                            },
+                        ],
+                        status: DeviceStatus::Up,
+                        host_label: Some("pve-1".to_string()),
+                        host_mgmt_ip: Some("192.168.10.50".to_string()),
+                        upstream_interface: None,
+                        last_seen: Utc::now(),
+                    },
+                ),
+            ]),
+            links: vec![Link {
+                id: "vyos-trunk".to_string(),
+                local_device_id: bridge_id,
+                local_interface: "vmbr0".to_string(),
+                local_ip: Some("192.168.10.50/24".to_string()),
+                remote_device_id: router_id,
+                remote_interface: "net1".to_string(),
+                remote_ip: None,
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: None,
+                    trunk_vlans: vec![20, 30],
+                }),
+            }],
+            updated_at: Utc::now(),
+        };
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
+
+        assert_eq!(
+            snapshot.links[0].network_cidrs,
+            vec!["10.20.20.0/24", "10.20.30.0/24"]
+        );
+    }
+
+    #[test]
+    fn snapshot_ignores_link_local_guest_addresses_for_access_network_color() {
+        let bridge_id = "proxmox:pve-1:bridge:vmbr0".to_string();
+        let guest_id = "proxmox:pve-1:qemu:171".to_string();
+
+        let topology = Topology {
+            devices: HashMap::from([
+                (
+                    bridge_id.clone(),
+                    device(
+                        &bridge_id,
+                        "vmbr0",
+                        DeviceRole::Bridge,
+                        DeploymentType::Virtual,
+                        None,
+                        Some("pve-1"),
+                    ),
+                ),
+                (
+                    guest_id.clone(),
+                    Device {
+                        id: guest_id.clone(),
+                        identity_keys: IdentityKeys {
+                            chassis_id: None,
+                            sys_name: Some("mc01".to_string()),
+                            mgmt_ip: Some("192.168.20.71".to_string()),
+                            mac_addresses: Vec::new(),
+                        },
+                        sys_descr: "Ubuntu VM".to_string(),
+                        vendor: "canonical".to_string(),
+                        model: None,
+                        device_role: DeviceRole::Server,
+                        deployment_type: DeploymentType::Virtual,
+                        guest_kind: Some(GuestKind::Vm),
+                        interfaces: vec![Interface {
+                            if_index: 1,
+                            if_name: "eth0".to_string(),
+                            ip_addresses: vec![
+                                "192.168.20.71/24".to_string(),
+                                "fe80::be24:11ff:fe32:8045/64".to_string(),
+                            ],
+                            speed_bps: None,
+                            oper_status: OperStatus::Up,
+                        }],
+                        status: DeviceStatus::Up,
+                        host_label: Some("pve-1".to_string()),
+                        host_mgmt_ip: Some("192.168.10.50".to_string()),
+                        upstream_interface: None,
+                        last_seen: Utc::now(),
+                    },
+                ),
+            ]),
+            links: vec![Link {
+                id: "mc01-access".to_string(),
+                local_device_id: bridge_id,
+                local_interface: "vmbr0".to_string(),
+                local_ip: Some("192.168.10.50/24".to_string()),
+                remote_device_id: guest_id,
+                remote_interface: "eth0".to_string(),
+                remote_ip: Some("192.168.20.71/24".to_string()),
+                speed_bps: None,
+                protocol: LinkProtocol::ProxmoxGuestLink,
+                guest_attachment: Some(GuestAttachment {
+                    bridge_name: "vmbr0".to_string(),
+                    vlan_tag: Some(20),
+                    trunk_vlans: Vec::new(),
+                }),
+            }],
+            updated_at: Utc::now(),
+        };
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &DiscoveryTree::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
+
+        assert_eq!(snapshot.links[0].network_cidrs, vec!["192.168.20.0/24"]);
     }
 }

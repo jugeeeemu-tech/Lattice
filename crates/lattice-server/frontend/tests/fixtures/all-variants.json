@@ -87,7 +87,8 @@
       "remote_interface": "swp1",
       "remote_ip": "192.0.2.20/24",
       "speed_bps": 1000000000,
-      "protocol": "lldp"
+      "protocol": "lldp",
+      "network_cidrs": ["192.0.2.0/24"]
     },
     {
       "id": "link-router-bridge",
@@ -98,7 +99,8 @@
       "remote_interface": "br-uplink",
       "remote_ip": "192.0.2.30/24",
       "speed_bps": 1000000000,
-      "protocol": "lldp"
+      "protocol": "lldp",
+      "network_cidrs": ["192.0.2.0/24"]
     },
     {
       "id": "link-switch-server",
@@ -109,7 +111,8 @@
       "remote_interface": "eno1",
       "remote_ip": "192.0.2.40/24",
       "speed_bps": 1000000000,
-      "protocol": "lldp"
+      "protocol": "lldp",
+      "network_cidrs": ["192.0.2.0/24"]
     },
     {
       "id": "link-server-container",
@@ -119,6 +122,7 @@
       "remote_interface": "eth0",
       "speed_bps": 1000000000,
       "protocol": "proxmox_guest_link",
+      "network_cidrs": ["203.0.113.0/24"],
       "guest_attachment": {
         "bridge_name": "br-app",
         "vlan_tag": 210,
@@ -132,7 +136,8 @@
       "remote_device_id": "variant-unknown",
       "remote_interface": "myst0",
       "speed_bps": 1000000000,
-      "protocol": "lldp"
+      "protocol": "lldp",
+      "network_cidrs": []
     }
   ],
   "tree_rows": [
