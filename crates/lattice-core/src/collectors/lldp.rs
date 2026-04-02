@@ -8,8 +8,8 @@ use crate::{
     collectors::{Collector, CollectorContext, GraphPatch, ObservedLink},
     snmp::{
         oids::{
-            LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID, LLDP_REM_MGMT_ADDR, LLDP_REM_PORT_DESC,
-            LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC, LLDP_REM_SYS_NAME,
+            IF_DESCR, IF_NAME, LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID, LLDP_REM_MGMT_ADDR,
+            LLDP_REM_PORT_DESC, LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC, LLDP_REM_SYS_NAME,
         },
         SnmpSession, SnmpValue,
     },
@@ -36,18 +36,24 @@ impl Collector for LldpCollector {
     }
 
     async fn collect(&self, session: &SnmpSession, ctx: &CollectorContext) -> Result<GraphPatch> {
-        let sys_names = table_by_index(session.walk(LLDP_REM_SYS_NAME).await?, LLDP_REM_SYS_NAME);
-        let chassis_ids = table_by_index(
+        let sys_names =
+            table_by_remote_index(session.walk(LLDP_REM_SYS_NAME).await?, LLDP_REM_SYS_NAME);
+        let chassis_ids = table_by_remote_index(
             session.walk(LLDP_REM_CHASSIS_ID).await?,
             LLDP_REM_CHASSIS_ID,
         );
-        let sys_descs = table_by_index(session.walk(LLDP_REM_SYS_DESC).await?, LLDP_REM_SYS_DESC);
+        let sys_descs =
+            table_by_remote_index(session.walk(LLDP_REM_SYS_DESC).await?, LLDP_REM_SYS_DESC);
         let mgmt_addrs =
-            table_by_index(session.walk(LLDP_REM_MGMT_ADDR).await?, LLDP_REM_MGMT_ADDR);
-        let remote_ports = table_by_index(session.walk(LLDP_REM_PORT_ID).await?, LLDP_REM_PORT_ID);
+            table_by_remote_index(session.walk(LLDP_REM_MGMT_ADDR).await?, LLDP_REM_MGMT_ADDR);
+        let remote_ports =
+            table_by_remote_index(session.walk(LLDP_REM_PORT_ID).await?, LLDP_REM_PORT_ID);
         let remote_port_descs =
-            table_by_index(session.walk(LLDP_REM_PORT_DESC).await?, LLDP_REM_PORT_DESC);
-        let local_ports = table_by_index(session.walk(LLDP_LOC_PORT_ID).await?, LLDP_LOC_PORT_ID);
+            table_by_remote_index(session.walk(LLDP_REM_PORT_DESC).await?, LLDP_REM_PORT_DESC);
+        let local_ports =
+            table_by_local_index(session.walk(LLDP_LOC_PORT_ID).await?, LLDP_LOC_PORT_ID);
+        let if_names = table_by_local_index(session.walk(IF_NAME).await?, IF_NAME);
+        let if_descrs = table_by_local_index(session.walk(IF_DESCR).await?, IF_DESCR);
 
         let mut indices = sys_names
             .keys()
@@ -56,7 +62,6 @@ impl Collector for LldpCollector {
             .chain(mgmt_addrs.keys())
             .chain(remote_ports.keys())
             .chain(remote_port_descs.keys())
-            .chain(local_ports.keys())
             .cloned()
             .collect::<Vec<_>>();
         indices.sort();
@@ -105,13 +110,25 @@ impl Collector for LldpCollector {
             });
 
             let local_interface = local_ports
-                .get(&index)
+                .get(&index.local_port_num)
                 .and_then(snmp_value_as_text)
+                .or_else(|| {
+                    if_names
+                        .get(&index.local_port_num)
+                        .and_then(snmp_value_as_text)
+                })
+                .or_else(|| {
+                    if_descrs
+                        .get(&index.local_port_num)
+                        .and_then(snmp_value_as_text)
+                })
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Unknown".to_string());
-            let remote_interface = remote_ports
+            let remote_interface = remote_port_descs
                 .get(&index)
                 .and_then(snmp_value_as_text)
-                .or_else(|| remote_port_descs.get(&index).and_then(snmp_value_as_text))
+                .or_else(|| remote_ports.get(&index).and_then(snmp_value_as_text))
+                .filter(|value| !value.trim().is_empty())
                 .unwrap_or_else(|| "Unknown".to_string());
 
             links.push(ObservedLink {
@@ -132,12 +149,50 @@ impl Collector for LldpCollector {
     }
 }
 
-fn table_by_index(rows: Vec<(String, SnmpValue)>, base: &str) -> HashMap<String, SnmpValue> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+struct RemoteIndex {
+    local_port_num: u32,
+    rem_index: u32,
+    time_mark: u32,
+}
+
+fn table_by_remote_index(
+    rows: Vec<(String, SnmpValue)>,
+    base: &str,
+) -> HashMap<RemoteIndex, SnmpValue> {
     rows.into_iter()
         .filter_map(|(oid, value)| {
-            index_after_prefix(&oid, base).map(|index| (index.to_string(), value))
+            remote_index_after_prefix(&oid, base).map(|index| (index, value))
         })
         .collect()
+}
+
+fn table_by_local_index(rows: Vec<(String, SnmpValue)>, base: &str) -> HashMap<u32, SnmpValue> {
+    rows.into_iter()
+        .filter_map(|(oid, value)| local_index_after_prefix(&oid, base).map(|index| (index, value)))
+        .collect()
+}
+
+fn remote_index_after_prefix(oid: &str, base: &str) -> Option<RemoteIndex> {
+    let suffix = index_after_prefix(oid, base)?;
+    let mut parts = suffix
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().ok());
+
+    Some(RemoteIndex {
+        time_mark: parts.next()??,
+        local_port_num: parts.next()??,
+        rem_index: parts.next()??,
+    })
+}
+
+fn local_index_after_prefix(oid: &str, base: &str) -> Option<u32> {
+    index_after_prefix(oid, base)?
+        .split('.')
+        .find(|part| !part.is_empty())?
+        .parse()
+        .ok()
 }
 
 fn index_after_prefix<'a>(oid: &'a str, base: &str) -> Option<&'a str> {
@@ -185,12 +240,25 @@ mod tests {
     use crate::snmp::SnmpValue;
 
     #[test]
-    fn indexes_are_extracted_from_walk_oids() {
+    fn remote_indexes_are_extracted_from_walk_oids() {
         assert_eq!(
-            index_after_prefix("1.0.8802.1.1.2.1.4.1.1.9.42", LLDP_REM_SYS_NAME),
-            Some("42")
+            remote_index_after_prefix("1.0.8802.1.1.2.1.4.1.1.9.0.7.42", LLDP_REM_SYS_NAME),
+            Some(RemoteIndex {
+                time_mark: 0,
+                local_port_num: 7,
+                rem_index: 42,
+            })
         );
-        assert_eq!(index_after_prefix("1.2.3", LLDP_REM_SYS_NAME), None);
+        assert_eq!(remote_index_after_prefix("1.2.3", LLDP_REM_SYS_NAME), None);
+    }
+
+    #[test]
+    fn local_indexes_are_extracted_from_walk_oids() {
+        assert_eq!(
+            local_index_after_prefix("1.3.6.1.2.1.31.1.1.1.1.7", IF_NAME),
+            Some(7)
+        );
+        assert_eq!(local_index_after_prefix("1.2.3", IF_NAME), None);
     }
 
     #[test]
