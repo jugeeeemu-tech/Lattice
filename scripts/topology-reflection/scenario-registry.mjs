@@ -347,14 +347,155 @@ export function getScenario(name) {
   return structuredClone(scenarioEntry);
 }
 
-function subnetForIndex(scenarioIndex, linkIndex) {
+function buildAdjacencyMap(scenarioEntry) {
+  const adjacency = new Map(scenarioEntry.nodes.map((label) => [label, []]));
+  for (const edge of scenarioEntry.links) {
+    adjacency.get(edge.a)?.push(edge.b);
+    adjacency.get(edge.b)?.push(edge.a);
+  }
+
+  for (const neighbors of adjacency.values()) {
+    neighbors.sort((left, right) => left.localeCompare(right));
+  }
+
+  return adjacency;
+}
+
+function buildPrimaryParentMap(scenarioEntry) {
+  const adjacency = buildAdjacencyMap(scenarioEntry);
+  const queue = [scenarioEntry.root];
+  const discovered = new Set([scenarioEntry.root]);
+  const parentByLabel = new Map([[scenarioEntry.root, null]]);
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    for (const neighbor of adjacency.get(current) ?? []) {
+      if (discovered.has(neighbor)) {
+        continue;
+      }
+      discovered.add(neighbor);
+      parentByLabel.set(neighbor, current);
+      queue.push(neighbor);
+    }
+  }
+
+  return parentByLabel;
+}
+
+function buildChildrenByParentMap(nodes, parentByLabel) {
+  const childrenByParent = new Map(nodes.map((label) => [label, []]));
+  for (const [label, parentLabel] of parentByLabel.entries()) {
+    if (!parentLabel) {
+      continue;
+    }
+    childrenByParent.get(parentLabel)?.push(label);
+  }
+
+  for (const children of childrenByParent.values()) {
+    children.sort((left, right) => left.localeCompare(right));
+  }
+
+  return childrenByParent;
+}
+
+function buildLanAnchorMap(scenarioEntry, parentByLabel) {
+  const childrenByParent = buildChildrenByParentMap(scenarioEntry.nodes, parentByLabel);
+  const anchorByLabel = new Map([
+    [scenarioEntry.root, inferDeviceRole(scenarioEntry.root) === 'switch' ? scenarioEntry.root : null],
+  ]);
+  const queue = [scenarioEntry.root];
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    const currentRole = inferDeviceRole(current);
+    const currentAnchor = anchorByLabel.get(current) ?? null;
+
+    for (const child of childrenByParent.get(current) ?? []) {
+      const childRole = inferDeviceRole(child);
+      let childAnchor = null;
+
+      if (childRole === 'switch') {
+        childAnchor = currentRole === 'switch' && currentAnchor ? currentAnchor : child;
+      } else if (childRole === 'server') {
+        childAnchor = currentAnchor ?? child;
+      } else if (childRole === 'router') {
+        childAnchor = currentAnchor ?? null;
+      } else {
+        childAnchor = currentAnchor ?? null;
+      }
+
+      anchorByLabel.set(child, childAnchor);
+      queue.push(child);
+    }
+  }
+
+  return anchorByLabel;
+}
+
+function transitSubnetForIndex(scenarioIndex, transitIndex) {
   const secondOctet = 16 + (scenarioIndex % 16);
-  const thirdOctet = Math.floor(linkIndex / 64);
-  const fourthOctet = (linkIndex % 64) * 4;
+  const thirdOctet = Math.floor(transitIndex / 64);
+  const fourthOctet = (transitIndex % 64) * 4;
   return {
     left: `10.${secondOctet}.${thirdOctet}.${fourthOctet + 1}/30`,
     right: `10.${secondOctet}.${thirdOctet}.${fourthOctet + 2}/30`,
   };
+}
+
+function lanSubnetPrefixForIndex(scenarioIndex, lanIndex) {
+  const secondOctet = 64 + (scenarioIndex % 16);
+  return `10.${secondOctet}.${lanIndex}`;
+}
+
+function classifyLinkAddressing(edge, parentByLabel, anchorByLabel) {
+  const roleA = inferDeviceRole(edge.a);
+  const roleB = inferDeviceRole(edge.b);
+  const childLabel =
+    parentByLabel.get(edge.a) === edge.b
+      ? edge.a
+      : parentByLabel.get(edge.b) === edge.a
+        ? edge.b
+        : null;
+
+  if (roleA === 'router' && roleB === 'router') {
+    return { key: `transit:${sortedPair(edge.a, edge.b)}`, type: 'transit' };
+  }
+
+  if (childLabel) {
+    const treeAnchor = anchorByLabel.get(childLabel) ?? null;
+    if (treeAnchor) {
+      return { key: `lan:${treeAnchor}`, type: 'lan' };
+    }
+  }
+
+  const anchorA = anchorByLabel.get(edge.a) ?? null;
+  const anchorB = anchorByLabel.get(edge.b) ?? null;
+  if (anchorA && anchorA === anchorB) {
+    return { key: `lan:${anchorA}`, type: 'lan' };
+  }
+
+  if (roleA === 'switch' && roleB === 'switch') {
+    return { key: `lan:${sortedPair(edge.a, edge.b)}`, type: 'lan' };
+  }
+
+  if (
+    (roleA === 'switch' && roleB === 'server') ||
+    (roleA === 'server' && roleB === 'switch') ||
+    (roleA === 'server' && roleB === 'server')
+  ) {
+    return { key: `lan:${sortedPair(edge.a, edge.b)}`, type: 'lan' };
+  }
+
+  const switchSide =
+    roleA === 'switch' ? edge.a : roleB === 'switch' ? edge.b : null;
+  if (switchSide) {
+    const switchAnchor = anchorByLabel.get(switchSide) ?? null;
+    if (switchAnchor) {
+      return { key: `lan:${switchAnchor}`, type: 'lan' };
+    }
+  }
+
+  return { key: `transit:${sortedPair(edge.a, edge.b)}`, type: 'transit' };
 }
 
 function mgmtAddressForNode(scenarioIndex, nodeIndex) {
@@ -364,6 +505,8 @@ function mgmtAddressForNode(scenarioIndex, nodeIndex) {
 }
 
 function buildTopologyShape(scenarioEntry) {
+  const parentByLabel = buildPrimaryParentMap(scenarioEntry);
+  const anchorByLabel = buildLanAnchorMap(scenarioEntry, parentByLabel);
   const interfaceStateByNode = new Map(
     scenarioEntry.nodes.map((nodeLabel, nodeIndex) => [
       nodeLabel,
@@ -377,6 +520,10 @@ function buildTopologyShape(scenarioEntry) {
   const disabledLinkKeys = new Set(
     scenarioEntry.disabledLinks.map(({ a, b }) => sortedPair(a, b))
   );
+  const addressDomainByKey = new Map();
+  let lanDomainCount = 0;
+  let transitDomainCount = 0;
+
   const links = scenarioEntry.links.map((edge, linkIndex) => {
     const leftState = interfaceStateByNode.get(edge.a);
     const rightState = interfaceStateByNode.get(edge.b);
@@ -386,19 +533,53 @@ function buildTopologyShape(scenarioEntry) {
 
     const leftInterface = `eth${leftState.interfaces.length + 1}`;
     const rightInterface = `eth${rightState.interfaces.length + 1}`;
-    const subnet = subnetForIndex(scenarioEntry.scenarioIndex, linkIndex);
     const linkKey = sortedPair(edge.a, edge.b);
     const disabled = disabledLinkKeys.has(linkKey);
+    const addressing = classifyLinkAddressing(edge, parentByLabel, anchorByLabel);
+    let domain = addressDomainByKey.get(addressing.key);
+
+    if (!domain) {
+      if (addressing.type === 'lan') {
+        domain = {
+          nextHost: 1,
+          prefix: lanSubnetPrefixForIndex(scenarioEntry.scenarioIndex, lanDomainCount),
+          prefixLength: 24,
+          type: 'lan',
+        };
+        lanDomainCount += 1;
+      } else {
+        const transitSubnet = transitSubnetForIndex(
+          scenarioEntry.scenarioIndex,
+          transitDomainCount
+        );
+        domain = {
+          left: transitSubnet.left,
+          right: transitSubnet.right,
+          type: 'transit',
+        };
+        transitDomainCount += 1;
+      }
+      addressDomainByKey.set(addressing.key, domain);
+    }
+
+    const leftCidr =
+      domain.type === 'lan'
+        ? `${domain.prefix}.${domain.nextHost++}/${domain.prefixLength}`
+        : domain.left;
+    const rightCidr =
+      domain.type === 'lan'
+        ? `${domain.prefix}.${domain.nextHost++}/${domain.prefixLength}`
+        : domain.right;
 
     leftState.interfaces.push({
-      cidr: subnet.left,
+      cidr: leftCidr,
       name: leftInterface,
       peer: edge.b,
       peerInterface: rightInterface,
       disabled,
     });
     rightState.interfaces.push({
-      cidr: subnet.right,
+      cidr: rightCidr,
       name: rightInterface,
       peer: edge.a,
       peerInterface: leftInterface,
@@ -408,11 +589,13 @@ function buildTopologyShape(scenarioEntry) {
     return {
       a: edge.a,
       aInterface: leftInterface,
-      aIp: subnet.left,
+      aIp: leftCidr,
       b: edge.b,
       bInterface: rightInterface,
-      bIp: subnet.right,
+      bIp: rightCidr,
       disabled,
+      domainKey: addressing.key,
+      domainType: addressing.type,
     };
   });
 
