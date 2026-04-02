@@ -71,6 +71,8 @@ EOF
       >"${diagnostics_dir}/hostname.txt" 2>&1 || true
     docker exec "${container_name}" sh -lc 'ip -o -4 addr show' \
       >"${diagnostics_dir}/ip-addresses.txt" 2>&1 || true
+    docker exec "${container_name}" sh -lc 'ip -details link show' \
+      >"${diagnostics_dir}/link-details.txt" 2>&1 || true
     docker exec "${container_name}" lldpcli -f keyvalue show neighbors details \
       >"${diagnostics_dir}/lldp-neighbors.txt" 2>&1 || true
     docker exec "${container_name}" lldpcli -f keyvalue show interfaces details \

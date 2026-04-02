@@ -22,6 +22,25 @@ wait_for_interface() {
   return 1
 }
 
+wait_for_carrier() {
+  local iface="$1"
+  local attempts="${2:-60}"
+  local carrier_path="/sys/class/net/${iface}/carrier"
+
+  if [[ ! -e "${carrier_path}" ]]; then
+    return 0
+  fi
+
+  for _ in $(seq 1 "${attempts}"); do
+    if [[ "$(cat "${carrier_path}" 2>/dev/null || echo 0)" == "1" ]]; then
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  return 1
+}
+
 wait_for_path() {
   local target_path="$1"
   local attempts="${2:-60}"
@@ -121,6 +140,11 @@ if [[ -n "${DISABLED_INTERFACES}" ]]; then
     active_interfaces=("${filtered[@]}")
   done
 fi
+
+for iface in "${active_interfaces[@]}"; do
+  [[ -z "${iface}" ]] && continue
+  wait_for_carrier "${iface}" 20 || true
+done
 
 mkdir -p /var/agentx /var/run/lldpd
 
