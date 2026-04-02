@@ -28,6 +28,44 @@ SCENARIO_METADATA="${SCENARIO_DIR}/scenario.metadata.json"
 
 mkdir -p "${OUTPUT_DIR}"
 
+collect_root_diagnostics() {
+  if [[ ! -f "${SCENARIO_METADATA}" ]]; then
+    return 0
+  fi
+
+  local root_label
+  root_label="$(
+    node --input-type=module - "${SCENARIO_METADATA}" <<'EOF'
+import { readFile } from 'node:fs/promises';
+
+const [metadataPath] = process.argv.slice(2);
+const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
+process.stdout.write(`${metadata.root ?? ''}\n`);
+EOF
+  )"
+
+  if [[ -z "${root_label}" ]]; then
+    return 0
+  fi
+
+  local diagnostics_dir="${OUTPUT_DIR}/root-diagnostics"
+  local root_container="clab-${SCENARIO}-${root_label}"
+  mkdir -p "${diagnostics_dir}"
+
+  docker exec "${root_container}" hostname \
+    >"${diagnostics_dir}/hostname.txt" 2>&1 || true
+  docker exec "${root_container}" sh -lc 'ip -o -4 addr show' \
+    >"${diagnostics_dir}/ip-addresses.txt" 2>&1 || true
+  docker exec "${root_container}" lldpcli -f keyvalue show neighbors details \
+    >"${diagnostics_dir}/lldp-neighbors.txt" 2>&1 || true
+  docker exec "${root_container}" lldpcli -f keyvalue show interfaces details \
+    >"${diagnostics_dir}/lldp-interfaces.txt" 2>&1 || true
+  docker exec "${root_container}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.4 \
+    >"${diagnostics_dir}/snmp-lldp-remote.txt" 2>&1 || true
+  docker exec "${root_container}" snmpwalk -v2c -c public -On -OQUs localhost 1.0.8802.1.1.2.1.3 \
+    >"${diagnostics_dir}/snmp-lldp-local.txt" 2>&1 || true
+}
+
 cleanup() {
   local exit_code=$?
 
@@ -37,6 +75,7 @@ cleanup() {
   fi
 
   if [[ -f "${TOPOLOGY_FILE}" ]]; then
+    collect_root_diagnostics || true
     containerlab inspect -t "${TOPOLOGY_FILE}" >"${OUTPUT_DIR}/containerlab-inspect.txt" 2>&1 || true
     containerlab destroy -t "${TOPOLOGY_FILE}" --cleanup >"${OUTPUT_DIR}/containerlab-destroy.log" 2>&1 || true
   fi

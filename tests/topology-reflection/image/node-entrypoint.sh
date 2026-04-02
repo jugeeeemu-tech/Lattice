@@ -43,20 +43,35 @@ management_ipv4() {
     | head -n 1
 }
 
+start_lldpd() {
+  local snmp_enabled="$1"
+  local mgmt_ip="${2:-}"
+  local -a args=()
+
+  if [[ "${snmp_enabled}" == "1" ]]; then
+    args+=(-x)
+  fi
+
+  if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
+    interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
+    args+=(-I "${interface_pattern}")
+  fi
+
+  if [[ -n "${mgmt_ip}" ]]; then
+    args+=(-m "${mgmt_ip}")
+  fi
+
+  lldpd "${args[@]}"
+}
+
 configure_lldpd() {
   local attempts="${1:-20}"
-  local mgmt_ip=""
 
   for _ in $(seq 1 "${attempts}"); do
     if lldpcli configure lldp tx-interval 1 >/dev/null 2>&1; then
+      lldpcli configure lldp fast-start enable >/dev/null 2>&1 || true
       lldpcli configure lldp portidsubtype ifname >/dev/null 2>&1 || true
       lldpcli configure lldp portdescription-source ifname >/dev/null 2>&1 || true
-      mgmt_ip="$(management_ipv4)"
-      if [[ -n "${mgmt_ip}" ]]; then
-        lldpcli configure system ip management pattern "${mgmt_ip}" >/dev/null 2>&1 || true
-      else
-        lldpcli configure system ip management pattern eth0 >/dev/null 2>&1 || true
-      fi
       lldpcli configure lldp management-addresses-advertisements >/dev/null 2>&1 || true
       lldpcli update >/dev/null 2>&1 || true
       return 0
@@ -102,6 +117,8 @@ fi
 
 mkdir -p /var/agentx /var/run/lldpd
 
+MGMT_IP="$(management_ipv4)"
+
 cat >/etc/snmp/snmpd.conf <<EOF
 agentaddress udp:161
 rocommunity ${SNMP_COMMUNITY}
@@ -112,12 +129,7 @@ agentXSocket /var/agentx/master
 EOF
 
 if [[ "${DISABLE_SNMP}" == "1" ]]; then
-  if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
-    interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
-    lldpd -I "${interface_pattern}"
-  else
-    lldpd
-  fi
+  start_lldpd 0 "${MGMT_IP}"
   configure_lldpd || true
   exec tail -f /dev/null
 fi
@@ -127,12 +139,7 @@ SNMPD_PID=$!
 
 wait_for_path /var/agentx/master
 
-if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
-  interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
-  lldpd -x -I "${interface_pattern}"
-else
-  lldpd -x
-fi
+start_lldpd 1 "${MGMT_IP}"
 
 configure_lldpd || true
 
