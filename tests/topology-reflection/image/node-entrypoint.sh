@@ -36,6 +36,22 @@ wait_for_path() {
   return 1
 }
 
+configure_lldpd() {
+  local attempts="${1:-20}"
+
+  for _ in $(seq 1 "${attempts}"); do
+    if lldpcli configure lldp tx-interval 1 >/dev/null 2>&1; then
+      lldpcli configure lldp portidsubtype ifname >/dev/null 2>&1 || true
+      lldpcli configure system ip management pattern eth0 >/dev/null 2>&1 || true
+      lldpcli configure lldp management-addresses-advertisements >/dev/null 2>&1 || true
+      return 0
+    fi
+    sleep 0.5
+  done
+
+  return 1
+}
+
 hostname "${NODE_SYSNAME}" || true
 
 declare -a active_interfaces=()
@@ -87,6 +103,7 @@ if [[ "${DISABLE_SNMP}" == "1" ]]; then
   else
     lldpd
   fi
+  configure_lldpd || true
   exec tail -f /dev/null
 fi
 
@@ -101,5 +118,7 @@ if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
 else
   lldpd -x
 fi
+
+configure_lldpd || true
 
 wait "${SNMPD_PID}"

@@ -109,16 +109,16 @@ impl Collector for LldpCollector {
                 last_seen: Utc::now(),
             });
 
-            let local_interface = local_ports
+            let local_interface = if_names
                 .get(&index.local_port_num)
                 .and_then(snmp_value_as_text)
                 .or_else(|| {
-                    if_names
+                    if_descrs
                         .get(&index.local_port_num)
                         .and_then(snmp_value_as_text)
                 })
                 .or_else(|| {
-                    if_descrs
+                    local_ports
                         .get(&index.local_port_num)
                         .and_then(snmp_value_as_text)
                 })
