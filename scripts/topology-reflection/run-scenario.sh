@@ -205,6 +205,14 @@ async function lldpNeighborCount(containerName) {
     .filter((line) => /^lldp\.[^.]+\.via=LLDP$/i.test(line)).length;
 }
 
+async function triggerLldpUpdate(containerName) {
+  await run('docker', ['exec', containerName, 'lldpcli', 'update']);
+}
+
+for (const node of checks) {
+  await triggerLldpUpdate(`clab-${scenarioName}-${node.label}`);
+}
+
 for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
   const statusByNode = await Promise.all(
     checks.map(async (node) => {
@@ -257,6 +265,15 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
 
   if (ready && stableReadyIterations >= stableReadyTarget) {
     process.exit(0);
+  }
+
+  if (!ready) {
+    for (const node of statusByNode) {
+      if (!node.snmp_ready || node.lldp_ready) {
+        continue;
+      }
+      await triggerLldpUpdate(`clab-${scenarioName}-${node.label}`);
+    }
   }
 
   await new Promise((resolve) => setTimeout(resolve, sleepMs));
