@@ -73,6 +73,8 @@ EOF
       >"${diagnostics_dir}/ip-addresses.txt" 2>&1 || true
     docker exec "${container_name}" sh -lc 'ip -details link show' \
       >"${diagnostics_dir}/link-details.txt" 2>&1 || true
+    docker exec "${container_name}" sh -lc 'cat /var/log/topology-reflection/lldpd.log' \
+      >"${diagnostics_dir}/lldpd.log" 2>&1 || true
     docker exec "${container_name}" lldpcli -f keyvalue show neighbors details \
       >"${diagnostics_dir}/lldp-neighbors.txt" 2>&1 || true
     docker exec "${container_name}" lldpcli -f keyvalue show interfaces details \
@@ -126,7 +128,6 @@ const [metadataPath, scenarioName] = process.argv.slice(2);
 const metadata = JSON.parse(await readFile(metadataPath, 'utf8'));
 const checks = metadata.nodes.filter((node) => node.snmp_enabled);
 const rootLabel = metadata.root;
-const lldpSysNameOid = '1.0.8802.1.1.2.1.4.1.1.9';
 const sysDescrOid = '1.3.6.1.2.1.1.1.0';
 const maxAttempts = 150;
 const sleepMs = 1_000;
@@ -182,21 +183,43 @@ async function snmpLineCount(containerName, oid) {
     .filter((line) => !/^End of MIB/i.test(line)).length;
 }
 
+async function lldpNeighborCount(containerName) {
+  const result = await run('docker', [
+    'exec',
+    containerName,
+    'lldpcli',
+    '-f',
+    'keyvalue',
+    'show',
+    'neighbors',
+    'details',
+  ]);
+
+  if (result.code !== 0) {
+    return null;
+  }
+
+  return result.stdout
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => /^lldp\.[^.]+\.via=LLDP$/i.test(line)).length;
+}
+
 for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
   const statusByNode = await Promise.all(
     checks.map(async (node) => {
       const containerName = `clab-${scenarioName}-${node.label}`;
       const sysDescrCount = await snmpLineCount(containerName, sysDescrOid);
-      const lldpNeighborCount =
-        sysDescrCount === null ? null : await snmpLineCount(containerName, lldpSysNameOid);
+      const lldpNeighborCountValue =
+        sysDescrCount === null ? null : await lldpNeighborCount(containerName);
 
       return {
         expected_neighbor_count: node.expected_neighbor_count,
         label: node.label,
         lldp_ready:
           node.expected_neighbor_count === 0 ||
-          (lldpNeighborCount !== null && lldpNeighborCount >= node.expected_neighbor_count),
-        lldp_neighbor_count: lldpNeighborCount,
+          (lldpNeighborCountValue !== null && lldpNeighborCountValue >= node.expected_neighbor_count),
+        lldp_neighbor_count: lldpNeighborCountValue,
         snmp_ready: sysDescrCount !== null,
       };
     })

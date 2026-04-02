@@ -80,7 +80,8 @@ start_lldpd() {
     args+=(-m "${mgmt_ip}")
   fi
 
-  lldpd "${args[@]}"
+  mkdir -p /var/log/topology-reflection
+  lldpd -d "${args[@]}" >/var/log/topology-reflection/lldpd.log 2>&1 &
 }
 
 configure_lldpd() {
