@@ -205,12 +205,14 @@ async function lldpNeighborCount(containerName) {
     .filter((line) => /^lldp\.[^.]+\.via=LLDP$/i.test(line)).length;
 }
 
-async function triggerLldpUpdate(containerName) {
+async function refreshLldp(containerName) {
+  await run('docker', ['exec', containerName, 'sh', '-lc', 'pkill -HUP lldpd || true']);
+  await run('docker', ['exec', containerName, 'lldpcli', 'resume']);
   await run('docker', ['exec', containerName, 'lldpcli', 'update']);
 }
 
 for (const node of checks) {
-  await triggerLldpUpdate(`clab-${scenarioName}-${node.label}`);
+  await refreshLldp(`clab-${scenarioName}-${node.label}`);
 }
 
 for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -272,7 +274,7 @@ for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       if (!node.snmp_ready || node.lldp_ready) {
         continue;
       }
-      await triggerLldpUpdate(`clab-${scenarioName}-${node.label}`);
+      await refreshLldp(`clab-${scenarioName}-${node.label}`);
     }
   }
 
