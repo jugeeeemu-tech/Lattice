@@ -199,9 +199,23 @@ fn preserve_source_tree(
     }
 
     let fallback_tree = build_internal_tree(topology);
-    for node in fallback_tree.nodes {
+    let depth_by_device = nodes
+        .iter()
+        .map(|node| (node.device_id.clone(), node.depth))
+        .collect::<HashMap<_, _>>();
+
+    for mut node in fallback_tree.nodes {
         if covered_device_ids.contains(&node.device_id) {
             continue;
+        }
+        if node.parent_row_id.is_none() {
+            if let Some(parent_device_id) =
+                unique_visible_lldp_parent(topology, &node.device_id, &covered_device_ids)
+            {
+                node.parent_row_id = Some(parent_device_id.clone());
+                node.row_id = format!("{parent_device_id}/{}", node.device_id);
+                node.depth = depth_by_device.get(&parent_device_id).copied().unwrap_or(0) + 1;
+            }
         }
         nodes.push(node);
     }
@@ -851,13 +865,6 @@ mod tests {
                         parent_row_id: Some("seed:192.0.2.1/hub-router-1#1".to_string()),
                         label: Some("hub-router-2".to_string()),
                         depth: 1,
-                    },
-                    crate::discovery::DiscoveryTreeNode {
-                        row_id: "source:0/branch-router-07#1".to_string(),
-                        device_id: "branch-router-07".to_string(),
-                        parent_row_id: None,
-                        label: Some("branch-router-07".to_string()),
-                        depth: 0,
                     },
                 ],
             },
