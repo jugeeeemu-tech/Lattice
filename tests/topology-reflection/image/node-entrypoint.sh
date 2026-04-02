@@ -66,12 +66,17 @@ start_lldpd() {
 
 configure_lldpd() {
   local attempts="${1:-20}"
+  local interface_pattern=""
 
   for _ in $(seq 1 "${attempts}"); do
-    if lldpcli configure lldp tx-interval 1 >/dev/null 2>&1; then
-      lldpcli configure lldp fast-start enable >/dev/null 2>&1 || true
+    if lldpcli configure lldp tx-interval 5 >/dev/null 2>&1; then
+      lldpcli configure lldp tx-hold 10 >/dev/null 2>&1 || true
       lldpcli configure lldp portidsubtype ifname >/dev/null 2>&1 || true
       lldpcli configure lldp portdescription-source ifname >/dev/null 2>&1 || true
+      if [[ "${#active_interfaces[@]}" -gt 0 ]]; then
+        interface_pattern="$(IFS=,; printf '%s' "${active_interfaces[*]}")"
+        lldpcli configure ports "${interface_pattern}" lldp status rx-and-tx >/dev/null 2>&1 || true
+      fi
       lldpcli configure lldp management-addresses-advertisements >/dev/null 2>&1 || true
       lldpcli update >/dev/null 2>&1 || true
       return 0
