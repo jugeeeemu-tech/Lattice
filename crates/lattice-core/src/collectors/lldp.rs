@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, net::Ipv4Addr};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -9,8 +9,8 @@ use crate::{
     snmp::{
         oids::{
             IF_DESCR, IF_NAME, LLDP_LOC_PORT_DESC, LLDP_LOC_PORT_ID, LLDP_REM_CHASSIS_ID,
-            LLDP_REM_MGMT_ADDR, LLDP_REM_PORT_DESC, LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC,
-            LLDP_REM_SYS_NAME,
+            LLDP_REM_MGMT_ADDR, LLDP_REM_MGMT_ADDR_IF_SUBTYPE, LLDP_REM_PORT_DESC,
+            LLDP_REM_PORT_ID, LLDP_REM_SYS_DESC, LLDP_REM_SYS_NAME,
         },
         SnmpSession, SnmpValue,
     },
@@ -45,8 +45,10 @@ impl Collector for LldpCollector {
         );
         let sys_descs =
             table_by_remote_index(session.walk(LLDP_REM_SYS_DESC).await?, LLDP_REM_SYS_DESC);
-        let mgmt_addrs =
-            table_by_remote_index(session.walk(LLDP_REM_MGMT_ADDR).await?, LLDP_REM_MGMT_ADDR);
+        let mgmt_addrs = remote_mgmt_addr_by_index(
+            session.walk(LLDP_REM_MGMT_ADDR_IF_SUBTYPE).await?,
+            LLDP_REM_MGMT_ADDR_IF_SUBTYPE,
+        );
         let remote_ports =
             table_by_remote_index(session.walk(LLDP_REM_PORT_ID).await?, LLDP_REM_PORT_ID);
         let remote_port_descs =
@@ -77,7 +79,7 @@ impl Collector for LldpCollector {
             let identity = IdentityKeys {
                 chassis_id: chassis_ids.get(&index).and_then(snmp_value_as_text),
                 sys_name: sys_names.get(&index).and_then(snmp_value_as_text),
-                mgmt_ip: mgmt_addrs.get(&index).and_then(snmp_value_as_ipv4_text),
+                mgmt_ip: mgmt_addrs.get(&index).cloned(),
                 mac_addresses: Vec::new(),
             };
             let sys_descr = sys_descs
@@ -181,6 +183,15 @@ fn table_by_local_index(rows: Vec<(String, SnmpValue)>, base: &str) -> HashMap<u
         .collect()
 }
 
+fn remote_mgmt_addr_by_index(
+    rows: Vec<(String, SnmpValue)>,
+    base: &str,
+) -> HashMap<RemoteIndex, String> {
+    rows.into_iter()
+        .filter_map(|(oid, _value)| remote_mgmt_addr_after_prefix(&oid, base))
+        .collect()
+}
+
 fn remote_index_after_prefix(oid: &str, base: &str) -> Option<RemoteIndex> {
     let suffix = index_after_prefix(oid, base)?;
     let mut parts = suffix
@@ -193,6 +204,40 @@ fn remote_index_after_prefix(oid: &str, base: &str) -> Option<RemoteIndex> {
         local_port_num: parts.next()??,
         rem_index: parts.next()??,
     })
+}
+
+fn remote_mgmt_addr_after_prefix(oid: &str, base: &str) -> Option<(RemoteIndex, String)> {
+    let suffix = index_after_prefix(oid, base)?;
+    let parts = suffix
+        .split('.')
+        .filter(|part| !part.is_empty())
+        .map(|part| part.parse::<u32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+
+    if parts.len() < 5 {
+        return None;
+    }
+
+    let index = RemoteIndex {
+        time_mark: parts[0],
+        local_port_num: parts[1],
+        rem_index: parts[2],
+    };
+    let subtype = parts[3];
+    let addr_len = usize::try_from(parts[4]).ok()?;
+    let addr_end = 5usize.checked_add(addr_len)?;
+    if subtype != 1 || addr_len != 4 || parts.len() < addr_end {
+        return None;
+    }
+
+    let octets = [
+        u8::try_from(parts[5]).ok()?,
+        u8::try_from(parts[6]).ok()?,
+        u8::try_from(parts[7]).ok()?,
+        u8::try_from(parts[8]).ok()?,
+    ];
+
+    Some((index, Ipv4Addr::from(octets).to_string()))
 }
 
 fn local_index_after_prefix(oid: &str, base: &str) -> Option<u32> {
@@ -268,6 +313,31 @@ mod tests {
                 local_port_num: 7,
                 rem_index: 42,
             })
+        );
+    }
+
+    #[test]
+    fn remote_management_address_is_extracted_from_index_suffix() {
+        assert_eq!(
+            remote_mgmt_addr_after_prefix(
+                "1.0.8802.1.1.2.1.4.2.1.3.200.62.1.1.4.172.31.13.19",
+                LLDP_REM_MGMT_ADDR_IF_SUBTYPE
+            ),
+            Some((
+                RemoteIndex {
+                    time_mark: 200,
+                    local_port_num: 62,
+                    rem_index: 1,
+                },
+                "172.31.13.19".to_string(),
+            ))
+        );
+        assert_eq!(
+            remote_mgmt_addr_after_prefix(
+                "1.0.8802.1.1.2.1.4.2.1.3.200.62.1.2.16.32.1.13.184.0.0.0.0.0.0.0.0.0.0.0.1",
+                LLDP_REM_MGMT_ADDR_IF_SUBTYPE
+            ),
+            None
         );
     }
 
