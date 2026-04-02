@@ -24,6 +24,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
       PLAYWRIGHT_BROWSER_CHANNEL: chrome
       TOPOLOGY_REFLECTION_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/topology-reflection
 
