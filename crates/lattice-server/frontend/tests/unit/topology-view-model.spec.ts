@@ -7,6 +7,8 @@ import {
   deviceSummary,
   entryMetaText,
   networkCidrColor,
+  preferredEntryForDevice,
+  preferredRowForDevice,
 } from '../../src/topology/view-model';
 import { loadViewSnapshotFixture } from '../helpers/load-view-snapshot-fixture';
 
@@ -325,6 +327,138 @@ describe('buildTopologyModel', () => {
       'core-dist': '10.0.1.0/24',
       'dist-access': '10.0.1.0/24',
     });
+  });
+
+  it('keeps multiple sidebar entries for a shared downstream subtree', () => {
+    const snapshot: ViewSnapshot = {
+      auto_discovery_interval_seconds: 30,
+      next_auto_discovery_at_ms: 0,
+      discovery_status: {
+        state: 'ready',
+      },
+      devices: [
+        {
+          id: 'core-router-1',
+          label: 'core-router-1',
+          depth: 0,
+          device_role: 'router',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'core-router-1',
+            mgmt_ip: '10.0.0.1',
+            mac_addresses: ['00:00:5e:00:60:01'],
+          },
+        },
+        {
+          id: 'core-router-2',
+          label: 'core-router-2',
+          depth: 0,
+          device_role: 'router',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'core-router-2',
+            mgmt_ip: '10.0.0.2',
+            mac_addresses: ['00:00:5e:00:60:02'],
+          },
+        },
+        {
+          id: 'dist-switch-a',
+          label: 'dist-switch-a',
+          depth: 1,
+          device_role: 'switch',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'dist-switch-a',
+            mgmt_ip: '10.0.1.2',
+            mac_addresses: ['00:00:5e:00:60:03'],
+          },
+        },
+        {
+          id: 'access-switch-a1',
+          label: 'access-switch-a1',
+          depth: 2,
+          device_role: 'switch',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'access-switch-a1',
+            mgmt_ip: '10.0.1.3',
+            mac_addresses: ['00:00:5e:00:60:04'],
+          },
+        },
+      ],
+      links: [
+        {
+          id: 'core1-dist',
+          local_device_id: 'core-router-1',
+          local_interface: 'eth1',
+          remote_device_id: 'dist-switch-a',
+          remote_interface: 'eth1',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+          speed_bps: 1_000_000_000,
+        },
+        {
+          id: 'core2-dist',
+          local_device_id: 'core-router-2',
+          local_interface: 'eth1',
+          remote_device_id: 'dist-switch-a',
+          remote_interface: 'eth2',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+          speed_bps: 1_000_000_000,
+        },
+        {
+          id: 'dist-access',
+          local_device_id: 'dist-switch-a',
+          local_interface: 'eth3',
+          remote_device_id: 'access-switch-a1',
+          remote_interface: 'eth1',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+          speed_bps: 1_000_000_000,
+        },
+      ],
+      tree_rows: [
+        { id: 'row-core-1', device_id: 'core-router-1', label: 'core-router-1' },
+        { id: 'row-core-2', device_id: 'core-router-2', label: 'core-router-2' },
+        { id: 'row-dist-a', device_id: 'dist-switch-a', label: 'dist-switch-a' },
+        { id: 'row-core-2/row-dist-a#1', device_id: 'dist-switch-a', label: 'dist-switch-a' },
+        { id: 'row-access-a1', device_id: 'access-switch-a1', label: 'access-switch-a1' },
+        {
+          id: 'row-core-2/row-dist-a#1/access-switch-a1#1',
+          device_id: 'access-switch-a1',
+          label: 'access-switch-a1',
+        },
+      ],
+      tree_edges: [
+        { parent_row_id: 'row-core-1', child_row_id: 'row-dist-a' },
+        { parent_row_id: 'row-core-2', child_row_id: 'row-core-2/row-dist-a#1' },
+        { parent_row_id: 'row-dist-a', child_row_id: 'row-access-a1' },
+        {
+          parent_row_id: 'row-core-2/row-dist-a#1',
+          child_row_id: 'row-core-2/row-dist-a#1/access-switch-a1#1',
+        },
+      ],
+      primary_row_by_device: {
+        'core-router-1': 'row-core-1',
+        'core-router-2': 'row-core-2',
+        'dist-switch-a': 'row-dist-a',
+        'access-switch-a1': 'row-access-a1',
+      },
+    };
+    const model = buildTopologyModel(snapshot, new Set());
+
+    expect(model.treeRootEntryIds).toEqual(['tree:row-core-1', 'tree:row-core-2']);
+    expect(model.entryIdsByDeviceId.get('dist-switch-a')).toEqual([
+      'tree:row-dist-a',
+      'tree:row-core-2/row-dist-a#1',
+    ]);
+    expect(model.entryIdsByDeviceId.get('access-switch-a1')).toEqual([
+      'tree:row-access-a1',
+      'tree:row-core-2/row-dist-a#1/access-switch-a1#1',
+    ]);
+    expect(preferredEntryForDevice(model, 'dist-switch-a')).toBe('tree:row-dist-a');
+    expect(preferredRowForDevice(model, 'core-router-2')).toBe('row-core-2');
   });
 
   it('includes VM and container labels in device summaries when guest kind is present', async () => {
