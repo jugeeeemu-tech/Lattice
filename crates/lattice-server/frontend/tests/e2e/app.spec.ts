@@ -125,9 +125,9 @@ async function installApiRoutes(page: Page, currentSnapshotRef: { value: ViewSna
     currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
       discovery_status: {
         state: 'discovering',
-        message: null,
+        message: undefined,
       },
-      next_auto_discovery_at_ms: null,
+      next_auto_discovery_at_ms: undefined,
     });
 
     await route.fulfill({
@@ -405,8 +405,8 @@ test('fits into one screen and keeps the sidebar inside the viewport overlay', a
   await installTestHooks(page);
   const currentSnapshotRef = {
     value: scheduledSnapshot(await loadViewSnapshotFixture('empty'), {
-      discovery_status: { state: 'loading', message: null },
-      next_auto_discovery_at_ms: null,
+      discovery_status: { state: 'loading', message: undefined },
+      next_auto_discovery_at_ms: undefined,
     }),
   };
   await installApiRoutes(page, currentSnapshotRef);
@@ -821,7 +821,7 @@ test('uses the discovery icon for manual refresh, resets to busy state, and surf
   currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
     discovery_status: {
       state: 'ready',
-      message: null,
+      message: undefined,
     },
     next_auto_discovery_at_ms: Date.now() + 60_000,
   });
@@ -903,7 +903,7 @@ test('supports keyboard activation with Enter and Space', async ({ page }) => {
   currentSnapshotRef.value = scheduledSnapshot(currentSnapshotRef.value, {
     discovery_status: {
       state: 'ready',
-      message: null,
+      message: undefined,
     },
     next_auto_discovery_at_ms: Date.now() + 60_000,
   });

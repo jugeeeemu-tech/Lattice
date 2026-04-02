@@ -220,6 +220,7 @@ mod tests {
                 timeout_seconds: 1,
                 retries: 0,
                 concurrent_devices: 1,
+                auto_discovery_interval_seconds: 60,
             },
             SnmpSourceConfig {
                 version: "2c".to_string(),

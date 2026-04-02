@@ -53,7 +53,7 @@ describe('buildTopologyModel', () => {
     expect(Array.from(path.linkIds).sort()).toEqual(['link-pve-guest', 'link-pve-router-trunk']);
     expect(path.guestHighlight).toEqual({
       accessLinkId: 'link-pve-guest',
-      color: guestAttachmentNetworkColor(extendedSnapshot.links[1]?.guest_attachment ?? null),
+      color: guestAttachmentNetworkColor(extendedSnapshot.links[1]?.guest_attachment),
       trunkLinkId: 'link-pve-router-trunk',
     });
   });
