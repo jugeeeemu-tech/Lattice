@@ -1,0 +1,84 @@
+name: Topology Reflection Nightly
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite to run
+        required: true
+        default: nightly
+        type: choice
+        options:
+          - nightly
+          - push
+      scenario:
+        description: Optional single scenario override
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  topology-reflection-nightly:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      PLAYWRIGHT_BROWSER_CHANNEL: chrome
+      TOPOLOGY_REFLECTION_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/topology-reflection
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build output
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24.14.0
+          cache: npm
+          cache-dependency-path: crates/lattice-server/frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: crates/lattice-server/frontend
+        run: npm ci
+
+      - name: Install containerlab
+        run: |
+          curl -sL https://get.containerlab.dev | sudo -E bash
+          containerlab version
+
+      - name: Build lattice-server
+        run: cargo build -p lattice-server
+
+      - name: Run nightly topology reflection suite
+        env:
+          INPUT_SCENARIO: ${{ github.event.inputs.scenario }}
+          INPUT_SUITE: ${{ github.event.inputs.suite }}
+        run: |
+          suite="${INPUT_SUITE:-nightly}"
+          scenario="${INPUT_SCENARIO:-}"
+          ./scripts/topology-reflection/run-suite.sh "${suite}" "${scenario}"
+
+      - name: Upload topology reflection artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-reflection-nightly
+          path: artifacts/topology-reflection
+          if-no-files-found: ignore
+
+      - name: Upload Playwright artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-reflection-nightly-playwright
+          path: |
+            crates/lattice-server/frontend/playwright-report
+            crates/lattice-server/frontend/test-results
+          if-no-files-found: ignore

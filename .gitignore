@@ -2,7 +2,9 @@
 /config/lattice.yaml
 /config/lattice.proxmox.env
 /.tools/
-scripts
+/scripts/*
+!/scripts/topology-reflection/
+!/scripts/topology-reflection/**
 /crates/lattice-server/frontend/node_modules/
 /crates/lattice-server/frontend/dist/
 /crates/lattice-server/frontend/playwright-report/

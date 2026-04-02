@@ -14,7 +14,8 @@
     "generate:types": "cargo test -p lattice-server export_bindings -- --nocapture",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:topology-reflection": "playwright test tests/e2e/topology-reflection.spec.ts"
   },
   "dependencies": {
     "@tabler/icons": "3.41.1",

@@ -1,17 +1,17 @@
-name: CI
+name: Topology Reflection Push
 
 on:
-  pull_request:
   push:
     branches:
       - main
 
 jobs:
-  verify:
+  topology-reflection-push:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
       PLAYWRIGHT_BROWSER_CHANNEL: chrome
+      TOPOLOGY_REFLECTION_ARTIFACT_DIR: ${{ github.workspace }}/artifacts/topology-reflection
 
     steps:
       - name: Check out repository
@@ -34,30 +34,30 @@ jobs:
         working-directory: crates/lattice-server/frontend
         run: npm ci
 
-      - name: Run Rust tests
-        run: cargo test --workspace
+      - name: Install containerlab
+        run: |
+          curl -sL https://get.containerlab.dev | sudo -E bash
+          containerlab version
 
-      - name: Run frontend typecheck
-        working-directory: crates/lattice-server/frontend
-        run: npm run typecheck
+      - name: Build lattice-server
+        run: cargo build -p lattice-server
 
-      - name: Run frontend unit tests
-        working-directory: crates/lattice-server/frontend
-        run: npm run test
+      - name: Run push topology reflection suite
+        run: ./scripts/topology-reflection/run-suite.sh push
 
-      - name: Run frontend build
-        working-directory: crates/lattice-server/frontend
-        run: npm run build
-
-      - name: Run frontend browser tests
-        working-directory: crates/lattice-server/frontend
-        run: npm run test:e2e
+      - name: Upload topology reflection artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: topology-reflection-push
+          path: artifacts/topology-reflection
+          if-no-files-found: ignore
 
       - name: Upload Playwright artifacts
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-artifacts
+          name: topology-reflection-push-playwright
           path: |
             crates/lattice-server/frontend/playwright-report
             crates/lattice-server/frontend/test-results
