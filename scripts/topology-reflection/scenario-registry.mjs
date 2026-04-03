@@ -955,10 +955,72 @@ function buildDisplayExpectedTree(derivedScenario) {
   }
 
   return {
+    parentByLabel,
     primaryRowByLabel,
+    rootLabels,
     rows,
+    sharedChildrenByRoot,
     visibleLabels: [...visibleSet].sort((left, right) => left.localeCompare(right)),
   };
+}
+
+function buildExpectedRelations(displayTree, derivedScenario) {
+  const visibleLabels = displayTree.visibleLabels;
+  const visibleSet = new Set(visibleLabels);
+  const byLabel = Object.fromEntries(
+    visibleLabels.map((label) => [
+      label,
+      {
+        parents: [],
+        peers: [],
+        children: [],
+      },
+    ])
+  );
+
+  const addParentChild = (parentLabel, childLabel) => {
+    if (!visibleSet.has(parentLabel) || !visibleSet.has(childLabel) || parentLabel === childLabel) {
+      return;
+    }
+
+    byLabel[childLabel].parents.push(parentLabel);
+    byLabel[parentLabel].children.push(childLabel);
+  };
+
+  for (const [childLabel, parentLabel] of displayTree.parentByLabel.entries()) {
+    if (parentLabel) {
+      addParentChild(parentLabel, childLabel);
+    }
+  }
+
+  for (const [rootLabel, childLabels] of displayTree.sharedChildrenByRoot.entries()) {
+    for (const childLabel of childLabels) {
+      addParentChild(rootLabel, childLabel);
+    }
+  }
+
+  const rootSet = new Set(displayTree.rootLabels);
+  for (const edge of derivedScenario.derivedLinks) {
+    if (edge.disabled || !rootSet.has(edge.a) || !rootSet.has(edge.b) || edge.a === edge.b) {
+      continue;
+    }
+
+    byLabel[edge.a].peers.push(edge.b);
+    byLabel[edge.b].peers.push(edge.a);
+  }
+
+  return Object.fromEntries(
+    Object.entries(byLabel)
+      .map(([label, relations]) => [
+        label,
+        {
+          parents: [...new Set(relations.parents)].sort((left, right) => left.localeCompare(right)),
+          peers: [...new Set(relations.peers)].sort((left, right) => left.localeCompare(right)),
+          children: [...new Set(relations.children)].sort((left, right) => left.localeCompare(right)),
+        },
+      ])
+      .sort(([left], [right]) => left.localeCompare(right))
+  );
 }
 
 function normalizeLink(leftLabel, leftInterface, rightLabel, rightInterface) {
@@ -1032,14 +1094,18 @@ function buildExpectedSnapshot(derivedScenario) {
   const primaryRowByLabel = Object.fromEntries(
     Object.entries(displayTree.primaryRowByLabel).sort(([left], [right]) => left.localeCompare(right))
   );
+  const rootDeviceLabels = [...displayTree.rootLabels].sort((left, right) => left.localeCompare(right));
+  const deviceRelationsByLabel = buildExpectedRelations(displayTree, derivedScenario);
 
   return {
+    device_relations_by_label: deviceRelationsByLabel,
     devices,
     discovery_status: {
       state: 'ready',
     },
     links,
     primary_row_by_label: primaryRowByLabel,
+    root_device_labels: rootDeviceLabels,
     tree_edges: treeEdges,
     tree_rows: treeRows,
   };

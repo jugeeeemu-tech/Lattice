@@ -103,13 +103,38 @@ function normalizeActual(snapshot) {
     )
   );
 
+  const rootDeviceLabels = sortByKey(
+    (snapshot.root_device_ids ?? []).map((deviceId) => deviceLabelById.get(deviceId) ?? deviceId),
+    (label) => label
+  );
+
+  const deviceRelationsByLabel = sortObject(
+    Object.fromEntries(
+      Object.entries(snapshot.device_relations ?? {}).map(([deviceId, relations]) => {
+        const label = deviceLabelById.get(deviceId) ?? deviceId;
+        const normalizeIds = (ids = []) =>
+          sortByKey(ids.map((id) => deviceLabelById.get(id) ?? id), (entry) => entry);
+        return [
+          label,
+          {
+            children: normalizeIds(relations.children),
+            parents: normalizeIds(relations.parents),
+            peers: normalizeIds(relations.peers),
+          },
+        ];
+      })
+    )
+  );
+
   return {
+    device_relations_by_label: deviceRelationsByLabel,
     devices,
     discovery_status: {
       state: snapshot.discovery_status.state,
     },
     links,
     primary_row_by_label: primaryRowByLabel,
+    root_device_labels: rootDeviceLabels,
     tree_edges: treeEdges,
     tree_rows: treeRows,
   };
