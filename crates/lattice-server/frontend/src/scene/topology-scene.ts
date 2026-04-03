@@ -129,6 +129,270 @@ export function recenterPositionsAroundRootCentroid(
   return positions;
 }
 
+interface RelationLayoutInput {
+  childIdsByDeviceId: Map<string, string[]>;
+  deviceById: Map<string, ViewDevice>;
+  parentIdsByDeviceId: Map<string, string[]>;
+  peerIdsByDeviceId: Map<string, string[]>;
+  primaryChildrenByDeviceId: Map<string, string[]>;
+  primaryParentDeviceById: Map<string, string>;
+  rootDeviceIds: string[];
+}
+
+export interface RelationLayoutGraph {
+  childIdsByDeviceId: Map<string, string[]>;
+  depthByDeviceId: Map<string, number>;
+  parentIdsByDeviceId: Map<string, string[]>;
+  peerIdsByDeviceId: Map<string, string[]>;
+  rootDescendantIdsByRootId: Map<string, string[]>;
+  rootDeviceIds: string[];
+  rootMassByDeviceId: Map<string, number>;
+  rootShareByDeviceId: Map<string, Map<string, number>>;
+}
+
+function sortedVisibleIds(
+  ids: Iterable<string>,
+  visibleIds: Set<string>,
+  deviceById: Map<string, ViewDevice>
+): string[] {
+  return Array.from(new Set(Array.from(ids).filter((deviceId) => visibleIds.has(deviceId)))).sort(
+    (leftId, rightId) =>
+      `${deviceById.get(leftId)?.label ?? leftId}`.localeCompare(
+        `${deviceById.get(rightId)?.label ?? rightId}`
+      )
+  );
+}
+
+function normalizeRootShare(weights: Map<string, number>): Map<string, number> {
+  const total = Array.from(weights.values()).reduce((sum, value) => sum + value, 0);
+  if (total <= 0) {
+    return new Map();
+  }
+
+  return new Map(
+    Array.from(weights.entries())
+      .map(([rootId, value]) => [rootId, value / total] as const)
+      .filter(([, value]) => value > 0.0001)
+      .sort(([leftId], [rightId]) => leftId.localeCompare(rightId))
+  );
+}
+
+export function buildRelationLayoutGraph(
+  visibleDeviceIds: Iterable<string>,
+  model: RelationLayoutInput
+): RelationLayoutGraph {
+  const visibleIds = new Set(visibleDeviceIds);
+  const hasRelationData =
+    model.rootDeviceIds.length > 0 ||
+    Array.from(visibleIds).some((deviceId) => {
+      const parentCount = model.parentIdsByDeviceId.get(deviceId)?.length ?? 0;
+      const childCount = model.childIdsByDeviceId.get(deviceId)?.length ?? 0;
+      const peerCount = model.peerIdsByDeviceId.get(deviceId)?.length ?? 0;
+      return parentCount > 0 || childCount > 0 || peerCount > 0;
+    });
+
+  const childIdsByDeviceId = new Map<string, string[]>();
+  const parentIdsByDeviceId = new Map<string, string[]>();
+  const peerIdsByDeviceId = new Map<string, string[]>();
+
+  for (const deviceId of visibleIds) {
+    if (hasRelationData) {
+      childIdsByDeviceId.set(
+        deviceId,
+        sortedVisibleIds(model.childIdsByDeviceId.get(deviceId) ?? [], visibleIds, model.deviceById)
+      );
+      parentIdsByDeviceId.set(
+        deviceId,
+        sortedVisibleIds(model.parentIdsByDeviceId.get(deviceId) ?? [], visibleIds, model.deviceById)
+      );
+      peerIdsByDeviceId.set(
+        deviceId,
+        sortedVisibleIds(model.peerIdsByDeviceId.get(deviceId) ?? [], visibleIds, model.deviceById)
+      );
+    } else {
+      childIdsByDeviceId.set(
+        deviceId,
+        sortedVisibleIds(
+          model.primaryChildrenByDeviceId.get(deviceId) ?? [],
+          visibleIds,
+          model.deviceById
+        )
+      );
+      const parentId = model.primaryParentDeviceById.get(deviceId);
+      parentIdsByDeviceId.set(
+        deviceId,
+        parentId && visibleIds.has(parentId) ? [parentId] : []
+      );
+      peerIdsByDeviceId.set(deviceId, []);
+    }
+  }
+
+  const roots = hasRelationData
+    ? sortedVisibleIds(model.rootDeviceIds, visibleIds, model.deviceById)
+    : sortedVisibleIds(
+        Array.from(visibleIds).filter((deviceId) => (parentIdsByDeviceId.get(deviceId)?.length ?? 0) === 0),
+        visibleIds,
+        model.deviceById
+      );
+
+  if (roots.length === 0) {
+    roots.push(
+      ...sortedVisibleIds(
+        Array.from(visibleIds).filter((deviceId) => (parentIdsByDeviceId.get(deviceId)?.length ?? 0) === 0),
+        visibleIds,
+        model.deviceById
+      )
+    );
+  }
+
+  const depthByDeviceId = new Map<string, number>();
+  const queue = roots.map((deviceId) => ({ depth: 0, deviceId }));
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current) {
+      break;
+    }
+    const existingDepth = depthByDeviceId.get(current.deviceId);
+    if (existingDepth !== undefined && existingDepth <= current.depth) {
+      continue;
+    }
+
+    depthByDeviceId.set(current.deviceId, current.depth);
+    for (const childId of childIdsByDeviceId.get(current.deviceId) ?? []) {
+      queue.push({ depth: current.depth + 1, deviceId: childId });
+    }
+  }
+
+  const unresolvedIds = sortedVisibleIds(
+    Array.from(visibleIds).filter((deviceId) => !depthByDeviceId.has(deviceId)),
+    visibleIds,
+    model.deviceById
+  );
+  for (const deviceId of unresolvedIds) {
+    depthByDeviceId.set(deviceId, 0);
+    if (!roots.includes(deviceId)) {
+      roots.push(deviceId);
+    }
+  }
+
+  const rootShareByDeviceId = new Map<string, Map<string, number>>();
+  for (const rootId of roots) {
+    rootShareByDeviceId.set(rootId, new Map([[rootId, 1]]));
+  }
+
+  const devicesByDepth = Array.from(depthByDeviceId.entries())
+    .sort(
+      ([leftId, leftDepth], [rightId, rightDepth]) =>
+        leftDepth - rightDepth ||
+        `${model.deviceById.get(leftId)?.label ?? leftId}`.localeCompare(
+          `${model.deviceById.get(rightId)?.label ?? rightId}`
+        )
+    )
+    .map(([deviceId]) => deviceId);
+
+  for (const deviceId of devicesByDepth) {
+    if (rootShareByDeviceId.has(deviceId)) {
+      continue;
+    }
+
+    const parentIds = parentIdsByDeviceId
+      .get(deviceId)
+      ?.filter((parentId) => rootShareByDeviceId.has(parentId)) ?? [];
+    if (parentIds.length === 0) {
+      rootShareByDeviceId.set(deviceId, new Map());
+      continue;
+    }
+
+    const combined = new Map<string, number>();
+    for (const parentId of parentIds) {
+      for (const [rootId, share] of rootShareByDeviceId.get(parentId) ?? []) {
+        combined.set(rootId, (combined.get(rootId) ?? 0) + share);
+      }
+    }
+    rootShareByDeviceId.set(deviceId, normalizeRootShare(combined));
+  }
+
+  const rootDescendantIdsByRootId = new Map<string, string[]>(
+    roots.map((rootId) => [rootId, [] as string[]])
+  );
+  const rootMassByDeviceId = new Map<string, number>(roots.map((rootId) => [rootId, 0]));
+
+  for (const deviceId of devicesByDepth) {
+    const childCount = childIdsByDeviceId.get(deviceId)?.length ?? 0;
+    const peerCount = peerIdsByDeviceId.get(deviceId)?.length ?? 0;
+    const deviceWeight = 1 + childCount * 0.45 + peerCount * 0.2;
+    for (const [rootId, share] of rootShareByDeviceId.get(deviceId) ?? []) {
+      const descendantIds = rootDescendantIdsByRootId.get(rootId) ?? [];
+      descendantIds.push(deviceId);
+      rootDescendantIdsByRootId.set(rootId, descendantIds);
+      rootMassByDeviceId.set(rootId, (rootMassByDeviceId.get(rootId) ?? 0) + deviceWeight * share);
+    }
+  }
+
+  for (const [rootId, descendantIds] of rootDescendantIdsByRootId.entries()) {
+    rootDescendantIdsByRootId.set(
+      rootId,
+      sortedVisibleIds(descendantIds, visibleIds, model.deviceById)
+    );
+  }
+
+  return {
+    childIdsByDeviceId,
+    depthByDeviceId,
+    parentIdsByDeviceId,
+    peerIdsByDeviceId,
+    rootDescendantIdsByRootId,
+    rootDeviceIds: roots,
+    rootMassByDeviceId,
+    rootShareByDeviceId,
+  };
+}
+
+export function buildRelationRootAnchors(
+  graph: RelationLayoutGraph
+): Map<string, Vector3> {
+  const roots = graph.rootDeviceIds;
+  const anchors = new Map<string, Vector3>();
+  if (roots.length === 0) {
+    return anchors;
+  }
+
+  if (roots.length === 1) {
+    anchors.set(roots[0], new Vector3(0, 0, 0));
+    return anchors;
+  }
+
+  const membershipCountByDeviceId = new Map<string, number>();
+  for (const descendantIds of graph.rootDescendantIdsByRootId.values()) {
+    for (const deviceId of descendantIds) {
+      membershipCountByDeviceId.set(deviceId, (membershipCountByDeviceId.get(deviceId) ?? 0) + 1);
+    }
+  }
+
+  const sharedDeviceCount = Array.from(membershipCountByDeviceId.values()).filter((count) => count > 1).length;
+  const totalMass = roots.reduce((sum, rootId) => sum + (graph.rootMassByDeviceId.get(rootId) ?? 1), 0);
+  const sharedRatio =
+    membershipCountByDeviceId.size > 0 ? sharedDeviceCount / membershipCountByDeviceId.size : 0;
+
+  if (roots.length === 2) {
+    const spacing = Math.max(5.5, Math.min(9.5, 7.8 + Math.sqrt(totalMass) * 0.18 - sharedRatio * 2.2));
+    anchors.set(roots[0], new Vector3(-spacing / 2, 0, 0));
+    anchors.set(roots[1], new Vector3(spacing / 2, 0, 0));
+    return anchors;
+  }
+
+  const radius = Math.max(5.8, Math.min(10.5, 5.8 + Math.sqrt(totalMass) * 0.18 - sharedRatio * 1.4));
+  for (let index = 0; index < roots.length; index += 1) {
+    const angle = (Math.PI * 2 * index) / roots.length - Math.PI / 2;
+    anchors.set(
+      roots[index],
+      new Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius)
+    );
+  }
+
+  return anchors;
+}
+
 export interface DeviceScreenAnchor {
   visibility: 'behind' | 'offscreen' | 'visible';
   x: number;
@@ -1262,52 +1526,25 @@ export class TopologySceneAdapter {
 
     const visibleIds = new Set(devices.map((device) => device.id));
     const deviceById = new Map(devices.map((device) => [device.id, device]));
-    const childrenByDeviceId = new Map(
-      Array.from(visibleIds, (deviceId) => [deviceId, [] as string[]])
-    );
-    const roots: string[] = [];
-    const rootSet = new Set<string>();
-    const backendRootIds = state.model.rootDeviceIds.filter((deviceId) => visibleIds.has(deviceId));
-
-    for (const device of devices) {
-      const parentId = state.model.primaryParentDeviceById.get(device.id);
-      if (parentId && visibleIds.has(parentId)) {
-        const children = childrenByDeviceId.get(parentId) ?? [];
-        children.push(device.id);
-        childrenByDeviceId.set(parentId, children);
-      }
-    }
-
-    if (backendRootIds.length > 0) {
-      roots.push(...backendRootIds);
-    } else {
-      for (const device of devices) {
-        const parentId = state.model.primaryParentDeviceById.get(device.id);
-        if (!parentId || !visibleIds.has(parentId)) {
-          roots.push(device.id);
-        }
-      }
-    }
-
-    for (const [deviceId, childIds] of childrenByDeviceId) {
-      childIds.sort((leftId, rightId) =>
-        `${deviceById.get(leftId)?.label ?? ''}`.localeCompare(`${deviceById.get(rightId)?.label ?? ''}`)
-      );
-      childrenByDeviceId.set(deviceId, childIds);
-    }
-    roots.sort((leftId, rightId) =>
-      `${deviceById.get(leftId)?.label ?? ''}`.localeCompare(`${deviceById.get(rightId)?.label ?? ''}`)
-    );
-    roots.forEach((deviceId) => rootSet.add(deviceId));
+    const layoutGraph = buildRelationLayoutGraph(visibleIds, {
+      childIdsByDeviceId: state.model.childIdsByDeviceId,
+      deviceById: state.model.deviceById,
+      parentIdsByDeviceId: state.model.parentIdsByDeviceId,
+      peerIdsByDeviceId: state.model.peerIdsByDeviceId,
+      primaryChildrenByDeviceId: state.model.primaryChildrenByDeviceId,
+      primaryParentDeviceById: state.model.primaryParentDeviceById,
+      rootDeviceIds: state.model.rootDeviceIds,
+    });
+    const childrenByDeviceId = layoutGraph.childIdsByDeviceId;
+    const parentsByDeviceId = layoutGraph.parentIdsByDeviceId;
+    const roots = layoutGraph.rootDeviceIds;
+    const rootSet = new Set(roots);
 
     const depthSpacing = 5.6;
-    const childRingStart = 4.2;
-    const childRingStep = 2.6;
-    const rootRingStart = 10.0;
-    const rootRingStep = 6.0;
     const slotSpacing = 2.8;
-    const childClusterPadding = 0.8;
-    const relaxIterations = 8;
+    const groupRingStart = 1.7;
+    const groupRingStep = 1.7;
+    const relaxIterations = 10;
     const maxStep = 0.22;
     const anchorByDeviceId = new Map<string, Vector3>();
 
@@ -1332,7 +1569,7 @@ export class TopologySceneAdapter {
         for (let index = 0; index < ringIds.length; index += 1) {
           const deviceId = ringIds[index];
           const childIds = childrenByDeviceId.get(deviceId) ?? [];
-          const radius = baseRadius + (childIds.length > 0 ? childClusterPadding : 0);
+          const radius = baseRadius + (childIds.length > 0 ? 0.55 : 0);
           const angle = startAngle + index * angleStep;
           anchorByDeviceId.set(
             deviceId,
@@ -1348,39 +1585,100 @@ export class TopologySceneAdapter {
         ringIndex += 1;
       }
     };
-
-    const placeSubtree = (deviceId: string) => {
-      const anchor = anchorByDeviceId.get(deviceId);
-      if (!anchor) {
-        return;
-      }
-
-      const childIds = childrenByDeviceId.get(deviceId) ?? [];
-      if (childIds.length === 0) {
-        return;
-      }
-
-      placeConcentricGroup(
-        childIds,
-        anchor,
-        anchor.y - depthSpacing,
-        deviceId,
-        childRingStart,
-        childRingStep
-      );
-      for (const childId of childIds) {
-        placeSubtree(childId);
-      }
-    };
-
-    if (roots.length === 1) {
-      anchorByDeviceId.set(roots[0], new Vector3(0, 0, 0));
-    } else if (roots.length > 1) {
-      placeConcentricGroup(roots, new Vector3(0, 0, 0), 0, 'roots', rootRingStart, rootRingStep);
+    const rootAnchors = buildRelationRootAnchors(layoutGraph);
+    for (const [deviceId, anchor] of rootAnchors.entries()) {
+      anchorByDeviceId.set(deviceId, anchor.clone());
     }
 
-    for (const rootId of roots) {
-      placeSubtree(rootId);
+    const devicesByDepth = new Map<number, string[]>();
+    for (const [deviceId, depth] of layoutGraph.depthByDeviceId.entries()) {
+      if (depth <= 0) {
+        continue;
+      }
+      const current = devicesByDepth.get(depth) ?? [];
+      current.push(deviceId);
+      devicesByDepth.set(depth, current);
+    }
+
+    const sortedDepths = Array.from(devicesByDepth.keys()).sort((left, right) => left - right);
+    for (const depth of sortedDepths) {
+      const layerIds = devicesByDepth.get(depth) ?? [];
+      const groups = new Map<string, { center: Vector3; deviceIds: string[] }>();
+
+      for (const deviceId of layerIds) {
+        const parentIds = parentsByDeviceId.get(deviceId) ?? [];
+        const parentAnchors = parentIds
+          .map((parentId) => anchorByDeviceId.get(parentId))
+          .filter((anchor): anchor is Vector3 => Boolean(anchor));
+
+        const rootShares = layoutGraph.rootShareByDeviceId.get(deviceId) ?? new Map();
+        const weightedRootCenter = new Vector3();
+        let weightedTotal = 0;
+        for (const [rootId, share] of rootShares.entries()) {
+          const rootAnchor = rootAnchors.get(rootId);
+          if (!rootAnchor) {
+            continue;
+          }
+          weightedRootCenter.add(rootAnchor.clone().multiplyScalar(share));
+          weightedTotal += share;
+        }
+        if (weightedTotal > 0) {
+          weightedRootCenter.divideScalar(weightedTotal);
+        }
+
+        const parentCenter = new Vector3();
+        if (parentAnchors.length > 0) {
+          for (const anchor of parentAnchors) {
+            parentCenter.add(anchor);
+          }
+          parentCenter.divideScalar(parentAnchors.length);
+        } else {
+          parentCenter.copy(weightedRootCenter);
+        }
+
+        const center =
+          weightedTotal > 0 && parentAnchors.length > 0
+            ? parentCenter.clone().lerp(weightedRootCenter, 0.25)
+            : parentCenter.clone();
+        center.y = -depth * depthSpacing;
+
+        const signatureParts = [
+          `depth:${depth}`,
+          `parents:${parentIds.join('|')}`,
+          `roots:${Array.from(rootShares.keys()).sort().join('|')}`,
+        ];
+        const signature = signatureParts.join('::');
+        const group = groups.get(signature) ?? { center: new Vector3(), deviceIds: [] };
+        group.center.add(center);
+        group.deviceIds.push(deviceId);
+        groups.set(signature, group);
+      }
+
+      const sortedGroups = Array.from(groups.entries()).sort(([leftKey], [rightKey]) =>
+        leftKey.localeCompare(rightKey)
+      );
+      for (const [signature, group] of sortedGroups) {
+        group.center.divideScalar(Math.max(group.deviceIds.length, 1));
+        group.deviceIds.sort((leftId, rightId) =>
+          `${deviceById.get(leftId)?.label ?? leftId}`.localeCompare(
+            `${deviceById.get(rightId)?.label ?? rightId}`
+          )
+        );
+
+        if (group.deviceIds.length === 1) {
+          anchorByDeviceId.set(group.deviceIds[0], group.center.clone());
+          continue;
+        }
+
+        placeConcentricGroup(
+          group.deviceIds,
+          group.center,
+          group.center.y,
+          signature,
+          groupRingStart,
+          groupRingStep
+        );
+      }
     }
 
     const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
@@ -1442,7 +1740,7 @@ export class TopologySceneAdapter {
         if (!anchor || !position || !force) {
           continue;
         }
-        const anchorStrength = rootSet.has(deviceId) ? 0.2 : 0.16;
+        const anchorStrength = rootSet.has(deviceId) ? 0.24 : 0.18;
         force.x += (anchor.x - position.x) * anchorStrength;
         force.z += (anchor.z - position.z) * anchorStrength;
       }

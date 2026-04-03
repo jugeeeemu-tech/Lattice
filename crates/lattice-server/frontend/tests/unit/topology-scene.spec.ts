@@ -1,8 +1,10 @@
 import { Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
-import type { ViewLink } from '../../src/generated';
+import type { ViewDevice, ViewLink } from '../../src/generated';
 import {
+  buildRelationLayoutGraph,
+  buildRelationRootAnchors,
   computeParallelLinkOffsets,
   recenterPositionsAroundRootCentroid,
 } from '../../src/scene/topology-scene';
@@ -88,5 +90,93 @@ describe('recenterPositionsAroundRootCentroid', () => {
     expect(childA?.z).toBeCloseTo(-4);
     expect(childB?.x).toBeCloseTo(8);
     expect(childB?.z).toBeCloseTo(4);
+  });
+});
+
+describe('buildRelationLayoutGraph', () => {
+  function device(id: string, label: string): ViewDevice {
+    return {
+      id,
+      label,
+      depth: 0,
+      deployment_type: 'unknown',
+      device_role: label.includes('router') ? 'router' : label.includes('switch') ? 'switch' : 'server',
+      guest_kind: undefined,
+      host_label: undefined,
+      identity_keys: {
+        chassis_id: undefined,
+        mac_addresses: [],
+        mgmt_ip: undefined,
+        sys_name: label,
+      },
+      upstream_interface: undefined,
+    };
+  }
+
+  it('distributes shared descendants across both roots', () => {
+    const deviceById = new Map<string, ViewDevice>([
+      ['core-1', device('core-1', 'core-router-1')],
+      ['core-2', device('core-2', 'core-router-2')],
+      ['dist-a', device('dist-a', 'dist-switch-a')],
+      ['access-a1', device('access-a1', 'access-switch-a1')],
+      ['app-1', device('app-1', 'app-server-01')],
+    ]);
+
+    const graph = buildRelationLayoutGraph(
+      ['core-1', 'core-2', 'dist-a', 'access-a1', 'app-1'],
+      {
+        childIdsByDeviceId: new Map([
+          ['core-1', ['dist-a']],
+          ['core-2', ['dist-a']],
+          ['dist-a', ['access-a1']],
+          ['access-a1', ['app-1']],
+          ['app-1', []],
+        ]),
+        deviceById,
+        parentIdsByDeviceId: new Map([
+          ['core-1', []],
+          ['core-2', []],
+          ['dist-a', ['core-1', 'core-2']],
+          ['access-a1', ['dist-a']],
+          ['app-1', ['access-a1']],
+        ]),
+        peerIdsByDeviceId: new Map([
+          ['core-1', ['core-2']],
+          ['core-2', ['core-1']],
+          ['dist-a', []],
+          ['access-a1', []],
+          ['app-1', []],
+        ]),
+        primaryChildrenByDeviceId: new Map(),
+        primaryParentDeviceById: new Map(),
+        rootDeviceIds: ['core-1', 'core-2'],
+      }
+    );
+
+    expect(graph.rootDeviceIds).toEqual(['core-1', 'core-2']);
+    expect(graph.depthByDeviceId.get('dist-a')).toBe(1);
+    expect(graph.depthByDeviceId.get('access-a1')).toBe(2);
+    expect(graph.rootDescendantIdsByRootId.get('core-1')).toEqual([
+      'access-a1',
+      'app-1',
+      'core-1',
+      'dist-a',
+    ]);
+    expect(graph.rootDescendantIdsByRootId.get('core-2')).toEqual([
+      'access-a1',
+      'app-1',
+      'core-2',
+      'dist-a',
+    ]);
+
+    const distShares = graph.rootShareByDeviceId.get('dist-a');
+    expect(distShares?.get('core-1')).toBeCloseTo(0.5);
+    expect(distShares?.get('core-2')).toBeCloseTo(0.5);
+
+    const anchors = buildRelationRootAnchors(graph);
+    expect(anchors.get('core-1')?.x).toBeCloseTo(-(anchors.get('core-2')?.x ?? 0));
+    expect(anchors.get('core-1')?.z).toBeCloseTo(0);
+    expect(anchors.get('core-2')?.z).toBeCloseTo(0);
+    expect(Math.abs(anchors.get('core-1')?.x ?? 0)).toBeLessThan(5);
   });
 });
