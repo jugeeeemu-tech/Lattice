@@ -69,8 +69,11 @@ export interface HoverCardState {
 }
 
 export interface DerivedTopologyModel {
+  childIdsByDeviceId: Map<string, string[]>;
   deviceById: Map<string, ViewDevice>;
   entryIdsByDeviceId: Map<string, string[]>;
+  parentIdsByDeviceId: Map<string, string[]>;
+  peerIdsByDeviceId: Map<string, string[]>;
   primaryChildrenByDeviceId: Map<string, string[]>;
   primaryEntryByDevice: Map<string, string>;
   primaryParentDeviceById: Map<string, string>;
@@ -81,6 +84,7 @@ export interface DerivedTopologyModel {
   rowDepthById: Map<string, number>;
   rowIdsByDeviceId: Map<string, string[]>;
   rowParentById: Map<string, string>;
+  rootDeviceIds: string[];
   sceneDeviceIds: Set<string>;
   sidebarChildrenById: Map<string, string[]>;
   sidebarEntryById: Map<string, SidebarEntry>;
@@ -88,6 +92,15 @@ export interface DerivedTopologyModel {
   treeRootEntryIds: string[];
   visibleLinkIds: Set<string>;
   visibleRowIds: Set<string>;
+}
+
+function sortDeviceIdsByLabel(
+  deviceIds: string[],
+  deviceById: Map<string, ViewDevice>
+): string[] {
+  return [...deviceIds].sort((leftId, rightId) =>
+    compareByLabel(deviceById.get(leftId), deviceById.get(rightId))
+  );
 }
 
 function normalizeText(value: string | null | undefined, fallback = ''): string {
@@ -280,6 +293,63 @@ function buildPrimaryDeviceTree(
   return { primaryChildrenByDeviceId, primaryParentDeviceById };
 }
 
+function buildRelationsModel(
+  snapshot: ViewSnapshot,
+  rowModel: Pick<DerivedTopologyModel, 'deviceById' | 'renderableDeviceIds'>
+): Pick<
+  DerivedTopologyModel,
+  'childIdsByDeviceId' | 'parentIdsByDeviceId' | 'peerIdsByDeviceId' | 'rootDeviceIds'
+> {
+  const childIdsByDeviceId = new Map<string, string[]>();
+  const parentIdsByDeviceId = new Map<string, string[]>();
+  const peerIdsByDeviceId = new Map<string, string[]>();
+
+  for (const deviceId of rowModel.renderableDeviceIds) {
+    childIdsByDeviceId.set(deviceId, []);
+    parentIdsByDeviceId.set(deviceId, []);
+    peerIdsByDeviceId.set(deviceId, []);
+  }
+
+  for (const [deviceId, relations] of Object.entries(snapshot.device_relations ?? {})) {
+    if (!rowModel.renderableDeviceIds.has(deviceId)) {
+      continue;
+    }
+    childIdsByDeviceId.set(
+      deviceId,
+      sortDeviceIdsByLabel(
+        (relations.children ?? []).filter((childId) => rowModel.renderableDeviceIds.has(childId)),
+        rowModel.deviceById
+      )
+    );
+    parentIdsByDeviceId.set(
+      deviceId,
+      sortDeviceIdsByLabel(
+        (relations.parents ?? []).filter((parentId) => rowModel.renderableDeviceIds.has(parentId)),
+        rowModel.deviceById
+      )
+    );
+    peerIdsByDeviceId.set(
+      deviceId,
+      sortDeviceIdsByLabel(
+        (relations.peers ?? []).filter((peerId) => rowModel.renderableDeviceIds.has(peerId)),
+        rowModel.deviceById
+      )
+    );
+  }
+
+  const rootDeviceIds = sortDeviceIdsByLabel(
+    (snapshot.root_device_ids ?? []).filter((deviceId) => rowModel.renderableDeviceIds.has(deviceId)),
+    rowModel.deviceById
+  );
+
+  return {
+    childIdsByDeviceId,
+    parentIdsByDeviceId,
+    peerIdsByDeviceId,
+    rootDeviceIds,
+  };
+}
+
 function buildSidebarModel(
   snapshot: ViewSnapshot,
   rowModel: Pick<
@@ -445,6 +515,7 @@ export function buildTopologyModel(
   collapsedEntryIds: ReadonlySet<string>
 ): DerivedTopologyModel {
   const rowModel = buildRowModel(snapshot);
+  const relationsModel = buildRelationsModel(snapshot, rowModel);
   const primaryTree = buildPrimaryDeviceTree(rowModel);
   const sidebarModel = buildSidebarModel(snapshot, rowModel);
   const visibleRowIds = computeVisibleRowIds(
@@ -473,6 +544,7 @@ export function buildTopologyModel(
   );
 
   return {
+    ...relationsModel,
     ...primaryTree,
     ...rowModel,
     ...sidebarModel,

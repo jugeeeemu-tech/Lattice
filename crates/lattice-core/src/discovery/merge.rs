@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use chrono::Utc;
 
@@ -7,7 +7,10 @@ use crate::{
     proxmox::attach_proxmox_uplinks,
 };
 
-use super::{DiscoveryResult, DiscoveryTree, DiscoveryTreeNode, SourceResult};
+use super::{
+    DeviceRelations, DiscoveryRelations, DiscoveryResult, DiscoveryTree, DiscoveryTreeNode,
+    SourceResult,
+};
 
 pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
     let mut store = GraphStore::default();
@@ -25,11 +28,12 @@ pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
     } else {
         preserve_source_tree_base(&topology, merged_source_nodes)
     };
-    let tree = infer_display_tree(&topology, base_tree);
+    let (tree, relations) = infer_display_tree(&topology, base_tree);
 
     DiscoveryResult {
         topology,
         tree,
+        relations,
         discovered_at: Utc::now(),
     }
 }
@@ -224,9 +228,12 @@ fn preserve_source_tree_base(
     DiscoveryTree { nodes }
 }
 
-fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> DiscoveryTree {
+fn infer_display_tree(
+    topology: &Topology,
+    base_tree: DiscoveryTree,
+) -> (DiscoveryTree, DiscoveryRelations) {
     if base_tree.nodes.is_empty() {
-        return base_tree;
+        return (base_tree, DiscoveryRelations::default());
     }
 
     let visible_device_ids = base_tree
@@ -326,9 +333,106 @@ fn infer_display_tree(topology: &Topology, base_tree: DiscoveryTree) -> Discover
             .cmp(&right.depth)
             .then_with(|| left.row_id.cmp(&right.row_id))
     });
-    DiscoveryTree {
-        nodes: emitted_nodes,
+    let relations = build_display_relations(
+        topology,
+        &visible_device_ids,
+        &roots,
+        &parent_by_device,
+        &shared_children_by_root,
+    );
+    (
+        DiscoveryTree {
+            nodes: emitted_nodes,
+        },
+        relations,
+    )
+}
+
+fn build_display_relations(
+    topology: &Topology,
+    visible_device_ids: &HashSet<String>,
+    root_ids: &[String],
+    parent_by_device: &HashMap<String, String>,
+    shared_children_by_root: &HashMap<String, Vec<String>>,
+) -> DiscoveryRelations {
+    let mut by_device = visible_device_ids
+        .iter()
+        .cloned()
+        .map(|device_id| (device_id, DeviceRelations::default()))
+        .collect::<HashMap<_, _>>();
+
+    let mut add_parent_child = |parent_id: &str, child_id: &str| {
+        if !visible_device_ids.contains(parent_id) || !visible_device_ids.contains(child_id) {
+            return;
+        }
+        if parent_id == child_id {
+            return;
+        }
+
+        by_device
+            .entry(child_id.to_string())
+            .or_default()
+            .parents
+            .push(parent_id.to_string());
+        by_device
+            .entry(parent_id.to_string())
+            .or_default()
+            .children
+            .push(child_id.to_string());
+    };
+
+    for (device_id, parent_id) in parent_by_device {
+        add_parent_child(parent_id, device_id);
     }
+
+    for (root_id, child_ids) in shared_children_by_root {
+        for child_id in child_ids {
+            add_parent_child(root_id, child_id);
+        }
+    }
+
+    let root_id_set = root_ids.iter().cloned().collect::<HashSet<_>>();
+    for link in topology
+        .links
+        .iter()
+        .filter(|link| link.protocol == LinkProtocol::Lldp)
+    {
+        if !root_id_set.contains(&link.local_device_id) || !root_id_set.contains(&link.remote_device_id)
+        {
+            continue;
+        }
+        if link.local_device_id == link.remote_device_id {
+            continue;
+        }
+
+        by_device
+            .entry(link.local_device_id.clone())
+            .or_default()
+            .peers
+            .push(link.remote_device_id.clone());
+        by_device
+            .entry(link.remote_device_id.clone())
+            .or_default()
+            .peers
+            .push(link.local_device_id.clone());
+    }
+
+    for relations in by_device.values_mut() {
+        relations.parents = sort_relation_ids(topology, std::mem::take(&mut relations.parents));
+        relations.children = sort_relation_ids(topology, std::mem::take(&mut relations.children));
+        relations.peers = sort_relation_ids(topology, std::mem::take(&mut relations.peers));
+    }
+
+    DiscoveryRelations {
+        root_device_ids: sort_relation_ids(topology, root_ids.to_vec()),
+        by_device,
+    }
+}
+
+fn sort_relation_ids(topology: &Topology, device_ids: Vec<String>) -> Vec<String> {
+    let mut deduped = device_ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+    deduped.sort_by(|left, right| device_sort_key(topology, left).cmp(&device_sort_key(topology, right)));
+    deduped
 }
 
 fn infer_additional_root_routers(

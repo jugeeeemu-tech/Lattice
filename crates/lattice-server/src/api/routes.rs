@@ -246,6 +246,7 @@ mod tests {
             Ok(DiscoveryResult {
                 topology: Topology::default(),
                 tree: DiscoveryTree::default(),
+                relations: lattice_core::DiscoveryRelations::default(),
                 discovered_at: chrono::Utc::now(),
             })
         }

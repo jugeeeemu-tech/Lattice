@@ -7,6 +7,7 @@ export type { IdentityKeys } from './IdentityKeys';
 export type { TreeEdge } from './TreeEdge';
 export type { TreeRow } from './TreeRow';
 export type { ViewDevice } from './ViewDevice';
+export type { ViewDeviceRelations } from './ViewDeviceRelations';
 export type { ViewGuestAttachment } from './ViewGuestAttachment';
 export type { ViewLink } from './ViewLink';
 export type { ViewSnapshot } from './ViewSnapshot';

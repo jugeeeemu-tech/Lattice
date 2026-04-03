@@ -7,7 +7,8 @@ mod source;
 pub use engine::DiscoveryEngine;
 pub use merge::merge_source_results;
 pub use result::{
-    DiscoveryResult, DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode, SourceResult,
+    DeviceRelations, DiscoveryRelations, DiscoveryResult, DiscoverySourceOutput, DiscoveryTree,
+    DiscoveryTreeNode, SourceResult,
 };
 pub use snmp_source::SnmpDiscoverySource;
 pub use source::{build_discovery_sources, DiscoverySource};

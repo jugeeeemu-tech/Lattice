@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
@@ -19,6 +21,24 @@ pub struct DiscoveryTree {
     pub nodes: Vec<DiscoveryTreeNode>,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DeviceRelations {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DiscoveryRelations {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_device_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub by_device: HashMap<String, DeviceRelations>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DiscoverySourceOutput {
     pub topology: Topology,
@@ -31,6 +51,8 @@ pub type SourceResult = DiscoverySourceOutput;
 pub struct DiscoveryResult {
     pub topology: Topology,
     pub tree: DiscoveryTree,
+    #[serde(default)]
+    pub relations: DiscoveryRelations,
     pub discovered_at: DateTime<Utc>,
 }
 
@@ -53,6 +75,7 @@ mod tests {
                     depth: 0,
                 }],
             },
+            relations: DiscoveryRelations::default(),
             discovered_at: Utc::now(),
         };
 

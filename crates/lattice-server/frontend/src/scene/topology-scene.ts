@@ -99,6 +99,36 @@ function hash01(input: string): number {
   return ((hash >>> 0) % 100000) / 100000;
 }
 
+export function recenterPositionsAroundRootCentroid(
+  positions: Map<string, Vector3>,
+  rootIds: Iterable<string>
+): Map<string, Vector3> {
+  const roots = Array.from(rootIds)
+    .map((rootId) => positions.get(rootId))
+    .filter((position): position is Vector3 => Boolean(position));
+
+  if (roots.length <= 1) {
+    return positions;
+  }
+
+  const centroid = new Vector3();
+  for (const position of roots) {
+    centroid.add(position);
+  }
+  centroid.divideScalar(roots.length);
+
+  if (Math.abs(centroid.x) < 0.0001 && Math.abs(centroid.z) < 0.0001) {
+    return positions;
+  }
+
+  for (const position of positions.values()) {
+    position.x -= centroid.x;
+    position.z -= centroid.z;
+  }
+
+  return positions;
+}
+
 export interface DeviceScreenAnchor {
   visibility: 'behind' | 'offscreen' | 'visible';
   x: number;
@@ -1237,6 +1267,7 @@ export class TopologySceneAdapter {
     );
     const roots: string[] = [];
     const rootSet = new Set<string>();
+    const backendRootIds = state.model.rootDeviceIds.filter((deviceId) => visibleIds.has(deviceId));
 
     for (const device of devices) {
       const parentId = state.model.primaryParentDeviceById.get(device.id);
@@ -1244,8 +1275,17 @@ export class TopologySceneAdapter {
         const children = childrenByDeviceId.get(parentId) ?? [];
         children.push(device.id);
         childrenByDeviceId.set(parentId, children);
-      } else {
-        roots.push(device.id);
+      }
+    }
+
+    if (backendRootIds.length > 0) {
+      roots.push(...backendRootIds);
+    } else {
+      for (const device of devices) {
+        const parentId = state.model.primaryParentDeviceById.get(device.id);
+        if (!parentId || !visibleIds.has(parentId)) {
+          roots.push(device.id);
+        }
       }
     }
 
@@ -1417,6 +1457,8 @@ export class TopologySceneAdapter {
         position.z += clampMagnitude(force.z, maxStep);
       }
     }
+
+    recenterPositionsAroundRootCentroid(positions, roots);
 
     return new Map(
       Array.from(positions.entries(), ([deviceId, position]) => {

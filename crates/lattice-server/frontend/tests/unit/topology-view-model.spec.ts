@@ -299,6 +299,17 @@ describe('buildTopologyModel', () => {
         { parent_row_id: 'row-dist', child_row_id: 'row-access' },
         { parent_row_id: 'row-dist', child_row_id: 'row-app' },
       ],
+      root_device_ids: ['core-router'],
+      device_relations: {
+        'core-router': { parents: [], peers: [], children: ['dist-switch'] },
+        'dist-switch': {
+          parents: ['core-router'],
+          peers: [],
+          children: ['access-switch', 'app-server'],
+        },
+        'access-switch': { parents: ['dist-switch'], peers: [], children: [] },
+        'app-server': { parents: ['dist-switch'], peers: [], children: [] },
+      },
       primary_row_by_device: {
         'core-router': 'row-core',
         'dist-switch': 'row-dist',
@@ -439,6 +450,29 @@ describe('buildTopologyModel', () => {
           child_row_id: 'row-core-2/row-dist-a#1/access-switch-a1#1',
         },
       ],
+      root_device_ids: ['core-router-1', 'core-router-2'],
+      device_relations: {
+        'core-router-1': {
+          parents: [],
+          peers: ['core-router-2'],
+          children: ['dist-switch-a'],
+        },
+        'core-router-2': {
+          parents: [],
+          peers: ['core-router-1'],
+          children: ['dist-switch-a'],
+        },
+        'dist-switch-a': {
+          parents: ['core-router-1', 'core-router-2'],
+          peers: [],
+          children: ['access-switch-a1'],
+        },
+        'access-switch-a1': {
+          parents: ['dist-switch-a'],
+          peers: [],
+          children: [],
+        },
+      },
       primary_row_by_device: {
         'core-router-1': 'row-core-1',
         'core-router-2': 'row-core-2',
@@ -449,6 +483,13 @@ describe('buildTopologyModel', () => {
     const model = buildTopologyModel(snapshot, new Set());
 
     expect(model.treeRootEntryIds).toEqual(['tree:row-core-1', 'tree:row-core-2']);
+    expect(model.rootDeviceIds).toEqual(['core-router-1', 'core-router-2']);
+    expect(model.peerIdsByDeviceId.get('core-router-1')).toEqual(['core-router-2']);
+    expect(model.parentIdsByDeviceId.get('dist-switch-a')).toEqual([
+      'core-router-1',
+      'core-router-2',
+    ]);
+    expect(model.childIdsByDeviceId.get('dist-switch-a')).toEqual(['access-switch-a1']);
     expect(model.entryIdsByDeviceId.get('dist-switch-a')).toEqual([
       'tree:row-dist-a',
       'tree:row-core-2/row-dist-a#1',

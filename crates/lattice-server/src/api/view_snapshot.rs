@@ -5,7 +5,8 @@ use std::{
 };
 
 use lattice_core::{
-    DeploymentType, Device, DeviceRole, DiscoveryTree, DiscoveryTreeNode,
+    DeploymentType, Device, DeviceRelations as CoreDeviceRelations, DeviceRole,
+    DiscoveryRelations as CoreDiscoveryRelations, DiscoveryTree, DiscoveryTreeNode,
     GuestAttachment as CoreGuestAttachment, GuestKind, IdentityKeys, Link, Topology,
 };
 use serde::{Deserialize, Serialize};
@@ -124,6 +125,17 @@ pub struct TreeEdge {
     pub child_row_id: String,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq, TS)]
+#[ts(export)]
+pub struct ViewDeviceRelations {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub peers: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub children: Vec<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
 #[ts(export)]
 pub struct ViewSnapshot {
@@ -132,6 +144,10 @@ pub struct ViewSnapshot {
     pub tree_rows: Vec<TreeRow>,
     pub tree_edges: Vec<TreeEdge>,
     pub primary_row_by_device: HashMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub root_device_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub device_relations: HashMap<String, ViewDeviceRelations>,
     pub discovery_status: DiscoveryStatus,
     pub auto_discovery_interval_seconds: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -151,6 +167,8 @@ impl ViewSnapshot {
             tree_rows: Vec::new(),
             tree_edges: Vec::new(),
             primary_row_by_device: HashMap::new(),
+            root_device_ids: Vec::new(),
+            device_relations: HashMap::new(),
             discovery_status: status,
             auto_discovery_interval_seconds,
             next_auto_discovery_at_ms,
@@ -161,6 +179,7 @@ impl ViewSnapshot {
 pub fn build_view_snapshot(
     topology: &Topology,
     tree: &DiscoveryTree,
+    relations: &CoreDiscoveryRelations,
     status: &DiscoveryStatus,
     auto_discovery_interval_seconds: u64,
     next_auto_discovery_at_ms: Option<i64>,
@@ -176,6 +195,8 @@ pub fn build_view_snapshot(
         tree_rows,
         tree_edges,
         primary_row_by_device,
+        root_device_ids: relations.root_device_ids.clone(),
+        device_relations: build_device_relations(relations),
         discovery_status: status.clone(),
         auto_discovery_interval_seconds,
         next_auto_discovery_at_ms,
@@ -245,17 +266,11 @@ fn build_links(topology: &Topology) -> Vec<ViewLink> {
 
 fn link_network_cidrs(topology: &Topology, link: &Link) -> Vec<String> {
     if link.protocol.as_str() != "proxmox_guest_link" {
-        return point_to_point_network_cidrs(
-            link.local_ip.as_deref(),
-            link.remote_ip.as_deref(),
-        );
+        return point_to_point_network_cidrs(link.local_ip.as_deref(), link.remote_ip.as_deref());
     }
 
     let Some(attachment) = link.guest_attachment.as_ref() else {
-        return point_to_point_network_cidrs(
-            link.local_ip.as_deref(),
-            link.remote_ip.as_deref(),
-        );
+        return point_to_point_network_cidrs(link.local_ip.as_deref(), link.remote_ip.as_deref());
     };
 
     let Some((guest_device_id, guest_interface_name, bridge_ip)) =
@@ -266,11 +281,7 @@ fn link_network_cidrs(topology: &Topology, link: &Link) -> Vec<String> {
     let Some(guest_device) = topology.devices.get(guest_device_id) else {
         return Vec::new();
     };
-    let guest_candidates = guest_network_candidates(
-        guest_device,
-        guest_interface_name,
-        attachment,
-    );
+    let guest_candidates = guest_network_candidates(guest_device, guest_interface_name, attachment);
     if guest_candidates.is_empty() {
         return Vec::new();
     }
@@ -353,11 +364,9 @@ fn guest_network_candidates(
             .trunk_vlans
             .iter()
             .filter_map(|vlan| {
-                interface_names
-                    .iter()
-                    .find_map(|interface_name| {
-                        network_for_interface(device, &format!("{interface_name}.{vlan}"))
-                    })
+                interface_names.iter().find_map(|interface_name| {
+                    network_for_interface(device, &format!("{interface_name}.{vlan}"))
+                })
             })
             .collect::<Vec<_>>();
         if !vlan_candidates.is_empty() {
@@ -393,10 +402,11 @@ fn resolve_guest_interface_names(
     let mut names = vec![base_interface_name.to_string()];
 
     let exact_has_network_data = device.interfaces.iter().any(|interface| {
-        interface.if_name == base_interface_name
-            && !interface.ip_addresses.is_empty()
+        interface.if_name == base_interface_name && !interface.ip_addresses.is_empty()
             || (include_subinterfaces
-                && interface.if_name.starts_with(&format!("{base_interface_name}.")))
+                && interface
+                    .if_name
+                    .starts_with(&format!("{base_interface_name}.")))
                 && !interface.ip_addresses.is_empty()
     });
     if exact_has_network_data {
@@ -648,6 +658,24 @@ fn view_guest_attachment(attachment: &CoreGuestAttachment) -> ViewGuestAttachmen
     }
 }
 
+fn build_device_relations(
+    relations: &CoreDiscoveryRelations,
+) -> HashMap<String, ViewDeviceRelations> {
+    relations
+        .by_device
+        .iter()
+        .map(|(device_id, relation)| (device_id.clone(), view_device_relations(relation)))
+        .collect()
+}
+
+fn view_device_relations(relations: &CoreDeviceRelations) -> ViewDeviceRelations {
+    ViewDeviceRelations {
+        parents: relations.parents.clone(),
+        peers: relations.peers.clone(),
+        children: relations.children.clone(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -797,6 +825,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &tree,
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             Some(1_744_000_000_000),
@@ -834,8 +863,22 @@ mod tests {
             ],
         };
 
-        let first = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
-        let second = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
+        let first = build_view_snapshot(
+            &topology,
+            &tree,
+            &CoreDiscoveryRelations::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
+        let second = build_view_snapshot(
+            &topology,
+            &tree,
+            &CoreDiscoveryRelations::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
 
         assert_eq!(first.tree_rows, second.tree_rows);
         assert_eq!(first.primary_row_by_device, second.primary_row_by_device);
@@ -863,7 +906,14 @@ mod tests {
             ],
         };
 
-        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
+        let snapshot = build_view_snapshot(
+            &topology,
+            &tree,
+            &CoreDiscoveryRelations::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
 
         assert_eq!(
             snapshot
@@ -969,7 +1019,14 @@ mod tests {
             ],
         };
 
-        let snapshot = build_view_snapshot(&topology, &tree, &DiscoveryStatus::ready(), 60, None);
+        let snapshot = build_view_snapshot(
+            &topology,
+            &tree,
+            &CoreDiscoveryRelations::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
 
         assert_eq!(snapshot.primary_row_by_device["switch-1"], "switch-1");
         assert_eq!(snapshot.primary_row_by_device["switch-2"], "switch-2");
@@ -986,6 +1043,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,
@@ -1095,6 +1153,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,
@@ -1206,6 +1265,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,
@@ -1271,6 +1331,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,
@@ -1369,6 +1430,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,
@@ -1454,6 +1516,7 @@ mod tests {
         let snapshot = build_view_snapshot(
             &topology,
             &DiscoveryTree::default(),
+            &CoreDiscoveryRelations::default(),
             &DiscoveryStatus::ready(),
             60,
             None,

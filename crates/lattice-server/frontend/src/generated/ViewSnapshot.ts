@@ -3,6 +3,7 @@ import type { DiscoveryStatus } from "./DiscoveryStatus.ts";
 import type { TreeEdge } from "./TreeEdge.ts";
 import type { TreeRow } from "./TreeRow.ts";
 import type { ViewDevice } from "./ViewDevice.ts";
+import type { ViewDeviceRelations } from "./ViewDeviceRelations.ts";
 import type { ViewLink } from "./ViewLink.ts";
 
-export type ViewSnapshot = { devices: Array<ViewDevice>, links: Array<ViewLink>, tree_rows: Array<TreeRow>, tree_edges: Array<TreeEdge>, primary_row_by_device: { [key in string]: string }, discovery_status: DiscoveryStatus, auto_discovery_interval_seconds: number, next_auto_discovery_at_ms?: number, };
+export type ViewSnapshot = { devices: Array<ViewDevice>, links: Array<ViewLink>, tree_rows: Array<TreeRow>, tree_edges: Array<TreeEdge>, primary_row_by_device: { [key in string]: string }, root_device_ids?: Array<string>, device_relations?: { [key in string]: ViewDeviceRelations }, discovery_status: DiscoveryStatus, auto_discovery_interval_seconds: number, next_auto_discovery_at_ms?: number, };

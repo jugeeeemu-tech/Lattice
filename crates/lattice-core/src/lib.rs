@@ -11,9 +11,9 @@ pub use config::{
     SnmpSourceConfig, SourceConfig,
 };
 pub use discovery::{
-    build_discovery_sources, merge_source_results, DiscoveryEngine, DiscoveryResult,
-    DiscoverySource, DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode, SnmpDiscoverySource,
-    SourceResult,
+    build_discovery_sources, merge_source_results, DeviceRelations, DiscoveryEngine,
+    DiscoveryRelations, DiscoveryResult, DiscoverySource, DiscoverySourceOutput, DiscoveryTree,
+    DiscoveryTreeNode, SnmpDiscoverySource, SourceResult,
 };
 pub use graph::{
     synthesize_proxmox_uplinks, DeploymentType, Device, DeviceRole, DeviceStatus, GraphStore,

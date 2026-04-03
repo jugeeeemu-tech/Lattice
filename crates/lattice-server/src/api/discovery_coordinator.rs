@@ -9,7 +9,9 @@ use std::{
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
-use lattice_core::{Device, DiscoveryEngine, DiscoveryResult, DiscoveryTree, Topology};
+use lattice_core::{
+    Device, DiscoveryEngine, DiscoveryRelations, DiscoveryResult, DiscoveryTree, Topology,
+};
 use tokio::sync::OwnedMutexGuard;
 use tokio::sync::{broadcast, Mutex, Notify, RwLock};
 use tracing::{error, info, warn};
@@ -126,6 +128,7 @@ impl DiscoveryCoordinator {
             build_view_snapshot(
                 &result.topology,
                 &result.tree,
+                &result.relations,
                 &status,
                 self.auto_discovery_interval_seconds,
                 next_auto_discovery_at_ms,
@@ -134,6 +137,7 @@ impl DiscoveryCoordinator {
             build_view_snapshot(
                 &Topology::default(),
                 &DiscoveryTree::default(),
+                &DiscoveryRelations::default(),
                 &status,
                 self.auto_discovery_interval_seconds,
                 next_auto_discovery_at_ms,
@@ -420,6 +424,7 @@ mod tests {
                     depth: 0,
                 }],
             },
+            relations: DiscoveryRelations::default(),
             discovered_at: Utc::now(),
         }
     }

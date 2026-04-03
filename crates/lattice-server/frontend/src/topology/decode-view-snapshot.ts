@@ -14,6 +14,8 @@ export const EMPTY_SNAPSHOT: ViewSnapshot = Object.freeze({
   tree_rows: [],
   tree_edges: [],
   primary_row_by_device: {},
+  root_device_ids: [],
+  device_relations: {},
   discovery_status: { state: 'loading' as const },
   auto_discovery_interval_seconds: 60,
 });
@@ -54,6 +56,24 @@ function asRecordOfStrings(value: unknown): Record<string, string> {
       entry[0].length > 0 && typeof entry[1] === 'string'
   );
 
+  return Object.fromEntries(entries);
+}
+
+function asDeviceRelationsRecord(
+  value: unknown
+): Record<string, { parents: string[]; peers: string[]; children: string[] }> {
+  const record = asObject(value);
+  const entries = Object.entries(record).map(([deviceId, relations]) => {
+    const decoded = asObject(relations);
+    return [
+      deviceId,
+      {
+        parents: asStringArray(decoded.parents),
+        peers: asStringArray(decoded.peers),
+        children: asStringArray(decoded.children),
+      },
+    ] as const;
+  });
   return Object.fromEntries(entries);
 }
 
@@ -98,6 +118,8 @@ export function decodeViewSnapshot(rawSnapshot: unknown): ViewSnapshot {
     tree_rows: asArray<TreeRow>(snapshot.tree_rows),
     tree_edges: asArray<TreeEdge>(snapshot.tree_edges),
     primary_row_by_device: asRecordOfStrings(snapshot.primary_row_by_device),
+    root_device_ids: asStringArray(snapshot.root_device_ids),
+    device_relations: asDeviceRelationsRecord(snapshot.device_relations),
     discovery_status: decodeDiscoveryStatus(snapshot.discovery_status),
     auto_discovery_interval_seconds: asPositiveWholeNumber(
       snapshot.auto_discovery_interval_seconds,
