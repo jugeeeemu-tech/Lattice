@@ -68,7 +68,10 @@ async fn handle_socket(mut socket: WebSocket, coordinator: Arc<super::DiscoveryC
 async fn handle_static_socket(mut socket: WebSocket, snapshot: Arc<super::ViewSnapshot>) {
     info!("static websocket connected");
 
-    if send_static_snapshot(&mut socket, snapshot.as_ref()).await.is_err() {
+    if send_static_snapshot(&mut socket, snapshot.as_ref())
+        .await
+        .is_err()
+    {
         warn!("static websocket closed before initial snapshot could be sent");
         return;
     }

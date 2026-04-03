@@ -7,7 +7,10 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 use crate::{
-    api::{routes::{build_router, build_static_router}, AppState, DiscoveryCoordinator, StaticAppState, ViewSnapshot},
+    api::{
+        routes::{build_router, build_static_router},
+        AppState, DiscoveryCoordinator, StaticAppState, ViewSnapshot,
+    },
     observability::init_tracing,
 };
 
@@ -126,11 +129,7 @@ async fn run_serve(
     Ok(())
 }
 
-async fn run_serve_snapshot(
-    snapshot_path: PathBuf,
-    host: String,
-    port: u16,
-) -> Result<()> {
+async fn run_serve_snapshot(snapshot_path: PathBuf, host: String, port: u16) -> Result<()> {
     init_tracing();
 
     let snapshot = load_snapshot(snapshot_path)?;

@@ -1,4 +1,8 @@
-use std::{collections::{HashMap, HashSet}, net::IpAddr, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    net::IpAddr,
+    sync::Arc,
+};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -438,7 +442,12 @@ fn guest_interface_primary_ip(device: &Device, interface_name: &str) -> Option<S
         .interfaces
         .iter()
         .find(|interface| interface.if_name == interface_name)
-        .and_then(|interface| interface.ip_addresses.iter().find(|cidr| !is_loopback_cidr(cidr)))
+        .and_then(|interface| {
+            interface
+                .ip_addresses
+                .iter()
+                .find(|cidr| !is_loopback_cidr(cidr))
+        })
         .cloned()
 }
 
