@@ -56,9 +56,11 @@ describe('decodeViewSnapshot', () => {
           id: 'link-1',
         },
       ],
+      device_relations: {},
       primary_row_by_device: {
         'guest-app': 'row-1',
       },
+      root_device_ids: [],
       tree_edges: [{ child_row_id: 'row-1', parent_row_id: 'root-1' }],
       tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'vm-app' }],
     });
@@ -107,7 +109,9 @@ describe('decodeViewSnapshot', () => {
           network_cidrs: ['192.0.2.0/24'],
         },
       ],
+      device_relations: {},
       primary_row_by_device: { 'guest-app': 'row-1' },
+      root_device_ids: [],
       tree_edges: [{ child_row_id: 'row-1', parent_row_id: 'root-1' }],
       tree_rows: [{ device_id: 'guest-app', id: 'row-1', label: 'vm-app' }],
     });
@@ -134,6 +138,8 @@ describe('decodeViewSnapshot', () => {
     expect(decoded.links).toEqual([]);
     expect(decoded.tree_rows).toEqual([]);
     expect(decoded.tree_edges).toEqual([]);
+    expect(decoded.root_device_ids).toEqual([]);
+    expect(decoded.device_relations).toEqual({});
     expect(decoded.primary_row_by_device).toEqual({ guest: 'row-1' });
     expect(decoded.discovery_status).toEqual({ state: 'loading' });
     expect(decoded.auto_discovery_interval_seconds).toBe(60);
@@ -153,9 +159,11 @@ describe('decodeViewSnapshot', () => {
           remote_interface: 'eth1',
         },
       ],
+      device_relations: {},
       tree_rows: [],
       tree_edges: [],
       primary_row_by_device: {},
+      root_device_ids: [],
       discovery_status: {
         state: 'ready',
       },
