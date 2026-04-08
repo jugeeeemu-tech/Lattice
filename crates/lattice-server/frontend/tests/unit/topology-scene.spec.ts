@@ -966,4 +966,132 @@ describe('network layout clusters', () => {
     expect(groupedDot('10.0.0.0/24', '10.1.0.0/24', '10.2.0.0/24')).toBeGreaterThan(0);
     expect(groupedDot('10.0.1.0/24', '10.3.0.0/24', '10.4.0.0/24')).toBeGreaterThan(0);
   });
+
+  it('keeps same-cluster same-depth switches from collapsing in final relaxation', () => {
+    const devices = [
+      device('core-a', 'core-a', 'router'),
+      device('core-b', 'core-b', 'router'),
+      device('dist', 'dist', 'switch'),
+      device('access-1', 'access-1', 'switch'),
+      device('access-2', 'access-2', 'switch'),
+      device('access-3', 'access-3', 'switch'),
+      device('app-1', 'app-1'),
+      device('app-2', 'app-2'),
+    ];
+    const deviceById = new Map(devices.map((entry) => [entry.id, entry]));
+    const links: ViewLink[] = [
+      {
+        id: 'core-a-dist',
+        local_device_id: 'core-a',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'core-b-dist',
+        local_device_id: 'core-b',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth1',
+      },
+      {
+        id: 'dist-access-1',
+        local_device_id: 'dist',
+        local_interface: 'eth2',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'access-1',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'dist-access-2',
+        local_device_id: 'dist',
+        local_interface: 'eth3',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'access-2',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'dist-access-3',
+        local_device_id: 'dist',
+        local_interface: 'eth4',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'access-3',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'access-1-app-1',
+        local_device_id: 'access-1',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'app-1',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'access-2-app-2',
+        local_device_id: 'access-2',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.64.3.0/24'],
+        remote_device_id: 'app-2',
+        remote_interface: 'eth0',
+      },
+    ];
+
+    const state = {
+      model: {
+        childIdsByDeviceId: new Map([
+          ['core-a', ['dist']],
+          ['core-b', ['dist']],
+          ['dist', ['access-1', 'access-2', 'access-3']],
+          ['access-1', ['app-1']],
+          ['access-2', ['app-2']],
+          ['access-3', []],
+          ['app-1', []],
+          ['app-2', []],
+        ]),
+        deviceById,
+        parentIdsByDeviceId: new Map([
+          ['core-a', []],
+          ['core-b', []],
+          ['dist', ['core-a', 'core-b']],
+          ['access-1', ['dist']],
+          ['access-2', ['dist']],
+          ['access-3', ['dist']],
+          ['app-1', ['access-1']],
+          ['app-2', ['access-2']],
+        ]),
+        peerIdsByDeviceId: new Map([
+          ['core-a', ['core-b']],
+          ['core-b', ['core-a']],
+          ['dist', []],
+          ['access-1', []],
+          ['access-2', []],
+          ['access-3', []],
+          ['app-1', []],
+          ['app-2', []],
+        ]),
+        primaryChildrenByDeviceId: new Map(),
+        primaryParentDeviceById: new Map(),
+        rootDeviceIds: ['core-a', 'core-b'],
+        visibleLinkIds: new Set(links.map((link) => link.id)),
+      },
+      snapshot: {
+        links,
+      },
+    } as unknown as TopologyStoreState;
+
+    const positions = computeNetworkLayoutTargets(devices, state);
+    const access1 = positions.get('access-1');
+    const access3 = positions.get('access-3');
+    expect(access1 && access3).toBeTruthy();
+    expect(access1?.distanceTo(access3 ?? new Vector3())).toBeGreaterThan(4);
+  });
 });

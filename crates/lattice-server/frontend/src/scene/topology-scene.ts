@@ -1944,6 +1944,8 @@ export function computeNetworkLayoutTargets(
   }
 
   const anchorByDeviceId = new Map<string, Vector3>(legacyTargets);
+  const sameClusterDepthMinDistanceByPair = new Map<string, number>();
+  const sameClusterDepthProtectedDeviceIds = new Set<string>();
   for (const device of devices) {
     const proposals = proposalEntriesByDeviceId.get(device.id) ?? [];
     if (proposals.length === 0) {
@@ -1976,6 +1978,49 @@ export function computeNetworkLayoutTargets(
       blended.y = defaultDepthY + (combined.y - defaultDepthY) * 0.85;
     }
     anchorByDeviceId.set(device.id, blended);
+  }
+
+  for (const cluster of clusters) {
+    const clusterCenter = clusterCentersById.get(cluster.clusterId);
+    if (!clusterCenter) {
+      continue;
+    }
+    const clusterPositions = placeDevicesWithinCluster(cluster, clusterCenter, depthSpacing, deviceById);
+    const deviceIdsByDepth = new Map<number, string[]>();
+    for (const deviceId of cluster.memberDeviceIds) {
+      const depth = cluster.memberDepths.get(deviceId) ?? cluster.minDepth;
+      const current = deviceIdsByDepth.get(depth) ?? [];
+      current.push(deviceId);
+      deviceIdsByDepth.set(depth, current);
+    }
+
+    for (const layerDeviceIds of deviceIdsByDepth.values()) {
+      if (layerDeviceIds.length <= 1) {
+        continue;
+      }
+      const sortedLayerDeviceIds = [...layerDeviceIds].sort((leftId, rightId) =>
+        compareDeviceIdsByLabel(leftId, rightId, deviceById)
+      );
+      for (let leftIndex = 0; leftIndex < sortedLayerDeviceIds.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < sortedLayerDeviceIds.length; rightIndex += 1) {
+          const leftId = sortedLayerDeviceIds[leftIndex];
+          const rightId = sortedLayerDeviceIds[rightIndex];
+          const leftPosition = clusterPositions.get(leftId);
+          const rightPosition = clusterPositions.get(rightId);
+          if (!leftPosition || !rightPosition) {
+            continue;
+          }
+
+          const initialDistance = leftPosition.distanceTo(rightPosition);
+          const pair = pairKey(leftId, rightId);
+          const protectedDistance = initialDistance * 0.94;
+          const currentProtectedDistance = sameClusterDepthMinDistanceByPair.get(pair) ?? 0;
+          sameClusterDepthMinDistanceByPair.set(pair, Math.max(currentProtectedDistance, protectedDistance));
+          sameClusterDepthProtectedDeviceIds.add(leftId);
+          sameClusterDepthProtectedDeviceIds.add(rightId);
+        }
+      }
+    }
   }
 
   const redundantGroupIdByDeviceId = new Map<string, string>();
@@ -2126,7 +2171,9 @@ export function computeNetworkLayoutTargets(
           devicePlanarClearance(deviceById.get(rightId)) +
           0.12;
         const redundantMinDistance = redundantMinDistanceByPair.get(pairKey(leftId, rightId)) ?? 0;
-        const effectiveMinDistance = Math.max(minDistance, redundantMinDistance);
+        const sameClusterDepthMinDistance =
+          sameClusterDepthMinDistanceByPair.get(pairKey(leftId, rightId)) ?? 0;
+        const effectiveMinDistance = Math.max(minDistance, redundantMinDistance, sameClusterDepthMinDistance);
         if (distance >= effectiveMinDistance) {
           continue;
         }
@@ -2155,7 +2202,11 @@ export function computeNetworkLayoutTargets(
       }
       const anchorStrength =
         (rootSet.has(deviceId) ? 0.3 : 0.26) +
-        (redundantGroupIdByDeviceId.has(deviceId) ? 0.08 : 0);
+        (redundantGroupIdByDeviceId.has(deviceId) ? 0.08 : 0) -
+        (sameClusterDepthProtectedDeviceIds.has(deviceId) &&
+        !redundantGroupIdByDeviceId.has(deviceId)
+          ? 0.12
+          : 0);
       force.x += (anchor.x - position.x) * anchorStrength;
       force.z += (anchor.z - position.z) * anchorStrength;
     }
