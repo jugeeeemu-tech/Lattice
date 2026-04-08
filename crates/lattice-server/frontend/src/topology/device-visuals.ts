@@ -34,6 +34,11 @@ export interface DeviceSidebarIconSpec {
   viewBox: string;
 }
 
+export interface DevicePlanarFootprint {
+  halfDepth: number;
+  halfWidth: number;
+}
+
 export function guestKindLabel(guestKind: GuestKind | null | undefined): string | null {
   switch (guestKind) {
     case 'vm':
@@ -168,4 +173,59 @@ export function layoutRadiusForDevice(
   device: Pick<ViewDevice, 'device_role' | 'guest_kind'> | null | undefined
 ): number {
   return deviceVisualSpec(device).layoutRadius;
+}
+
+export function devicePlanarFootprint(
+  device: Pick<ViewDevice, 'device_role' | 'guest_kind'> | null | undefined
+): DevicePlanarFootprint {
+  const spec = deviceVisualSpec(device);
+  switch (spec.shape.kind) {
+    case 'box':
+      return {
+        halfWidth: spec.shape.width / 2,
+        halfDepth: spec.shape.depth / 2,
+      };
+    case 'cylinder': {
+      const radius = Math.max(spec.shape.radiusTop, spec.shape.radiusBottom);
+      return { halfWidth: radius, halfDepth: radius };
+    }
+    case 'icosahedron':
+      return { halfWidth: spec.shape.radius, halfDepth: spec.shape.radius };
+  }
+}
+
+export function devicePlanarMaxDiameter(
+  device: Pick<ViewDevice, 'device_role' | 'guest_kind'> | null | undefined
+): number {
+  const footprint = devicePlanarFootprint(device);
+  return Math.max(footprint.halfWidth * 2, footprint.halfDepth * 2);
+}
+
+export function devicePlanarSupport(
+  device: Pick<ViewDevice, 'device_role' | 'guest_kind'> | null | undefined,
+  dirX: number,
+  dirZ: number
+): number {
+  const footprint = devicePlanarFootprint(device);
+  const magnitude = Math.hypot(dirX, dirZ);
+  if (magnitude < 0.0001) {
+    return Math.max(footprint.halfWidth, footprint.halfDepth);
+  }
+  const unitX = dirX / magnitude;
+  const unitZ = dirZ / magnitude;
+  return Math.abs(unitX) * footprint.halfWidth + Math.abs(unitZ) * footprint.halfDepth;
+}
+
+export function devicePlanarClearance(
+  device: Pick<ViewDevice, 'device_role' | 'guest_kind'> | null | undefined
+): number {
+  const spec = deviceVisualSpec(device);
+  switch (spec.shape.kind) {
+    case 'box':
+      return Math.max(spec.shape.width, spec.shape.depth) >= 1.8 ? 0.34 : 0.28;
+    case 'cylinder':
+      return 0.26;
+    case 'icosahedron':
+      return 0.24;
+  }
 }

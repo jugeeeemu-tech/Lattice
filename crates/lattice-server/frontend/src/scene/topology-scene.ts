@@ -41,7 +41,13 @@ import {
   networkCidrColor,
   primaryNetworkCidr,
 } from '../topology/view-model';
-import { deviceVisualSpec, layoutRadiusForDevice } from '../topology/device-visuals';
+import {
+  devicePlanarClearance,
+  devicePlanarMaxDiameter,
+  devicePlanarSupport,
+  deviceVisualSpec,
+  layoutRadiusForDevice,
+} from '../topology/device-visuals';
 
 type SceneHoverTarget =
   | { deviceId: string; kind: 'device' }
@@ -562,8 +568,8 @@ export function computeClusterRequiredRadius(
   let requiredRadius = 2.4;
   for (const [depth, layerDeviceIds] of layerDeviceIdsByDepth.entries()) {
     const totalDiameter = layerDeviceIds.reduce((sum, deviceId) => {
-      const footprint = layoutRadiusForDevice(deviceById.get(deviceId)) + 0.6;
-      return sum + footprint * 2;
+      const device = deviceById.get(deviceId);
+      return sum + devicePlanarMaxDiameter(device) + devicePlanarClearance(device) * 2 + 0.42;
     }, 0);
     const circumferenceRadius = totalDiameter / (Math.PI * 2);
     const minLayerRadius = layerDeviceIds.length <= 1 ? 0 : 1.9;
@@ -931,11 +937,17 @@ function placeDevicesOnRings(
     compareDeviceIdsByLabel(leftId, rightId, deviceById)
   );
   const maxFootprint = sortedDeviceIds.reduce(
-    (maximum, deviceId) => Math.max(maximum, layoutRadiusForDevice(deviceById.get(deviceId)) + 0.7),
+    (maximum, deviceId) =>
+      Math.max(
+        maximum,
+        devicePlanarMaxDiameter(deviceById.get(deviceId)) +
+          devicePlanarClearance(deviceById.get(deviceId)) * 2 +
+          0.3
+      ),
     1.8
   );
-  const ringSpacing = Math.max(2.2, maxFootprint * 1.6);
-  const slotSpacing = Math.max(2.1, maxFootprint * 1.9);
+  const ringSpacing = Math.max(2.8, maxFootprint * 2.05);
+  const slotSpacing = Math.max(2.9, maxFootprint * 2.35);
   let cursor = 0;
   let ringIndex = 0;
 
@@ -1215,9 +1227,11 @@ function computeLegacyRelationTargets(
         }
 
         const minDistance =
-          layoutRadiusForDevice(deviceById.get(leftId)) +
-          layoutRadiusForDevice(deviceById.get(rightId)) +
-          0.55;
+          devicePlanarSupport(deviceById.get(leftId), dx, dz) +
+          devicePlanarSupport(deviceById.get(rightId), dx, dz) +
+          devicePlanarClearance(deviceById.get(leftId)) +
+          devicePlanarClearance(deviceById.get(rightId)) +
+          0.06;
         if (distance >= minDistance) {
           continue;
         }
@@ -1336,7 +1350,10 @@ export function computeNetworkLayoutTargets(
       }
       const depth = layoutGraph.depthByDeviceId.get(deviceId) ?? 0;
       const seedAngle = hash01(`${cluster.clusterId}:bridge:${deviceId}`) * Math.PI * 2;
-      const bridgeRadius = Math.max(cluster.requiredRadius * 0.55, 1.4);
+      const bridgeRadius = Math.max(
+        cluster.requiredRadius + devicePlanarMaxDiameter(deviceById.get(deviceId)) * 0.35,
+        1.8
+      );
       const bridgePosition = new Vector3(
         clusterCenter.x + Math.cos(seedAngle) * bridgeRadius,
         -depth * depthSpacing,
@@ -1406,9 +1423,11 @@ export function computeNetworkLayoutTargets(
         }
 
         const minDistance =
-          layoutRadiusForDevice(deviceById.get(leftId)) +
-          layoutRadiusForDevice(deviceById.get(rightId)) +
-          0.8;
+          devicePlanarSupport(deviceById.get(leftId), dx, dz) +
+          devicePlanarSupport(deviceById.get(rightId), dx, dz) +
+          devicePlanarClearance(deviceById.get(leftId)) +
+          devicePlanarClearance(deviceById.get(rightId)) +
+          0.12;
         if (distance >= minDistance) {
           continue;
         }

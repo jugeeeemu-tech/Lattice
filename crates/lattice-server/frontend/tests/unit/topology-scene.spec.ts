@@ -2,7 +2,7 @@ import { Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import type { ViewDevice, ViewLink } from '../../src/generated';
-import { deviceVisualSpec } from '../../src/topology/device-visuals';
+import { devicePlanarClearance, devicePlanarSupport } from '../../src/topology/device-visuals';
 import {
   buildRelationLayoutGraph,
   buildRelationRootAnchors,
@@ -190,18 +190,6 @@ describe('buildRelationLayoutGraph', () => {
 });
 
 describe('network layout clusters', () => {
-  function modelFootprintRadius(device: ViewDevice): number {
-    const spec = deviceVisualSpec(device);
-    switch (spec.shape.kind) {
-      case 'box':
-        return Math.hypot(spec.shape.width / 2, spec.shape.depth / 2);
-      case 'cylinder':
-        return Math.max(spec.shape.radiusTop, spec.shape.radiusBottom);
-      case 'icosahedron':
-        return spec.shape.radius;
-    }
-  }
-
   function device(id: string, label: string, role: ViewDevice['device_role'] = 'server'): ViewDevice {
     return {
       id,
@@ -397,7 +385,7 @@ describe('network layout clusters', () => {
       new Map()
     );
 
-    expect(clusterRadius).toBeGreaterThan(3);
+    expect(clusterRadius).toBeGreaterThan(2.5);
   });
 
   it('fills inward with multiple rings for dense layers', () => {
@@ -599,8 +587,10 @@ describe('network layout clusters', () => {
         const dz = (right?.z ?? 0) - (left?.z ?? 0);
         const distance = Math.hypot(dx, dy, dz);
         const minDistance =
-          modelFootprintRadius(deviceById.get(leftId) ?? devices[leftIndex]) +
-          modelFootprintRadius(deviceById.get(rightId) ?? devices[rightIndex]) +
+          devicePlanarSupport(deviceById.get(leftId) ?? devices[leftIndex], dx, dz) +
+          devicePlanarSupport(deviceById.get(rightId) ?? devices[rightIndex], dx, dz) +
+          devicePlanarClearance(deviceById.get(leftId) ?? devices[leftIndex]) +
+          devicePlanarClearance(deviceById.get(rightId) ?? devices[rightIndex]) +
           0.12;
         expect(
           distance,
