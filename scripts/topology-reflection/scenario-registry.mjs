@@ -286,7 +286,7 @@ function mixedHierarchyScenario() {
     name: 'mixed-hierarchy-42',
     suite: 'nightly',
     root: 'core-router-1',
-    rootLabels: ['core-router-1', 'core-router-2', 'core-router-4', 'core-router-3'],
+    rootLabels: ['core-router-1', 'core-router-2', 'core-router-3', 'core-router-4'],
     links,
     focusLabels: [
       'core-router-1',
@@ -943,28 +943,14 @@ function buildDisplayExpectedTree(derivedScenario) {
 
   const primaryRowByLabel = {};
   const primaryDepthByLabel = new Map();
-  const rootRankByLabel = new Map(rootLabels.map((label, index) => [label, index]));
-
-  function rootLabelForRowId(rowId) {
-    const [, rootLabel] = rowId.match(/^seed\/([^/]+)/) ?? [];
-    return rootLabel ?? null;
-  }
 
   for (const row of rows) {
-    const rowRootLabel = rootLabelForRowId(row.id);
-    const rowRootRank = rowRootLabel ? rootRankByLabel.get(rowRootLabel) ?? Number.MAX_SAFE_INTEGER : Number.MAX_SAFE_INTEGER;
     const currentDepth = primaryDepthByLabel.get(row.label);
     const currentRowId = primaryRowByLabel[row.label];
-    const currentRootLabel = currentRowId ? rootLabelForRowId(currentRowId) : null;
-    const currentRootRank = currentRootLabel
-      ? rootRankByLabel.get(currentRootLabel) ?? Number.MAX_SAFE_INTEGER
-      : Number.MAX_SAFE_INTEGER;
     if (
       currentDepth === undefined ||
       row.depth < currentDepth ||
-      (row.depth === currentDepth &&
-        (rowRootRank < currentRootRank ||
-          (rowRootRank === currentRootRank && row.id.localeCompare(currentRowId) < 0)))
+      (row.depth === currentDepth && row.id.localeCompare(currentRowId) < 0)
     ) {
       primaryDepthByLabel.set(row.label, row.depth);
       primaryRowByLabel[row.label] = row.id;
