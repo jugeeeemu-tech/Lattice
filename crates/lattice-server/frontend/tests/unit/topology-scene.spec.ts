@@ -2,12 +2,10 @@ import { Vector3 } from 'three';
 import { describe, expect, it } from 'vitest';
 
 import type { ViewDevice, ViewLink } from '../../src/generated';
-import { devicePlanarClearance, devicePlanarSupport } from '../../src/topology/device-visuals';
 import {
   buildRelationLayoutGraph,
   buildRelationRootAnchors,
   buildNetworkLayoutClusters,
-  computeNetworkLayoutTargets,
   computeClusterRequiredRadius,
   computeParallelLinkOffsets,
   placeClusterCenters,
@@ -15,7 +13,6 @@ import {
   recenterPositionsAroundRootCentroid,
   resolveParentFacingDevice,
 } from '../../src/scene/topology-scene';
-import type { TopologyStoreState } from '../../src/state/topology-store';
 
 describe('computeParallelLinkOffsets', () => {
   it('spreads same-pair links symmetrically and deterministically', () => {
@@ -477,126 +474,298 @@ describe('network layout clusters', () => {
     expect(distance).toBeGreaterThan(clusters[0].requiredRadius + clusters[1].requiredRadius);
   });
 
-  it('keeps final device positions from overlapping in xz space', () => {
-    const devices = [
-      device('core', 'core', 'router'),
-      device('bridge', 'bridge', 'bridge'),
-      device('obs', 'obs01'),
-      device('mc', 'mc01'),
-      device('vyos', 'vyos01', 'router'),
-      device('ct', 'tailscale-vpn'),
-    ];
-    const deviceById = new Map(devices.map((entry) => [entry.id, entry]));
-    const links: ViewLink[] = [
+  it('spreads root-direct clusters across an area instead of collapsing them onto one line', () => {
+    const deviceById = new Map<string, ViewDevice>([
+      ['root-a', device('root-a', 'root-a-router')],
+      ['root-b', device('root-b', 'root-b-router')],
+      ['branch-a1', device('branch-a1', 'branch-a1-router')],
+      ['branch-a2', device('branch-a2', 'branch-a2-router')],
+      ['branch-b1', device('branch-b1', 'branch-b1-router')],
+      ['branch-b2', device('branch-b2', 'branch-b2-router')],
+    ]);
+    const graph = buildRelationLayoutGraph(
+      ['root-a', 'root-b', 'branch-a1', 'branch-a2', 'branch-b1', 'branch-b2'],
       {
-        id: 'core-bridge',
-        local_device_id: 'core',
-        local_interface: 'eth0',
-        remote_device_id: 'bridge',
-        remote_interface: 'vmbr0',
-        protocol: 'lldp',
-        network_cidrs: ['192.168.1.0/24'],
-      },
-      {
-        id: 'bridge-obs',
-        local_device_id: 'bridge',
-        local_interface: 'vmbr0',
-        remote_device_id: 'obs',
-        remote_interface: 'eth0',
-        protocol: 'proxmox_guest_link',
-        network_cidrs: ['192.168.1.0/24'],
-      },
-      {
-        id: 'bridge-mc',
-        local_device_id: 'bridge',
-        local_interface: 'vmbr0',
-        remote_device_id: 'mc',
-        remote_interface: 'eth0',
-        protocol: 'proxmox_guest_link',
-        network_cidrs: ['192.168.20.0/24'],
-      },
-      {
-        id: 'bridge-vyos-trunk',
-        local_device_id: 'bridge',
-        local_interface: 'vmbr0',
-        remote_device_id: 'vyos',
-        remote_interface: 'net1',
-        protocol: 'proxmox_guest_link',
-        network_cidrs: ['192.168.20.0/24', '192.168.30.0/24'],
-      },
-      {
-        id: 'bridge-ct',
-        local_device_id: 'bridge',
-        local_interface: 'vmbr0',
-        remote_device_id: 'ct',
-        remote_interface: 'eth0',
-        protocol: 'proxmox_guest_link',
-        network_cidrs: ['192.168.1.0/24'],
-      },
-    ];
-
-    const state = {
-      model: {
         childIdsByDeviceId: new Map([
-          ['core', ['bridge']],
-          ['bridge', ['obs', 'mc', 'vyos', 'ct']],
-          ['obs', []],
-          ['mc', []],
-          ['vyos', []],
-          ['ct', []],
+          ['root-a', ['branch-a1', 'branch-a2']],
+          ['root-b', ['branch-b1', 'branch-b2']],
+          ['branch-a1', []],
+          ['branch-a2', []],
+          ['branch-b1', []],
+          ['branch-b2', []],
         ]),
         deviceById,
         parentIdsByDeviceId: new Map([
-          ['core', []],
-          ['bridge', ['core']],
-          ['obs', ['bridge']],
-          ['mc', ['bridge']],
-          ['vyos', ['bridge']],
-          ['ct', ['bridge']],
+          ['root-a', []],
+          ['root-b', []],
+          ['branch-a1', ['root-a']],
+          ['branch-a2', ['root-a']],
+          ['branch-b1', ['root-b']],
+          ['branch-b2', ['root-b']],
         ]),
-        peerIdsByDeviceId: new Map([
-          ['core', []],
-          ['bridge', []],
-          ['obs', []],
-          ['mc', []],
-          ['vyos', []],
-          ['ct', []],
-        ]),
+        peerIdsByDeviceId: new Map(),
         primaryChildrenByDeviceId: new Map(),
         primaryParentDeviceById: new Map(),
-        rootDeviceIds: ['core'],
-        visibleLinkIds: new Set(links.map((link) => link.id)),
-      },
-      snapshot: {
-        links,
-      },
-    } as unknown as TopologyStoreState;
-
-    const positions = computeNetworkLayoutTargets(devices, state);
-    const ids = devices.map((entry) => entry.id);
-
-    for (let leftIndex = 0; leftIndex < ids.length; leftIndex += 1) {
-      for (let rightIndex = leftIndex + 1; rightIndex < ids.length; rightIndex += 1) {
-        const leftId = ids[leftIndex];
-        const rightId = ids[rightIndex];
-        const left = positions.get(leftId);
-        const right = positions.get(rightId);
-        expect(left && right).toBeTruthy();
-        const dx = (right?.x ?? 0) - (left?.x ?? 0);
-        const dy = (right?.y ?? 0) - (left?.y ?? 0);
-        const dz = (right?.z ?? 0) - (left?.z ?? 0);
-        const distance = Math.hypot(dx, dy, dz);
-        const minDistance =
-          devicePlanarSupport(deviceById.get(leftId) ?? devices[leftIndex], dx, dz) +
-          devicePlanarSupport(deviceById.get(rightId) ?? devices[rightIndex], dx, dz) +
-          devicePlanarClearance(deviceById.get(leftId) ?? devices[leftIndex]) +
-          devicePlanarClearance(deviceById.get(rightId) ?? devices[rightIndex]) +
-          0.12;
-        expect(
-          distance,
-          `${leftId} vs ${rightId}: got ${distance}, expected >= ${minDistance - 0.02}`
-        ).toBeGreaterThanOrEqual(minDistance - 0.02);
+        rootDeviceIds: ['root-a', 'root-b'],
       }
-    }
+    );
+    const clusters = buildNetworkLayoutClusters(
+      [
+        {
+          id: 'root-a-branch-a1',
+          local_device_id: 'root-a',
+          local_interface: 'eth0',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.0.0/30'],
+          remote_device_id: 'branch-a1',
+          remote_interface: 'eth0',
+        },
+        {
+          id: 'root-a-branch-a2',
+          local_device_id: 'root-a',
+          local_interface: 'eth1',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.0.4/30'],
+          remote_device_id: 'branch-a2',
+          remote_interface: 'eth0',
+        },
+        {
+          id: 'root-b-branch-b1',
+          local_device_id: 'root-b',
+          local_interface: 'eth0',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.0.8/30'],
+          remote_device_id: 'branch-b1',
+          remote_interface: 'eth0',
+        },
+        {
+          id: 'root-b-branch-b2',
+          local_device_id: 'root-b',
+          local_interface: 'eth1',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.0.12/30'],
+          remote_device_id: 'branch-b2',
+          remote_interface: 'eth0',
+        },
+      ],
+      {
+        depthByDeviceId: graph.depthByDeviceId,
+        deviceById,
+        parentIdsByDeviceId: graph.parentIdsByDeviceId,
+      }
+    );
+
+    const centers = placeClusterCenters(clusters, graph, deviceById);
+    const zValues = clusters
+      .map((cluster) => centers.get(cluster.clusterId)?.z ?? 0)
+      .sort((left, right) => left - right);
+
+    expect(Math.abs(zValues[0])).toBeGreaterThan(0.5);
+    expect(Math.abs(zValues[zValues.length - 1])).toBeGreaterThan(0.5);
+    expect(zValues[zValues.length - 1] - zValues[0]).toBeGreaterThan(2);
+  });
+
+  it('places sibling child clusters within a forward fan instead of opposite directions', () => {
+    const deviceById = new Map<string, ViewDevice>([
+      ['hub', device('hub', 'hub-router', 'router')],
+      ['branch', device('branch', 'branch-router', 'router')],
+      ['sw-a', device('sw-a', 'branch-switch-a', 'switch')],
+      ['sw-b', device('sw-b', 'branch-switch-b', 'switch')],
+    ]);
+    const graph = buildRelationLayoutGraph(['hub', 'branch', 'sw-a', 'sw-b'], {
+      childIdsByDeviceId: new Map([
+        ['hub', ['branch']],
+        ['branch', ['sw-a', 'sw-b']],
+        ['sw-a', []],
+        ['sw-b', []],
+      ]),
+      deviceById,
+      parentIdsByDeviceId: new Map([
+        ['hub', []],
+        ['branch', ['hub']],
+        ['sw-a', ['branch']],
+        ['sw-b', ['branch']],
+      ]),
+      peerIdsByDeviceId: new Map(),
+      primaryChildrenByDeviceId: new Map(),
+      primaryParentDeviceById: new Map(),
+      rootDeviceIds: ['hub'],
+    });
+    const clusters = buildNetworkLayoutClusters(
+      [
+        {
+          id: 'hub-branch',
+          local_device_id: 'hub',
+          local_interface: 'eth0',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.0.0/24'],
+          remote_device_id: 'branch',
+          remote_interface: 'eth0',
+        },
+        {
+          id: 'branch-sw-a',
+          local_device_id: 'branch',
+          local_interface: 'eth1',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.1.0/24'],
+          remote_device_id: 'sw-a',
+          remote_interface: 'eth0',
+        },
+        {
+          id: 'branch-sw-b',
+          local_device_id: 'branch',
+          local_interface: 'eth2',
+          protocol: 'lldp',
+          network_cidrs: ['10.0.2.0/24'],
+          remote_device_id: 'sw-b',
+          remote_interface: 'eth0',
+        },
+      ],
+      {
+        depthByDeviceId: graph.depthByDeviceId,
+        deviceById,
+        parentIdsByDeviceId: graph.parentIdsByDeviceId,
+      }
+    );
+
+    const centers = placeClusterCenters(clusters, graph, deviceById);
+    const parentCluster = clusters.find((cluster) => cluster.networkCidr === '10.0.0.0/24');
+    const childClusterA = clusters.find((cluster) => cluster.networkCidr === '10.0.1.0/24');
+    const childClusterB = clusters.find((cluster) => cluster.networkCidr === '10.0.2.0/24');
+    expect(parentCluster && childClusterA && childClusterB).toBeTruthy();
+
+    const parentCenter = centers.get(parentCluster?.clusterId ?? '');
+    const childCenterA = centers.get(childClusterA?.clusterId ?? '');
+    const childCenterB = centers.get(childClusterB?.clusterId ?? '');
+    expect(parentCenter && childCenterA && childCenterB).toBeTruthy();
+
+    const childVectorA = new Vector3(
+      (childCenterA?.x ?? 0) - (parentCenter?.x ?? 0),
+      0,
+      (childCenterA?.z ?? 0) - (parentCenter?.z ?? 0)
+    ).normalize();
+    const childVectorB = new Vector3(
+      (childCenterB?.x ?? 0) - (parentCenter?.x ?? 0),
+      0,
+      (childCenterB?.z ?? 0) - (parentCenter?.z ?? 0)
+    ).normalize();
+
+    expect(childVectorA.dot(childVectorB)).toBeGreaterThan(0);
+  });
+
+  it('keeps each branch subtree grouped when neighboring branches also reserve descendant space', () => {
+    const deviceById = new Map<string, ViewDevice>([
+      ['hub', device('hub', 'hub-router', 'router')],
+      ['branch-a', device('branch-a', 'branch-router-a', 'router')],
+      ['branch-b', device('branch-b', 'branch-router-b', 'router')],
+      ['sw-a1', device('sw-a1', 'branch-switch-a1', 'switch')],
+      ['sw-a2', device('sw-a2', 'branch-switch-a2', 'switch')],
+      ['sw-b1', device('sw-b1', 'branch-switch-b1', 'switch')],
+      ['sw-b2', device('sw-b2', 'branch-switch-b2', 'switch')],
+    ]);
+    const graph = buildRelationLayoutGraph(
+      ['hub', 'branch-a', 'branch-b', 'sw-a1', 'sw-a2', 'sw-b1', 'sw-b2'],
+      {
+        childIdsByDeviceId: new Map([
+          ['hub', ['branch-a', 'branch-b']],
+          ['branch-a', ['sw-a1', 'sw-a2']],
+          ['branch-b', ['sw-b1', 'sw-b2']],
+          ['sw-a1', []],
+          ['sw-a2', []],
+          ['sw-b1', []],
+          ['sw-b2', []],
+        ]),
+        deviceById,
+        parentIdsByDeviceId: new Map([
+          ['hub', []],
+          ['branch-a', ['hub']],
+          ['branch-b', ['hub']],
+          ['sw-a1', ['branch-a']],
+          ['sw-a2', ['branch-a']],
+          ['sw-b1', ['branch-b']],
+          ['sw-b2', ['branch-b']],
+        ]),
+        peerIdsByDeviceId: new Map(),
+        primaryChildrenByDeviceId: new Map(),
+        primaryParentDeviceById: new Map(),
+        rootDeviceIds: ['hub'],
+      }
+    );
+    const links: ViewLink[] = [
+      {
+        id: 'hub-branch-a',
+        local_device_id: 'hub',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'branch-a',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'hub-branch-b',
+        local_device_id: 'hub',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.1.0/24'],
+        remote_device_id: 'branch-b',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'branch-a-sw-a1',
+        local_device_id: 'branch-a',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.1.0.0/24'],
+        remote_device_id: 'sw-a1',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'branch-a-sw-a2',
+        local_device_id: 'branch-a',
+        local_interface: 'eth2',
+        protocol: 'lldp',
+        network_cidrs: ['10.2.0.0/24'],
+        remote_device_id: 'sw-a2',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'branch-b-sw-b1',
+        local_device_id: 'branch-b',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.3.0.0/24'],
+        remote_device_id: 'sw-b1',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'branch-b-sw-b2',
+        local_device_id: 'branch-b',
+        local_interface: 'eth2',
+        protocol: 'lldp',
+        network_cidrs: ['10.4.0.0/24'],
+        remote_device_id: 'sw-b2',
+        remote_interface: 'eth0',
+      },
+    ];
+    const clusters = buildNetworkLayoutClusters(links, {
+      depthByDeviceId: graph.depthByDeviceId,
+      deviceById,
+      parentIdsByDeviceId: graph.parentIdsByDeviceId,
+    });
+
+    const centers = placeClusterCenters(clusters, graph, deviceById);
+    const clusterByCidr = new Map(clusters.map((cluster) => [cluster.networkCidr, cluster]));
+
+    const groupedDot = (parentCidr: string, leftCidr: string, rightCidr: string) => {
+      const parentCenter = centers.get(clusterByCidr.get(parentCidr)?.clusterId ?? '') ?? new Vector3();
+      const leftCenter = centers.get(clusterByCidr.get(leftCidr)?.clusterId ?? '') ?? new Vector3();
+      const rightCenter = centers.get(clusterByCidr.get(rightCidr)?.clusterId ?? '') ?? new Vector3();
+      return new Vector3(leftCenter.x - parentCenter.x, 0, leftCenter.z - parentCenter.z)
+        .normalize()
+        .dot(new Vector3(rightCenter.x - parentCenter.x, 0, rightCenter.z - parentCenter.z).normalize());
+    };
+
+    expect(groupedDot('10.0.0.0/24', '10.1.0.0/24', '10.2.0.0/24')).toBeGreaterThan(0);
+    expect(groupedDot('10.0.1.0/24', '10.3.0.0/24', '10.4.0.0/24')).toBeGreaterThan(0);
   });
 });

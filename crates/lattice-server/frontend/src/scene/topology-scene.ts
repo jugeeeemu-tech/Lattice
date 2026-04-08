@@ -422,6 +422,12 @@ interface ClusterLayoutPlacement {
   center: Vector3;
   cluster: NetworkLayoutCluster;
   initialCenter: Vector3;
+  angularAllowance: number;
+  parentClusterId: string | null;
+  preferredAngle: number | null;
+  preferredDistance: number | null;
+  preferredElevation: number | null;
+  reservedRadius: number;
 }
 
 function compareDeviceIdsByLabel(
@@ -780,6 +786,476 @@ function clusterRootAnchor(
   return center;
 }
 
+function clusterRootWeights(
+  cluster: NetworkLayoutCluster,
+  rootSharesByDeviceId: Map<string, Map<string, number>>
+): Map<string, number> {
+  const weights = new Map<string, number>();
+  for (const deviceId of cluster.memberDeviceIds) {
+    for (const [rootId, share] of rootSharesByDeviceId.get(deviceId) ?? []) {
+      weights.set(rootId, (weights.get(rootId) ?? 0) + share);
+    }
+  }
+  return weights;
+}
+
+function rootForwardAxis(
+  rootId: string,
+  rootAnchor: Vector3,
+  rootAnchors: Map<string, Vector3>
+): Vector3 {
+  const anchorList = Array.from(rootAnchors.values());
+  if (anchorList.length <= 1) {
+    return new Vector3(0, 0, 1);
+  }
+
+  const centroid = new Vector3();
+  for (const anchor of anchorList) {
+    centroid.add(anchor);
+  }
+  centroid.divideScalar(anchorList.length);
+
+  if (anchorList.length === 2) {
+    const otherAnchor = anchorList.find((candidate) => !candidate.equals(rootAnchor)) ?? anchorList[0];
+    const axis = otherAnchor.clone().sub(rootAnchor);
+    if (axis.lengthSq() < 0.0001) {
+      return new Vector3(0, 0, 1);
+    }
+    axis.normalize();
+    return new Vector3(-axis.z, 0, axis.x).normalize();
+  }
+
+  const outward = rootAnchor.clone().sub(centroid);
+  if (outward.lengthSq() < 0.0001) {
+    const fallbackAngle = hash01(`root-forward:${rootId}`) * Math.PI * 2;
+    return new Vector3(Math.cos(fallbackAngle), 0, Math.sin(fallbackAngle));
+  }
+  return outward.normalize();
+}
+
+function layoutRootClustersInRootRegions(
+  rootClusters: ReadonlyArray<NetworkLayoutCluster>,
+  rootAnchors: Map<string, Vector3>,
+  rootSharesByDeviceId: Map<string, Map<string, number>>,
+  reservedRadiusByClusterId: Map<string, number>
+): Map<string, Vector3> {
+  const placements = new Map<string, Vector3>();
+  if (rootClusters.length === 0) {
+    return placements;
+  }
+
+  const entries = rootClusters.map((cluster) => {
+    const weights = clusterRootWeights(cluster, rootSharesByDeviceId);
+    let dominantRootId: string | null = null;
+    let dominantWeight = -1;
+    let totalWeight = 0;
+    const weightedAnchor = new Vector3();
+    for (const [rootId, weight] of weights.entries()) {
+      totalWeight += weight;
+      const anchor = rootAnchors.get(rootId);
+      if (anchor) {
+        weightedAnchor.add(anchor.clone().multiplyScalar(weight));
+      }
+      if (weight > dominantWeight) {
+        dominantWeight = weight;
+        dominantRootId = rootId;
+      }
+    }
+    if (totalWeight > 0) {
+      weightedAnchor.divideScalar(totalWeight);
+    }
+
+    return {
+      cluster,
+      dominantRootId,
+      lateralRadius: computeClusterLateralReservation(
+        cluster,
+        reservedRadiusByClusterId.get(cluster.clusterId) ?? cluster.requiredRadius
+      ),
+      reservedRadius: reservedRadiusByClusterId.get(cluster.clusterId) ?? cluster.requiredRadius,
+      weightedAnchor,
+    };
+  });
+
+  const groups = new Map<string, typeof entries>();
+  for (const entry of entries) {
+    const rootId =
+      entry.dominantRootId ??
+      rootAnchors.keys().next().value ??
+      null;
+    if (!rootId) {
+      continue;
+    }
+    const group = groups.get(rootId) ?? [];
+    group.push(entry);
+    groups.set(rootId, group);
+  }
+
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  for (const [rootId, groupEntries] of groups.entries()) {
+    const rootAnchor = rootAnchors.get(rootId);
+    if (!rootAnchor) {
+      continue;
+    }
+
+    groupEntries.sort(
+      (left, right) =>
+        right.reservedRadius - left.reservedRadius ||
+        left.cluster.networkCidr.localeCompare(right.cluster.networkCidr) ||
+        left.cluster.clusterId.localeCompare(right.cluster.clusterId)
+    );
+
+    const forwardAxis = rootForwardAxis(rootId, rootAnchor, rootAnchors);
+    const lateralAxis = new Vector3(-forwardAxis.z, 0, forwardAxis.x);
+    const maxLateralRadius = groupEntries.reduce(
+      (maximum, entry) => Math.max(maximum, entry.lateralRadius),
+      0
+    );
+    const areaDemand = groupEntries.reduce((sum, entry) => sum + Math.PI * Math.pow(entry.lateralRadius + 0.4, 2), 0);
+    let diskRadius = Math.max(
+      maxLateralRadius + 0.5,
+      Math.sqrt(areaDemand / Math.PI)
+    );
+    let localOffsets: Array<{
+      entry: (typeof groupEntries)[number];
+      x: number;
+      z: number;
+    }> = [];
+    const placementGap = 0.9;
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      localOffsets = groupEntries.map((entry, index) => {
+        const usableRadius = Math.max(0, diskRadius - entry.lateralRadius - 0.2);
+        const normalizedRadius =
+          groupEntries.length === 1 ? 0 : Math.sqrt((index + 0.5) / groupEntries.length);
+        const radius = usableRadius * normalizedRadius;
+        const phase = hash01(`${rootId}:${entry.cluster.clusterId}:root-region`) * Math.PI * 2;
+        return {
+          entry,
+          x: Math.cos(goldenAngle * index + phase) * radius,
+          z: Math.sin(goldenAngle * index + phase) * radius,
+        };
+      });
+
+      for (let iteration = 0; iteration < 36; iteration += 1) {
+        for (let leftIndex = 0; leftIndex < localOffsets.length; leftIndex += 1) {
+          for (let rightIndex = leftIndex + 1; rightIndex < localOffsets.length; rightIndex += 1) {
+            const left = localOffsets[leftIndex];
+            const right = localOffsets[rightIndex];
+            let dx = right.x - left.x;
+            let dz = right.z - left.z;
+            let distance = Math.hypot(dx, dz);
+            if (distance < 0.0001) {
+              const angle =
+                hash01(
+                  `root-region-overlap:${left.entry.cluster.clusterId}:${right.entry.cluster.clusterId}`
+                ) *
+                Math.PI *
+                2;
+              dx = Math.cos(angle) * 0.001;
+              dz = Math.sin(angle) * 0.001;
+              distance = 0.001;
+            }
+
+            const minDistance = left.entry.lateralRadius + right.entry.lateralRadius + placementGap;
+            if (distance >= minDistance) {
+              continue;
+            }
+
+            const delta = (minDistance - distance) * 0.45;
+            const unitX = dx / distance;
+            const unitZ = dz / distance;
+            left.x -= unitX * delta;
+            left.z -= unitZ * delta;
+            right.x += unitX * delta;
+            right.z += unitZ * delta;
+          }
+        }
+
+        for (const local of localOffsets) {
+          const limit = Math.max(0, diskRadius - local.entry.lateralRadius - 0.1);
+          const distance = Math.hypot(local.x, local.z);
+          if (distance > limit && distance > 0.0001) {
+            const scale = limit / distance;
+            local.x *= scale;
+            local.z *= scale;
+          }
+        }
+      }
+
+      let maxOverflow = 0;
+      for (let leftIndex = 0; leftIndex < localOffsets.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < localOffsets.length; rightIndex += 1) {
+          const left = localOffsets[leftIndex];
+          const right = localOffsets[rightIndex];
+          const minDistance = left.entry.lateralRadius + right.entry.lateralRadius + placementGap;
+          const distance = Math.hypot(right.x - left.x, right.z - left.z);
+          maxOverflow = Math.max(maxOverflow, minDistance - distance);
+        }
+      }
+      for (const local of localOffsets) {
+        const limit = Math.max(0, diskRadius - local.entry.lateralRadius - 0.1);
+        maxOverflow = Math.max(maxOverflow, Math.hypot(local.x, local.z) - limit);
+      }
+
+      if (maxOverflow <= 0.12) {
+        break;
+      }
+      diskRadius += maxOverflow * 0.75 + 0.5;
+    }
+
+    const rootClearance =
+      groupEntries.reduce((maximum, entry) => Math.max(maximum, entry.cluster.requiredRadius), 0) + 0.8;
+    const usedRadius =
+      localOffsets.reduce(
+        (maximum, local) =>
+          Math.max(maximum, Math.hypot(local.x, local.z) + local.entry.lateralRadius),
+        0
+      ) || maxLateralRadius;
+    const diskCenter = rootAnchor
+      .clone()
+      .add(forwardAxis.clone().multiplyScalar(usedRadius + rootClearance));
+
+    for (const local of localOffsets) {
+      const center = diskCenter
+        .clone()
+        .add(lateralAxis.clone().multiplyScalar(local.x))
+        .add(forwardAxis.clone().multiplyScalar(local.z));
+      placements.set(local.entry.cluster.clusterId, center);
+    }
+  }
+
+  return placements;
+}
+
+function computeParentChildClusterDistance(
+  parentCluster: NetworkLayoutCluster,
+  childReservedRadius: number,
+  childMinDepth: number
+): number {
+  const depthDelta = Math.max(0, childMinDepth - parentCluster.minDepth);
+  const dynamicClearance = Math.max(
+    0.9,
+    Math.min(2.6, parentCluster.requiredRadius * 0.18 + childReservedRadius * 0.12 + depthDelta * 0.35)
+  );
+  return (
+    parentCluster.requiredRadius +
+    childReservedRadius +
+    dynamicClearance
+  );
+}
+
+function computeClusterLateralReservation(
+  cluster: Pick<NetworkLayoutCluster, 'requiredRadius'>,
+  reservedRadius: number
+): number {
+  const subtreeReach = Math.max(cluster.requiredRadius, reservedRadius);
+  return Math.max(cluster.requiredRadius, Math.sqrt(cluster.requiredRadius * subtreeReach));
+}
+
+function computeSiblingSphereSlots(
+  siblingLateralRadii: number[],
+  baseSphereRadius: number,
+  siblingGap: number,
+  seedKey: string
+): {
+  usedRadius: number;
+  sphereRadius: number;
+  slots: Array<{ offsetX: number; offsetZ: number; verticalOffset: number; angularAllowance: number }>;
+} {
+  if (siblingLateralRadii.length === 0) {
+    return { sphereRadius: 0, usedRadius: 0, slots: [] };
+  }
+
+  let sphereRadius = Math.max(1.1, baseSphereRadius);
+  const goldenAngle = Math.PI * (3 - Math.sqrt(5));
+  let slots: Array<{ offsetX: number; offsetZ: number; verticalOffset: number; angularAllowance: number }> =
+    [];
+
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    slots = siblingLateralRadii.map((lateralRadius, index) => {
+      const usableRadius = Math.max(0, sphereRadius - lateralRadius - 0.2);
+      const normalizedRadius =
+        siblingLateralRadii.length === 1 ? 0 : Math.sqrt((index + 0.5) / siblingLateralRadii.length);
+      const radius = usableRadius * normalizedRadius;
+      const phase = hash01(`${seedKey}:sphere:${index}`) * Math.PI * 2;
+      return {
+        offsetX: Math.cos(goldenAngle * index + phase) * radius,
+        offsetZ: Math.sin(goldenAngle * index + phase) * radius,
+        angularAllowance: Math.max(0.3, Math.asin(Math.min(0.98, (lateralRadius + siblingGap) / Math.max(0.0001, sphereRadius + lateralRadius))) * 2),
+        verticalOffset: 0,
+      };
+    });
+
+    for (let iteration = 0; iteration < 32; iteration += 1) {
+      for (let leftIndex = 0; leftIndex < slots.length; leftIndex += 1) {
+        for (let rightIndex = leftIndex + 1; rightIndex < slots.length; rightIndex += 1) {
+          const left = slots[leftIndex];
+          const right = slots[rightIndex];
+          let dx = right.offsetX - left.offsetX;
+          let dz = right.offsetZ - left.offsetZ;
+          let distance = Math.hypot(dx, dz);
+          if (distance < 0.0001) {
+            const angle = hash01(`sibling-overlap:${seedKey}:${leftIndex}:${rightIndex}`) * Math.PI * 2;
+            dx = Math.cos(angle) * 0.001;
+            dz = Math.sin(angle) * 0.001;
+            distance = 0.001;
+          }
+
+          const minDistance = siblingLateralRadii[leftIndex] + siblingLateralRadii[rightIndex] + siblingGap;
+          if (distance >= minDistance) {
+            continue;
+          }
+
+          const delta = (minDistance - distance) * 0.45;
+          const unitX = dx / distance;
+          const unitZ = dz / distance;
+          left.offsetX -= unitX * delta;
+          left.offsetZ -= unitZ * delta;
+          right.offsetX += unitX * delta;
+          right.offsetZ += unitZ * delta;
+        }
+      }
+
+      for (let index = 0; index < slots.length; index += 1) {
+        const slot = slots[index];
+        const limit = Math.max(0, sphereRadius - siblingLateralRadii[index] - 0.1);
+        const distance = Math.hypot(slot.offsetX, slot.offsetZ);
+        if (distance > limit && distance > 0.0001) {
+          const scale = limit / distance;
+          slot.offsetX *= scale;
+          slot.offsetZ *= scale;
+        }
+      }
+    }
+
+    let maxOverflow = 0;
+    for (let leftIndex = 0; leftIndex < slots.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < slots.length; rightIndex += 1) {
+        const minDistance = siblingLateralRadii[leftIndex] + siblingLateralRadii[rightIndex] + siblingGap;
+        const distance = Math.hypot(
+          slots[rightIndex].offsetX - slots[leftIndex].offsetX,
+          slots[rightIndex].offsetZ - slots[leftIndex].offsetZ
+        );
+        maxOverflow = Math.max(maxOverflow, minDistance - distance);
+      }
+    }
+    for (let index = 0; index < slots.length; index += 1) {
+      const limit = Math.max(0, sphereRadius - siblingLateralRadii[index] - 0.1);
+      maxOverflow = Math.max(maxOverflow, Math.hypot(slots[index].offsetX, slots[index].offsetZ) - limit);
+    }
+
+    if (maxOverflow <= 0.12) {
+      break;
+    }
+    sphereRadius += maxOverflow * 0.75 + 0.35;
+  }
+
+  const usedRadius =
+    slots.reduce(
+      (maximum, slot, index) =>
+        Math.max(maximum, Math.hypot(slot.offsetX, slot.offsetZ) + siblingLateralRadii[index]),
+      0
+    ) || sphereRadius;
+
+  return { sphereRadius, usedRadius, slots };
+}
+
+function relaxRootClusterCenters(placements: ClusterLayoutPlacement[]): void {
+  if (placements.length <= 1) {
+    return;
+  }
+
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    for (let leftIndex = 0; leftIndex < placements.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < placements.length; rightIndex += 1) {
+        const left = placements[leftIndex];
+        const right = placements[rightIndex];
+        let dx = right.center.x - left.center.x;
+        let dz = right.center.z - left.center.z;
+        let distance = Math.hypot(dx, dz);
+        if (distance < 0.0001) {
+          const angle = hash01(`root-cluster-overlap:${left.cluster.clusterId}:${right.cluster.clusterId}`) * Math.PI * 2;
+          dx = Math.cos(angle) * 0.001;
+          dz = Math.sin(angle) * 0.001;
+          distance = 0.001;
+        }
+
+        const minDistance = left.reservedRadius + right.reservedRadius + 2.2;
+        if (distance >= minDistance) {
+          continue;
+        }
+
+        const delta = (minDistance - distance) * 0.45;
+        const unitX = dx / distance;
+        const unitZ = dz / distance;
+        left.center.x -= unitX * delta;
+        left.center.z -= unitZ * delta;
+        right.center.x += unitX * delta;
+        right.center.z += unitZ * delta;
+      }
+    }
+
+    for (const placement of placements) {
+      placement.center.lerp(placement.initialCenter, 0.08);
+    }
+  }
+}
+
+function normalizeAngleDelta(angle: number): number {
+  let normalized = angle;
+  while (normalized > Math.PI) {
+    normalized -= Math.PI * 2;
+  }
+  while (normalized < -Math.PI) {
+    normalized += Math.PI * 2;
+  }
+  return normalized;
+}
+
+function computeSubtreeReservedRadii(
+  clustersById: Map<string, NetworkLayoutCluster>,
+  childClusterIdsByParentId: Map<string, string[]>
+): Map<string, number> {
+  const reservedRadiusByClusterId = new Map<string, number>();
+
+  const visit = (clusterId: string): number => {
+    const cached = reservedRadiusByClusterId.get(clusterId);
+    if (cached !== undefined) {
+      return cached;
+    }
+
+    const cluster = clustersById.get(clusterId);
+    if (!cluster) {
+      return 0;
+    }
+
+    let reservedRadius = cluster.requiredRadius;
+    for (const childClusterId of childClusterIdsByParentId.get(clusterId) ?? []) {
+      const childCluster = clustersById.get(childClusterId);
+      if (!childCluster) {
+        continue;
+      }
+      const childReservedRadius = visit(childClusterId);
+      const childDistance = computeParentChildClusterDistance(
+        cluster,
+        childReservedRadius,
+        childCluster.minDepth
+      );
+      reservedRadius = Math.max(reservedRadius, childDistance + childReservedRadius);
+    }
+
+    reservedRadiusByClusterId.set(clusterId, reservedRadius);
+    return reservedRadius;
+  };
+
+  for (const clusterId of clustersById.keys()) {
+    visit(clusterId);
+  }
+
+  return reservedRadiusByClusterId;
+}
+
 export function placeClusterCenters(
   clusters: ReadonlyArray<NetworkLayoutCluster>,
   graph: RelationLayoutGraph,
@@ -825,95 +1301,197 @@ export function placeClusterCenters(
     currentChildren.push(cluster.clusterId);
     childClusterIdsByParentId.set(candidateParents[0].clusterId, currentChildren);
   }
-
-  const rootClusters = clusters.filter((cluster) => !parentClusterIdByClusterId.has(cluster.clusterId));
-  for (const rootCluster of rootClusters) {
-    const initialCenter = clusterRootAnchor(rootCluster, rootAnchors, graph.rootShareByDeviceId);
-    placements.set(rootCluster.clusterId, {
-      center: initialCenter.clone(),
-      cluster: rootCluster,
-      initialCenter,
-    });
-  }
-
-  const sortedClusters = [...clusters].sort(
-    (left, right) =>
-      left.minDepth - right.minDepth ||
-      compareDeviceIdsByLabel(left.parentFacingDeviceId, right.parentFacingDeviceId, deviceById) ||
-      left.clusterId.localeCompare(right.clusterId)
-  );
-  for (const cluster of sortedClusters) {
-    if (placements.has(cluster.clusterId)) {
-      continue;
+  const placeWithReservedRadii = (
+    reservedRadiusByClusterId: Map<string, number>
+  ): Map<string, Vector3> => {
+    const localPlacements = new Map<string, ClusterLayoutPlacement>();
+    const rootClusters = clusters.filter((cluster) => !parentClusterIdByClusterId.has(cluster.clusterId));
+    const rootClusterCenters = layoutRootClustersInRootRegions(
+      rootClusters,
+      rootAnchors,
+      graph.rootShareByDeviceId,
+      reservedRadiusByClusterId
+    );
+    for (const rootCluster of rootClusters) {
+      const initialCenter =
+        rootClusterCenters.get(rootCluster.clusterId) ??
+        clusterRootAnchor(rootCluster, rootAnchors, graph.rootShareByDeviceId);
+      localPlacements.set(rootCluster.clusterId, {
+        angularAllowance: Math.PI,
+        center: initialCenter.clone(),
+        cluster: rootCluster,
+        initialCenter,
+        parentClusterId: null,
+        preferredAngle: null,
+        preferredDistance: null,
+        preferredElevation: null,
+        reservedRadius: reservedRadiusByClusterId.get(rootCluster.clusterId) ?? rootCluster.requiredRadius,
+      });
     }
-    const parentClusterId = parentClusterIdByClusterId.get(cluster.clusterId);
-    const parentPlacement = parentClusterId ? placements.get(parentClusterId) : null;
-    if (!parentClusterId || !parentPlacement) {
-      const initialCenter = clusterRootAnchor(cluster, rootAnchors, graph.rootShareByDeviceId);
-      placements.set(cluster.clusterId, {
+    const rootPlacementList = rootClusters
+      .map((cluster) => localPlacements.get(cluster.clusterId))
+      .filter((placement): placement is ClusterLayoutPlacement => Boolean(placement));
+    relaxRootClusterCenters(rootPlacementList);
+    const rootCentroid = new Vector3();
+    for (const placement of rootPlacementList) {
+      rootCentroid.add(placement.center);
+    }
+    if (rootPlacementList.length > 0) {
+      rootCentroid.divideScalar(rootPlacementList.length);
+    }
+    const sortedRootPlacements = [...rootPlacementList].sort(
+      (left, right) =>
+        left.center.x - right.center.x ||
+        left.center.z - right.center.z ||
+        left.cluster.clusterId.localeCompare(right.cluster.clusterId)
+    );
+    const rootAxisVector =
+      sortedRootPlacements.length >= 2
+        ? sortedRootPlacements[sortedRootPlacements.length - 1].center
+            .clone()
+            .sub(sortedRootPlacements[0].center)
+        : new Vector3(1, 0, 0);
+    if (rootAxisVector.lengthSq() < 0.0001) {
+      rootAxisVector.set(1, 0, 0);
+    }
+    rootAxisVector.normalize();
+    const rootNormalAngle = Math.atan2(rootAxisVector.x, -rootAxisVector.z);
+    const maxRootProjection =
+      rootPlacementList.reduce((maximum, placement) => {
+        const offset = placement.center.clone().sub(rootCentroid);
+        const projection = offset.x * rootAxisVector.x + offset.z * rootAxisVector.z;
+        return Math.max(maximum, Math.abs(projection));
+      }, 0) || 1;
+
+    const sortedClusters = [...clusters].sort(
+      (left, right) =>
+        left.minDepth - right.minDepth ||
+        compareDeviceIdsByLabel(left.parentFacingDeviceId, right.parentFacingDeviceId, deviceById) ||
+        left.clusterId.localeCompare(right.clusterId)
+    );
+    for (const cluster of sortedClusters) {
+      if (localPlacements.has(cluster.clusterId)) {
+        continue;
+      }
+      const parentClusterId = parentClusterIdByClusterId.get(cluster.clusterId);
+      const parentPlacement = parentClusterId ? localPlacements.get(parentClusterId) : null;
+      if (!parentClusterId || !parentPlacement) {
+        const initialCenter = clusterRootAnchor(cluster, rootAnchors, graph.rootShareByDeviceId);
+        localPlacements.set(cluster.clusterId, {
+          angularAllowance: Math.PI,
+          center: initialCenter.clone(),
+          cluster,
+          initialCenter,
+          parentClusterId: null,
+          preferredAngle: null,
+          preferredDistance: null,
+          preferredElevation: null,
+          reservedRadius: reservedRadiusByClusterId.get(cluster.clusterId) ?? cluster.requiredRadius,
+        });
+        continue;
+      }
+
+      const siblingClusterIds = (childClusterIdsByParentId.get(parentClusterId) ?? []).sort((leftId, rightId) =>
+        compareClusterIds(leftId, rightId, clustersById)
+      );
+      const siblingIndex = siblingClusterIds.indexOf(cluster.clusterId);
+      const grandparentClusterId = parentClusterIdByClusterId.get(parentClusterId);
+      const grandparentPlacement = grandparentClusterId ? localPlacements.get(grandparentClusterId) : null;
+      let baseAngle = hash01(`cluster-parent:${parentClusterId}`) * Math.PI * 2;
+      let baseElevation = 0;
+      if (grandparentPlacement) {
+        baseAngle = Math.atan2(
+          parentPlacement.center.z - grandparentPlacement.center.z,
+          parentPlacement.center.x - grandparentPlacement.center.x
+        );
+      } else if (parentPlacement.parentClusterId === null) {
+        baseAngle = rootNormalAngle;
+        const rootOffset = parentPlacement.center.clone().sub(rootCentroid);
+        const rootProjection =
+          rootOffset.x * rootAxisVector.x + rootOffset.z * rootAxisVector.z;
+        baseElevation = (rootProjection / maxRootProjection) * 0.22;
+      } else if (Math.hypot(parentPlacement.center.x, parentPlacement.center.z) > 0.0001) {
+        baseAngle = Math.atan2(parentPlacement.center.z, parentPlacement.center.x);
+      }
+      const reservedRadius = reservedRadiusByClusterId.get(cluster.clusterId) ?? cluster.requiredRadius;
+      const siblingGap = 0.9;
+      const siblingLateralRadii = siblingClusterIds.map((siblingClusterId) => {
+        const siblingCluster = clustersById.get(siblingClusterId);
+        return siblingCluster
+          ? computeClusterLateralReservation(
+              siblingCluster,
+              reservedRadiusByClusterId.get(siblingClusterId) ?? siblingCluster.requiredRadius
+            )
+          : 0;
+      });
+      const isRootDirectChild = parentPlacement.parentClusterId === null;
+      const baseSphereRadius = Math.max(
+        siblingLateralRadii.reduce((sum, radius) => sum + Math.PI * Math.pow(radius + siblingGap * 0.5, 2), 0) > 0
+          ? Math.sqrt(
+              siblingLateralRadii.reduce(
+                (sum, radius) => sum + Math.PI * Math.pow(radius + siblingGap * 0.5, 2),
+                0
+              ) / Math.PI
+            )
+          : 0,
+        Math.max(
+          ...siblingLateralRadii,
+          computeClusterLateralReservation(cluster, reservedRadius)
+        ) + (isRootDirectChild ? 0.4 : 0.3)
+      );
+      const siblingLayout = computeSiblingSphereSlots(
+        siblingLateralRadii,
+        baseSphereRadius,
+        siblingGap,
+        parentClusterId
+      );
+      const slot = siblingLayout.slots[siblingIndex] ?? {
+        offsetX: 0,
+        offsetZ: 0,
+        angularAllowance: Math.PI / 6,
+        verticalOffset: 0,
+      };
+      const forwardAxis = new Vector3(Math.cos(baseAngle), 0, Math.sin(baseAngle));
+      const sphereCenterDistance =
+        parentPlacement.cluster.requiredRadius + siblingLayout.usedRadius + (isRootDirectChild ? 0.9 : 0.45);
+      const sphereCenter = new Vector3(
+        parentPlacement.center.x + forwardAxis.x * sphereCenterDistance,
+        parentPlacement.center.y + baseElevation * sphereCenterDistance * 0.35,
+        parentPlacement.center.z + forwardAxis.z * sphereCenterDistance
+      );
+      const lateralAxis = new Vector3(-Math.sin(baseAngle), 0, Math.cos(baseAngle));
+      const xzOffset = lateralAxis
+        .clone()
+        .multiplyScalar(slot.offsetX)
+        .add(forwardAxis.clone().multiplyScalar(slot.offsetZ));
+      const initialCenter = new Vector3(
+        sphereCenter.x + xzOffset.x,
+        sphereCenter.y + slot.verticalOffset,
+        sphereCenter.z + xzOffset.z
+      );
+      localPlacements.set(cluster.clusterId, {
+        angularAllowance: slot.angularAllowance,
         center: initialCenter.clone(),
         cluster,
         initialCenter,
+        parentClusterId,
+        preferredAngle: baseAngle,
+        preferredDistance: sphereCenterDistance,
+        preferredElevation: baseElevation,
+        reservedRadius,
       });
-      continue;
     }
 
-    const siblingClusterIds = (childClusterIdsByParentId.get(parentClusterId) ?? []).sort((leftId, rightId) =>
-      compareClusterIds(leftId, rightId, clustersById)
+    return new Map(
+      Array.from(localPlacements.values()).map((placement) => [placement.cluster.clusterId, placement.center.clone()])
     );
-    const siblingIndex = siblingClusterIds.indexOf(cluster.clusterId);
-    const siblingCount = Math.max(siblingClusterIds.length, 1);
-    const baseAngle = hash01(`cluster-parent:${parentClusterId}`) * Math.PI * 2;
-    const angle = baseAngle + (Math.PI * 2 * siblingIndex) / siblingCount;
-    const distance =
-      parentPlacement.cluster.requiredRadius + cluster.requiredRadius + 4.6 + (cluster.minDepth - parentPlacement.cluster.minDepth) * 0.8;
-    const initialCenter = new Vector3(
-      parentPlacement.center.x + Math.cos(angle) * distance,
-      0,
-      parentPlacement.center.z + Math.sin(angle) * distance
-    );
-    placements.set(cluster.clusterId, {
-      center: initialCenter.clone(),
-      cluster,
-      initialCenter,
-    });
-  }
+  };
 
-  const placementList = Array.from(placements.values());
-  for (let iteration = 0; iteration < 18; iteration += 1) {
-    for (let leftIndex = 0; leftIndex < placementList.length; leftIndex += 1) {
-      for (let rightIndex = leftIndex + 1; rightIndex < placementList.length; rightIndex += 1) {
-        const left = placementList[leftIndex];
-        const right = placementList[rightIndex];
-        let dx = right.center.x - left.center.x;
-        let dz = right.center.z - left.center.z;
-        let distance = Math.hypot(dx, dz);
-        if (distance < 0.0001) {
-          const angle = hash01(`cluster-overlap:${left.cluster.clusterId}:${right.cluster.clusterId}`) * Math.PI * 2;
-          dx = Math.cos(angle) * 0.001;
-          dz = Math.sin(angle) * 0.001;
-          distance = 0.001;
-        }
-        const minDistance = left.cluster.requiredRadius + right.cluster.requiredRadius + 2.2;
-        if (distance >= minDistance) {
-          continue;
-        }
-        const delta = (minDistance - distance) * 0.45;
-        const unitX = dx / distance;
-        const unitZ = dz / distance;
-        left.center.x -= unitX * delta;
-        left.center.z -= unitZ * delta;
-        right.center.x += unitX * delta;
-        right.center.z += unitZ * delta;
-      }
-    }
-
-    for (const placement of placementList) {
-      placement.center.lerp(placement.initialCenter, 0.08);
-    }
-  }
-
-  return new Map(placementList.map((placement) => [placement.cluster.clusterId, placement.center.clone()]));
+  const estimatedReservedRadiusByClusterId = computeSubtreeReservedRadii(
+    clustersById,
+    childClusterIdsByParentId
+  );
+  return placeWithReservedRadii(estimatedReservedRadiusByClusterId);
 }
 
 function placeDevicesOnRings(
@@ -1022,7 +1600,8 @@ export function placeDevicesWithinCluster(
       cluster.requiredRadius + Math.max(0, depth - cluster.minDepth) * 0.35,
       cluster.requiredRadius + multiClusterBonus
     );
-    const layerCenter = new Vector3(center.x, -depth * depthSpacing, center.z);
+    const baseDepthY = -depth * depthSpacing;
+    const layerCenter = new Vector3(center.x, center.y + baseDepthY, center.z);
     const layerPositions = placeDevicesOnRings(
       layerDeviceIds,
       layerCenter,
@@ -1387,10 +1966,16 @@ export function computeNetworkLayoutTargets(
     }
 
     const fallback = legacyTargets.get(device.id);
+    const depth = layoutGraph.depthByDeviceId.get(device.id) ?? 0;
+    const defaultDepthY = -depth * depthSpacing;
     const blended = fallback
       ? fallback.clone().multiplyScalar(0.15).add(combined.multiplyScalar(0.85))
       : combined;
-    blended.y = -(layoutGraph.depthByDeviceId.get(device.id) ?? 0) * depthSpacing;
+    if (!fallback) {
+      blended.y = combined.y;
+    } else {
+      blended.y = defaultDepthY + (combined.y - defaultDepthY) * 0.85;
+    }
     anchorByDeviceId.set(device.id, blended);
   }
 
