@@ -393,6 +393,1074 @@ export function buildRelationRootAnchors(
   return anchors;
 }
 
+export interface NetworkLayoutCluster {
+  adjacentClusterIds: string[];
+  clusterId: string;
+  memberDepths: Map<string, number>;
+  memberDeviceIds: string[];
+  memberLinkIds: string[];
+  minDepth: number;
+  multiClusterDeviceWeights: Map<string, Map<string, number>>;
+  networkCidr: string;
+  parentFacingDeviceId: string;
+  requiredRadius: number;
+}
+
+interface NetworkClusterBuildInput {
+  depthByDeviceId: Map<string, number>;
+  deviceById: Map<string, ViewDevice>;
+  parentIdsByDeviceId: Map<string, string[]>;
+}
+
+interface ClusterLayoutPlacement {
+  center: Vector3;
+  cluster: NetworkLayoutCluster;
+  initialCenter: Vector3;
+}
+
+function compareDeviceIdsByLabel(
+  leftId: string,
+  rightId: string,
+  deviceById: Map<string, ViewDevice>
+): number {
+  return `${deviceById.get(leftId)?.label ?? leftId}`.localeCompare(
+    `${deviceById.get(rightId)?.label ?? rightId}`
+  );
+}
+
+function compareClusterIds(
+  leftId: string,
+  rightId: string,
+  clustersById: Map<string, NetworkLayoutCluster>
+): number {
+  const left = clustersById.get(leftId);
+  const right = clustersById.get(rightId);
+  if (!left || !right) {
+    return leftId.localeCompare(rightId);
+  }
+  return (
+    left.minDepth - right.minDepth ||
+    left.networkCidr.localeCompare(right.networkCidr) ||
+    left.clusterId.localeCompare(right.clusterId)
+  );
+}
+
+function networkClusterEdgeDeviceIds(link: ViewLink): [string, string] {
+  return [link.local_device_id, link.remote_device_id];
+}
+
+function buildConnectedComponents(
+  deviceIds: string[],
+  adjacency: Map<string, Set<string>>
+): string[][] {
+  const remaining = new Set(deviceIds);
+  const components: string[][] = [];
+
+  while (remaining.size > 0) {
+    const start = remaining.values().next().value;
+    if (!start) {
+      break;
+    }
+    const queue = [start];
+    const component: string[] = [];
+    remaining.delete(start);
+
+    while (queue.length > 0) {
+      const current = queue.shift();
+      if (!current) {
+        continue;
+      }
+      component.push(current);
+      for (const neighbor of adjacency.get(current) ?? []) {
+        if (!remaining.has(neighbor)) {
+          continue;
+        }
+        remaining.delete(neighbor);
+        queue.push(neighbor);
+      }
+    }
+
+    components.push(component);
+  }
+
+  return components;
+}
+
+export function resolveParentFacingDevice(
+  deviceIds: string[],
+  memberDepths: Map<string, number>,
+  visibleLinks: ReadonlyArray<ViewLink>,
+  parentIdsByDeviceId: Map<string, string[]>,
+  deviceById: Map<string, ViewDevice>
+): string {
+  const sortedCandidates = [...deviceIds].sort((leftId, rightId) =>
+    compareDeviceIdsByLabel(leftId, rightId, deviceById) || leftId.localeCompare(rightId)
+  );
+  if (sortedCandidates.length === 0) {
+    return '';
+  }
+
+  const minDepth = sortedCandidates.reduce(
+    (minimum, deviceId) => Math.min(minimum, memberDepths.get(deviceId) ?? 0),
+    Number.POSITIVE_INFINITY
+  );
+  const clusterMemberSet = new Set(deviceIds);
+  const candidates = sortedCandidates.filter((deviceId) => (memberDepths.get(deviceId) ?? 0) === minDepth);
+  let bestDeviceId = candidates[0];
+  let bestScore = -1;
+
+  for (const candidateId of candidates) {
+    const candidateDepth = memberDepths.get(candidateId) ?? 0;
+    const upstreamNeighbors = new Set<string>();
+
+    for (const link of visibleLinks) {
+      const [leftId, rightId] = networkClusterEdgeDeviceIds(link);
+      const otherId =
+        leftId === candidateId ? rightId : rightId === candidateId ? leftId : null;
+      if (!otherId || clusterMemberSet.has(otherId)) {
+        continue;
+      }
+      if ((memberDepths.get(otherId) ?? Number.POSITIVE_INFINITY) < candidateDepth) {
+        upstreamNeighbors.add(otherId);
+      }
+    }
+
+    for (const parentId of parentIdsByDeviceId.get(candidateId) ?? []) {
+      if (!clusterMemberSet.has(parentId) && (memberDepths.get(parentId) ?? Number.POSITIVE_INFINITY) < candidateDepth) {
+        upstreamNeighbors.add(parentId);
+      }
+    }
+
+    if (
+      upstreamNeighbors.size > bestScore ||
+      (upstreamNeighbors.size === bestScore &&
+        (compareDeviceIdsByLabel(candidateId, bestDeviceId, deviceById) < 0 ||
+          (compareDeviceIdsByLabel(candidateId, bestDeviceId, deviceById) === 0 &&
+            candidateId.localeCompare(bestDeviceId) < 0)))
+    ) {
+      bestScore = upstreamNeighbors.size;
+      bestDeviceId = candidateId;
+    }
+  }
+
+  return bestDeviceId;
+}
+
+export function computeClusterRequiredRadius(
+  cluster: Pick<NetworkLayoutCluster, 'memberDepths' | 'memberDeviceIds' | 'minDepth'>,
+  deviceById: Map<string, ViewDevice>,
+  multiClusterWeightByDeviceId: Map<string, number>
+): number {
+  const layerDeviceIdsByDepth = new Map<number, string[]>();
+  for (const deviceId of cluster.memberDeviceIds) {
+    const depth = cluster.memberDepths.get(deviceId) ?? cluster.minDepth;
+    const current = layerDeviceIdsByDepth.get(depth) ?? [];
+    current.push(deviceId);
+    layerDeviceIdsByDepth.set(depth, current);
+  }
+
+  let requiredRadius = 2.4;
+  for (const [depth, layerDeviceIds] of layerDeviceIdsByDepth.entries()) {
+    const totalDiameter = layerDeviceIds.reduce((sum, deviceId) => {
+      const footprint = layoutRadiusForDevice(deviceById.get(deviceId)) + 0.6;
+      return sum + footprint * 2;
+    }, 0);
+    const circumferenceRadius = totalDiameter / (Math.PI * 2);
+    const minLayerRadius = layerDeviceIds.length <= 1 ? 0 : 1.9;
+    const bridgePenalty = layerDeviceIds.reduce(
+      (sum, deviceId) => sum + (multiClusterWeightByDeviceId.get(deviceId) ?? 0) * 0.45,
+      0
+    );
+    const depthPadding = Math.max(0, depth - cluster.minDepth) * 0.35;
+    requiredRadius = Math.max(
+      requiredRadius,
+      Math.max(minLayerRadius, circumferenceRadius) + bridgePenalty + depthPadding
+    );
+  }
+
+  return requiredRadius;
+}
+
+export function buildNetworkLayoutClusters(
+  visibleLinks: ReadonlyArray<ViewLink>,
+  input: NetworkClusterBuildInput
+): NetworkLayoutCluster[] {
+  const coloredLinksByCidr = new Map<string, ViewLink[]>();
+  for (const link of visibleLinks) {
+    const networkCidr = primaryNetworkCidr(link);
+    if (!networkCidr) {
+      continue;
+    }
+    const current = coloredLinksByCidr.get(networkCidr) ?? [];
+    current.push(link);
+    coloredLinksByCidr.set(networkCidr, current);
+  }
+
+  const clusters: NetworkLayoutCluster[] = [];
+  const clustersById = new Map<string, NetworkLayoutCluster>();
+  const clusterIdsByDeviceId = new Map<string, string[]>();
+  const clusterIdsByDeviceAndCidr = new Map<string, Map<string, string[]>>();
+  const multiWeightByDeviceId = new Map<string, number>();
+
+  for (const [networkCidr, links] of coloredLinksByCidr.entries()) {
+    const adjacency = new Map<string, Set<string>>();
+    const deviceIds = new Set<string>();
+    for (const link of links) {
+      const [leftId, rightId] = networkClusterEdgeDeviceIds(link);
+      deviceIds.add(leftId);
+      deviceIds.add(rightId);
+      const leftNeighbors = adjacency.get(leftId) ?? new Set<string>();
+      leftNeighbors.add(rightId);
+      adjacency.set(leftId, leftNeighbors);
+      const rightNeighbors = adjacency.get(rightId) ?? new Set<string>();
+      rightNeighbors.add(leftId);
+      adjacency.set(rightId, rightNeighbors);
+    }
+
+    const components = buildConnectedComponents(Array.from(deviceIds), adjacency);
+    components.forEach((componentDeviceIds, componentIndex) => {
+      const componentSet = new Set(componentDeviceIds);
+      const componentLinks = links
+        .filter((link) => {
+          const [leftId, rightId] = networkClusterEdgeDeviceIds(link);
+          return componentSet.has(leftId) && componentSet.has(rightId);
+        })
+        .map((link) => link.id)
+        .sort();
+      const memberDepths = new Map(
+        componentDeviceIds.map((deviceId) => [deviceId, input.depthByDeviceId.get(deviceId) ?? 0])
+      );
+      const memberDeviceIds = [...componentDeviceIds].sort((leftId, rightId) =>
+        compareDeviceIdsByLabel(leftId, rightId, input.deviceById)
+      );
+      const minDepth = memberDeviceIds.reduce(
+        (minimum, deviceId) => Math.min(minimum, memberDepths.get(deviceId) ?? 0),
+        Number.POSITIVE_INFINITY
+      );
+      const clusterId = `cluster:${networkCidr}:${componentIndex}`;
+      const cluster: NetworkLayoutCluster = {
+        adjacentClusterIds: [],
+        clusterId,
+        memberDepths,
+        memberDeviceIds,
+        memberLinkIds: componentLinks,
+        minDepth: Number.isFinite(minDepth) ? minDepth : 0,
+        multiClusterDeviceWeights: new Map(),
+        networkCidr,
+        parentFacingDeviceId: '',
+        requiredRadius: 0,
+      };
+      clusters.push(cluster);
+      clustersById.set(clusterId, cluster);
+
+      for (const deviceId of memberDeviceIds) {
+        const currentClusterIds = clusterIdsByDeviceId.get(deviceId) ?? [];
+        currentClusterIds.push(clusterId);
+        clusterIdsByDeviceId.set(deviceId, currentClusterIds);
+        const cidrMap = clusterIdsByDeviceAndCidr.get(deviceId) ?? new Map<string, string[]>();
+        const perCidrClusterIds = cidrMap.get(networkCidr) ?? [];
+        perCidrClusterIds.push(clusterId);
+        cidrMap.set(networkCidr, perCidrClusterIds);
+        clusterIdsByDeviceAndCidr.set(deviceId, cidrMap);
+      }
+    });
+  }
+
+  const adjacencyByClusterId = new Map<string, Set<string>>(
+    clusters.map((cluster) => [cluster.clusterId, new Set<string>()])
+  );
+  for (const deviceClusterIds of clusterIdsByDeviceId.values()) {
+    for (let leftIndex = 0; leftIndex < deviceClusterIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < deviceClusterIds.length; rightIndex += 1) {
+        adjacencyByClusterId.get(deviceClusterIds[leftIndex])?.add(deviceClusterIds[rightIndex]);
+        adjacencyByClusterId.get(deviceClusterIds[rightIndex])?.add(deviceClusterIds[leftIndex]);
+      }
+    }
+  }
+
+  for (const link of visibleLinks) {
+    if (link.network_cidrs.length <= 1) {
+      continue;
+    }
+    const perCidrWeight = 1 / link.network_cidrs.length;
+    const endpointIds = [link.local_device_id, link.remote_device_id];
+    for (const endpointId of endpointIds) {
+      for (const networkCidr of link.network_cidrs) {
+        const directMatches =
+          clusterIdsByDeviceAndCidr.get(endpointId)?.get(networkCidr) ?? [];
+        const remoteEndpointId = endpointIds[0] === endpointId ? endpointIds[1] : endpointIds[0];
+        const fallbackMatches =
+          clusterIdsByDeviceAndCidr.get(remoteEndpointId)?.get(networkCidr) ?? [];
+        const matchedClusterIds = (directMatches.length > 0 ? directMatches : fallbackMatches).slice().sort();
+        if (matchedClusterIds.length === 0) {
+          continue;
+        }
+
+        multiWeightByDeviceId.set(
+          endpointId,
+          (multiWeightByDeviceId.get(endpointId) ?? 0) + perCidrWeight
+        );
+        const distributedWeight = perCidrWeight / matchedClusterIds.length;
+        for (const clusterId of matchedClusterIds) {
+          const cluster = clustersById.get(clusterId);
+          if (!cluster) {
+            continue;
+          }
+          const clusterWeightByClusterId =
+            cluster.multiClusterDeviceWeights.get(endpointId) ?? new Map<string, number>();
+          clusterWeightByClusterId.set(
+            clusterId,
+            (clusterWeightByClusterId.get(clusterId) ?? 0) + distributedWeight
+          );
+          cluster.multiClusterDeviceWeights.set(endpointId, clusterWeightByClusterId);
+
+          for (const siblingClusterId of matchedClusterIds) {
+            if (siblingClusterId === clusterId) {
+              continue;
+            }
+            adjacencyByClusterId.get(clusterId)?.add(siblingClusterId);
+          }
+        }
+      }
+    }
+  }
+
+  for (const cluster of clusters) {
+    cluster.parentFacingDeviceId = resolveParentFacingDevice(
+      cluster.memberDeviceIds,
+      cluster.memberDepths,
+      visibleLinks,
+      input.parentIdsByDeviceId,
+      input.deviceById
+    );
+    cluster.requiredRadius = computeClusterRequiredRadius(
+      cluster,
+      input.deviceById,
+      multiWeightByDeviceId
+    );
+    cluster.adjacentClusterIds = Array.from(adjacencyByClusterId.get(cluster.clusterId) ?? []).sort(
+      (leftId, rightId) => compareClusterIds(leftId, rightId, clustersById)
+    );
+  }
+
+  return clusters.sort((left, right) =>
+    left.minDepth - right.minDepth ||
+    left.networkCidr.localeCompare(right.networkCidr) ||
+    left.clusterId.localeCompare(right.clusterId)
+  );
+}
+
+function clusterRootAnchor(
+  cluster: NetworkLayoutCluster,
+  rootAnchors: Map<string, Vector3>,
+  rootSharesByDeviceId: Map<string, Map<string, number>>
+): Vector3 {
+  const center = new Vector3();
+  let totalWeight = 0;
+  for (const deviceId of cluster.memberDeviceIds) {
+    const rootShares = rootSharesByDeviceId.get(deviceId) ?? new Map();
+    for (const [rootId, share] of rootShares.entries()) {
+      const anchor = rootAnchors.get(rootId);
+      if (!anchor) {
+        continue;
+      }
+      center.add(anchor.clone().multiplyScalar(share));
+      totalWeight += share;
+    }
+  }
+  if (totalWeight > 0) {
+    center.divideScalar(totalWeight);
+  }
+  return center;
+}
+
+export function placeClusterCenters(
+  clusters: ReadonlyArray<NetworkLayoutCluster>,
+  graph: RelationLayoutGraph,
+  deviceById: Map<string, ViewDevice>
+): Map<string, Vector3> {
+  const placements = new Map<string, ClusterLayoutPlacement>();
+  const rootAnchors = buildRelationRootAnchors(graph);
+  const clustersById = new Map(clusters.map((cluster) => [cluster.clusterId, cluster]));
+  const parentClusterIdByClusterId = new Map<string, string>();
+  const childClusterIdsByParentId = new Map<string, string[]>();
+  const adjacencyScoreByPair = new Map<string, number>();
+
+  for (const cluster of clusters) {
+    for (const adjacentClusterId of cluster.adjacentClusterIds) {
+      const scoreKey = pairKey(cluster.clusterId, adjacentClusterId);
+      adjacencyScoreByPair.set(scoreKey, (adjacencyScoreByPair.get(scoreKey) ?? 0) + 1);
+    }
+  }
+
+  for (const cluster of clusters) {
+    const candidateParents = cluster.adjacentClusterIds
+      .map((clusterId) => clustersById.get(clusterId))
+      .filter((candidate): candidate is NetworkLayoutCluster => Boolean(candidate))
+      .filter((candidate) => candidate.minDepth < cluster.minDepth);
+
+    if (candidateParents.length === 0) {
+      continue;
+    }
+
+    candidateParents.sort((left, right) => {
+      const leftScore = adjacencyScoreByPair.get(pairKey(cluster.clusterId, left.clusterId)) ?? 0;
+      const rightScore = adjacencyScoreByPair.get(pairKey(cluster.clusterId, right.clusterId)) ?? 0;
+      return (
+        rightScore - leftScore ||
+        left.minDepth - right.minDepth ||
+        compareDeviceIdsByLabel(left.parentFacingDeviceId, right.parentFacingDeviceId, deviceById) ||
+        left.clusterId.localeCompare(right.clusterId)
+      );
+    });
+
+    parentClusterIdByClusterId.set(cluster.clusterId, candidateParents[0].clusterId);
+    const currentChildren = childClusterIdsByParentId.get(candidateParents[0].clusterId) ?? [];
+    currentChildren.push(cluster.clusterId);
+    childClusterIdsByParentId.set(candidateParents[0].clusterId, currentChildren);
+  }
+
+  const rootClusters = clusters.filter((cluster) => !parentClusterIdByClusterId.has(cluster.clusterId));
+  for (const rootCluster of rootClusters) {
+    const initialCenter = clusterRootAnchor(rootCluster, rootAnchors, graph.rootShareByDeviceId);
+    placements.set(rootCluster.clusterId, {
+      center: initialCenter.clone(),
+      cluster: rootCluster,
+      initialCenter,
+    });
+  }
+
+  const sortedClusters = [...clusters].sort(
+    (left, right) =>
+      left.minDepth - right.minDepth ||
+      compareDeviceIdsByLabel(left.parentFacingDeviceId, right.parentFacingDeviceId, deviceById) ||
+      left.clusterId.localeCompare(right.clusterId)
+  );
+  for (const cluster of sortedClusters) {
+    if (placements.has(cluster.clusterId)) {
+      continue;
+    }
+    const parentClusterId = parentClusterIdByClusterId.get(cluster.clusterId);
+    const parentPlacement = parentClusterId ? placements.get(parentClusterId) : null;
+    if (!parentClusterId || !parentPlacement) {
+      const initialCenter = clusterRootAnchor(cluster, rootAnchors, graph.rootShareByDeviceId);
+      placements.set(cluster.clusterId, {
+        center: initialCenter.clone(),
+        cluster,
+        initialCenter,
+      });
+      continue;
+    }
+
+    const siblingClusterIds = (childClusterIdsByParentId.get(parentClusterId) ?? []).sort((leftId, rightId) =>
+      compareClusterIds(leftId, rightId, clustersById)
+    );
+    const siblingIndex = siblingClusterIds.indexOf(cluster.clusterId);
+    const siblingCount = Math.max(siblingClusterIds.length, 1);
+    const baseAngle = hash01(`cluster-parent:${parentClusterId}`) * Math.PI * 2;
+    const angle = baseAngle + (Math.PI * 2 * siblingIndex) / siblingCount;
+    const distance =
+      parentPlacement.cluster.requiredRadius + cluster.requiredRadius + 4.6 + (cluster.minDepth - parentPlacement.cluster.minDepth) * 0.8;
+    const initialCenter = new Vector3(
+      parentPlacement.center.x + Math.cos(angle) * distance,
+      0,
+      parentPlacement.center.z + Math.sin(angle) * distance
+    );
+    placements.set(cluster.clusterId, {
+      center: initialCenter.clone(),
+      cluster,
+      initialCenter,
+    });
+  }
+
+  const placementList = Array.from(placements.values());
+  for (let iteration = 0; iteration < 18; iteration += 1) {
+    for (let leftIndex = 0; leftIndex < placementList.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < placementList.length; rightIndex += 1) {
+        const left = placementList[leftIndex];
+        const right = placementList[rightIndex];
+        let dx = right.center.x - left.center.x;
+        let dz = right.center.z - left.center.z;
+        let distance = Math.hypot(dx, dz);
+        if (distance < 0.0001) {
+          const angle = hash01(`cluster-overlap:${left.cluster.clusterId}:${right.cluster.clusterId}`) * Math.PI * 2;
+          dx = Math.cos(angle) * 0.001;
+          dz = Math.sin(angle) * 0.001;
+          distance = 0.001;
+        }
+        const minDistance = left.cluster.requiredRadius + right.cluster.requiredRadius + 2.2;
+        if (distance >= minDistance) {
+          continue;
+        }
+        const delta = (minDistance - distance) * 0.45;
+        const unitX = dx / distance;
+        const unitZ = dz / distance;
+        left.center.x -= unitX * delta;
+        left.center.z -= unitZ * delta;
+        right.center.x += unitX * delta;
+        right.center.z += unitZ * delta;
+      }
+    }
+
+    for (const placement of placementList) {
+      placement.center.lerp(placement.initialCenter, 0.08);
+    }
+  }
+
+  return new Map(placementList.map((placement) => [placement.cluster.clusterId, placement.center.clone()]));
+}
+
+function placeDevicesOnRings(
+  deviceIds: string[],
+  center: Vector3,
+  layerRadius: number,
+  targetY: number,
+  seedKey: string,
+  deviceById: Map<string, ViewDevice>
+): Map<string, Vector3> {
+  const positions = new Map<string, Vector3>();
+  if (deviceIds.length === 0) {
+    return positions;
+  }
+  if (deviceIds.length === 1) {
+    positions.set(deviceIds[0], new Vector3(center.x, targetY, center.z));
+    return positions;
+  }
+
+  const sortedDeviceIds = [...deviceIds].sort((leftId, rightId) =>
+    compareDeviceIdsByLabel(leftId, rightId, deviceById)
+  );
+  const maxFootprint = sortedDeviceIds.reduce(
+    (maximum, deviceId) => Math.max(maximum, layoutRadiusForDevice(deviceById.get(deviceId)) + 0.7),
+    1.8
+  );
+  const ringSpacing = Math.max(2.2, maxFootprint * 1.6);
+  const slotSpacing = Math.max(2.1, maxFootprint * 1.9);
+  let cursor = 0;
+  let ringIndex = 0;
+
+  while (cursor < sortedDeviceIds.length) {
+    const radius = Math.max(0, layerRadius - ringIndex * ringSpacing);
+    const remaining = sortedDeviceIds.length - cursor;
+    if (radius < slotSpacing * 0.75 || remaining === 1) {
+      const deviceId = sortedDeviceIds[cursor];
+      const angle = hash01(`${seedKey}:center:${deviceId}`) * Math.PI * 2;
+      const centerOffset = Math.min(radius, slotSpacing * 0.35);
+      positions.set(
+        deviceId,
+        new Vector3(
+          center.x + Math.cos(angle) * centerOffset,
+          targetY,
+          center.z + Math.sin(angle) * centerOffset
+        )
+      );
+      cursor += 1;
+      continue;
+    }
+
+    const circumference = Math.PI * 2 * Math.max(radius, slotSpacing);
+    const capacity = Math.max(4, Math.floor(circumference / slotSpacing));
+    const ringDeviceIds = sortedDeviceIds.slice(cursor, cursor + Math.min(remaining, capacity));
+    const startAngle = hash01(`${seedKey}:ring:${ringIndex}`) * Math.PI * 2;
+    const angleStep = (Math.PI * 2) / ringDeviceIds.length;
+    ringDeviceIds.forEach((deviceId, deviceIndex) => {
+      const angle = startAngle + angleStep * deviceIndex;
+      positions.set(
+        deviceId,
+        new Vector3(
+          center.x + Math.cos(angle) * radius,
+          targetY,
+          center.z + Math.sin(angle) * radius
+        )
+      );
+    });
+    cursor += ringDeviceIds.length;
+    ringIndex += 1;
+  }
+
+  return positions;
+}
+
+export function placeDevicesWithinCluster(
+  cluster: NetworkLayoutCluster,
+  center: Vector3,
+  depthSpacing: number,
+  deviceById: Map<string, ViewDevice>
+): Map<string, Vector3> {
+  const positions = new Map<string, Vector3>();
+  const deviceIdsByDepth = new Map<number, string[]>();
+  for (const deviceId of cluster.memberDeviceIds) {
+    const depth = cluster.memberDepths.get(deviceId) ?? cluster.minDepth;
+    const current = deviceIdsByDepth.get(depth) ?? [];
+    current.push(deviceId);
+    deviceIdsByDepth.set(depth, current);
+  }
+
+  const sortedDepths = Array.from(deviceIdsByDepth.keys()).sort((left, right) => left - right);
+  for (const depth of sortedDepths) {
+    const layerDeviceIds = deviceIdsByDepth.get(depth) ?? [];
+    const multiClusterBonus = layerDeviceIds.reduce((sum, deviceId) => {
+      const weightSum = Array.from(cluster.multiClusterDeviceWeights.get(deviceId)?.values() ?? []).reduce(
+        (innerSum, weight) => innerSum + weight,
+        0
+      );
+      return sum + weightSum * 0.45;
+    }, 0);
+    const layerRadius = Math.min(
+      cluster.requiredRadius + Math.max(0, depth - cluster.minDepth) * 0.35,
+      cluster.requiredRadius + multiClusterBonus
+    );
+    const layerCenter = new Vector3(center.x, -depth * depthSpacing, center.z);
+    const layerPositions = placeDevicesOnRings(
+      layerDeviceIds,
+      layerCenter,
+      Math.max(0, layerRadius),
+      layerCenter.y,
+      `${cluster.clusterId}:depth:${depth}`,
+      deviceById
+    );
+    for (const [deviceId, position] of layerPositions.entries()) {
+      positions.set(deviceId, position);
+    }
+  }
+
+  return positions;
+}
+
+function computeLegacyRelationTargets(
+  devices: ViewDevice[],
+  state: TopologyStoreState
+): Map<string, Vector3> {
+  const visibleIds = new Set(devices.map((device) => device.id));
+  const deviceById = new Map(devices.map((device) => [device.id, device]));
+  const layoutGraph = buildRelationLayoutGraph(visibleIds, {
+    childIdsByDeviceId: state.model.childIdsByDeviceId,
+    deviceById: state.model.deviceById,
+    parentIdsByDeviceId: state.model.parentIdsByDeviceId,
+    peerIdsByDeviceId: state.model.peerIdsByDeviceId,
+    primaryChildrenByDeviceId: state.model.primaryChildrenByDeviceId,
+    primaryParentDeviceById: state.model.primaryParentDeviceById,
+    rootDeviceIds: state.model.rootDeviceIds,
+  });
+  const childrenByDeviceId = layoutGraph.childIdsByDeviceId;
+  const parentsByDeviceId = layoutGraph.parentIdsByDeviceId;
+  const roots = layoutGraph.rootDeviceIds;
+  const rootSet = new Set(roots);
+
+  const depthSpacing = 5.6;
+  const slotSpacing = 2.8;
+  const groupRingStart = 1.7;
+  const groupRingStep = 1.7;
+  const relaxIterations = 10;
+  const maxStep = 0.22;
+  const anchorByDeviceId = new Map<string, Vector3>();
+
+  const placeConcentricGroup = (
+    deviceIds: string[],
+    center: Vector3,
+    targetY: number,
+    seedKey: string,
+    innerRadius: number,
+    radiusStep: number
+  ) => {
+    let cursor = 0;
+    let ringIndex = 0;
+
+    while (cursor < deviceIds.length) {
+      const baseRadius = innerRadius + ringIndex * radiusStep;
+      const capacity = Math.max(6, Math.floor((Math.PI * 2 * baseRadius) / slotSpacing));
+      const ringIds = deviceIds.slice(cursor, cursor + capacity);
+      const startAngle = hash01(`${seedKey}:ring:${ringIndex}`) * Math.PI * 2;
+      const angleStep = ringIds.length > 0 ? (Math.PI * 2) / ringIds.length : 0;
+
+      for (let index = 0; index < ringIds.length; index += 1) {
+        const deviceId = ringIds[index];
+        const childIds = childrenByDeviceId.get(deviceId) ?? [];
+        const radius = baseRadius + (childIds.length > 0 ? 0.55 : 0);
+        const angle = startAngle + index * angleStep;
+        anchorByDeviceId.set(
+          deviceId,
+          new Vector3(
+            center.x + Math.cos(angle) * radius,
+            targetY,
+            center.z + Math.sin(angle) * radius
+          )
+        );
+      }
+
+      cursor += ringIds.length;
+      ringIndex += 1;
+    }
+  };
+  const rootAnchors = buildRelationRootAnchors(layoutGraph);
+  for (const [deviceId, anchor] of rootAnchors.entries()) {
+    anchorByDeviceId.set(deviceId, anchor.clone());
+  }
+
+  const devicesByDepth = new Map<number, string[]>();
+  for (const [deviceId, depth] of layoutGraph.depthByDeviceId.entries()) {
+    if (depth <= 0) {
+      continue;
+    }
+    const current = devicesByDepth.get(depth) ?? [];
+    current.push(deviceId);
+    devicesByDepth.set(depth, current);
+  }
+
+  const sortedDepths = Array.from(devicesByDepth.keys()).sort((left, right) => left - right);
+  for (const depth of sortedDepths) {
+    const layerIds = devicesByDepth.get(depth) ?? [];
+    const groups = new Map<string, { center: Vector3; deviceIds: string[] }>();
+
+    for (const deviceId of layerIds) {
+      const parentIds = parentsByDeviceId.get(deviceId) ?? [];
+      const parentAnchors = parentIds
+        .map((parentId) => anchorByDeviceId.get(parentId))
+        .filter((anchor): anchor is Vector3 => Boolean(anchor));
+
+      const rootShares = layoutGraph.rootShareByDeviceId.get(deviceId) ?? new Map();
+      const weightedRootCenter = new Vector3();
+      let weightedTotal = 0;
+      for (const [rootId, share] of rootShares.entries()) {
+        const rootAnchor = rootAnchors.get(rootId);
+        if (!rootAnchor) {
+          continue;
+        }
+        weightedRootCenter.add(rootAnchor.clone().multiplyScalar(share));
+        weightedTotal += share;
+      }
+      if (weightedTotal > 0) {
+        weightedRootCenter.divideScalar(weightedTotal);
+      }
+
+      const parentCenter = new Vector3();
+      if (parentAnchors.length > 0) {
+        for (const anchor of parentAnchors) {
+          parentCenter.add(anchor);
+        }
+        parentCenter.divideScalar(parentAnchors.length);
+      } else {
+        parentCenter.copy(weightedRootCenter);
+      }
+
+      const center =
+        weightedTotal > 0 && parentAnchors.length > 0
+          ? parentCenter.clone().lerp(weightedRootCenter, 0.25)
+          : parentCenter.clone();
+      center.y = -depth * depthSpacing;
+
+      const signatureParts = [
+        `depth:${depth}`,
+        `parents:${parentIds.join('|')}`,
+        `roots:${Array.from(rootShares.keys()).sort().join('|')}`,
+      ];
+      const signature = signatureParts.join('::');
+      const group = groups.get(signature) ?? { center: new Vector3(), deviceIds: [] };
+      group.center.add(center);
+      group.deviceIds.push(deviceId);
+      groups.set(signature, group);
+    }
+
+    const sortedGroups = Array.from(groups.entries()).sort(([leftKey], [rightKey]) =>
+      leftKey.localeCompare(rightKey)
+    );
+    for (const [signature, group] of sortedGroups) {
+      group.center.divideScalar(Math.max(group.deviceIds.length, 1));
+      group.deviceIds.sort((leftId, rightId) =>
+        compareDeviceIdsByLabel(leftId, rightId, deviceById)
+      );
+
+      if (group.deviceIds.length === 1) {
+        anchorByDeviceId.set(group.deviceIds[0], group.center.clone());
+        continue;
+      }
+
+      placeConcentricGroup(
+        group.deviceIds,
+        group.center,
+        group.center.y,
+        signature,
+        groupRingStart,
+        groupRingStep
+      );
+    }
+  }
+
+  const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
+  const positions = new Map(
+    Array.from(anchorByDeviceId.entries(), ([deviceId, anchor]) => [deviceId, anchor.clone()])
+  );
+
+  for (let iteration = 0; iteration < relaxIterations; iteration += 1) {
+    const forces = new Map(orderedIds.map((deviceId) => [deviceId, { x: 0, z: 0 }]));
+
+    for (let leftIndex = 0; leftIndex < orderedIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < orderedIds.length; rightIndex += 1) {
+        const leftId = orderedIds[leftIndex];
+        const rightId = orderedIds[rightIndex];
+        const leftPosition = positions.get(leftId);
+        const rightPosition = positions.get(rightId);
+        if (!leftPosition || !rightPosition) {
+          continue;
+        }
+
+        let dx = rightPosition.x - leftPosition.x;
+        let dz = rightPosition.z - leftPosition.z;
+        let distance = Math.hypot(dx, dz);
+        if (distance < 0.0001) {
+          const angle = hash01(`layout:${pairKey(leftId, rightId)}`) * Math.PI * 2;
+          dx = Math.cos(angle) * 0.001;
+          dz = Math.sin(angle) * 0.001;
+          distance = 0.001;
+        }
+
+        const minDistance =
+          layoutRadiusForDevice(deviceById.get(leftId)) +
+          layoutRadiusForDevice(deviceById.get(rightId)) +
+          0.55;
+        if (distance >= minDistance) {
+          continue;
+        }
+
+        const normalized = (minDistance - distance) / minDistance;
+        const strength = 0.18 * normalized;
+        const unitX = dx / distance;
+        const unitZ = dz / distance;
+        const leftForce = forces.get(leftId);
+        const rightForce = forces.get(rightId);
+        if (!leftForce || !rightForce) {
+          continue;
+        }
+        leftForce.x -= unitX * strength;
+        leftForce.z -= unitZ * strength;
+        rightForce.x += unitX * strength;
+        rightForce.z += unitZ * strength;
+      }
+    }
+
+    for (const deviceId of orderedIds) {
+      const anchor = anchorByDeviceId.get(deviceId);
+      const position = positions.get(deviceId);
+      const force = forces.get(deviceId);
+      if (!anchor || !position || !force) {
+        continue;
+      }
+      const anchorStrength = rootSet.has(deviceId) ? 0.24 : 0.18;
+      force.x += (anchor.x - position.x) * anchorStrength;
+      force.z += (anchor.z - position.z) * anchorStrength;
+    }
+
+    for (const deviceId of orderedIds) {
+      const position = positions.get(deviceId);
+      const force = forces.get(deviceId);
+      if (!position || !force) {
+        continue;
+      }
+      position.x += clampMagnitude(force.x, maxStep);
+      position.z += clampMagnitude(force.z, maxStep);
+    }
+  }
+
+  recenterPositionsAroundRootCentroid(positions, roots);
+
+  return new Map(
+    Array.from(positions.entries(), ([deviceId, position]) => {
+      const anchor = anchorByDeviceId.get(deviceId) ?? position;
+      return [deviceId, new Vector3(position.x, anchor.y, position.z)];
+    })
+  );
+}
+
+export function computeNetworkLayoutTargets(
+  devices: ViewDevice[],
+  state: TopologyStoreState
+): Map<string, Vector3> {
+  if (devices.length === 0) {
+    return new Map();
+  }
+
+  const legacyTargets = computeLegacyRelationTargets(devices, state);
+  const visibleIds = new Set(devices.map((device) => device.id));
+  const deviceById = new Map(devices.map((device) => [device.id, device]));
+  const visibleLinks = state.snapshot.links.filter(
+    (link) =>
+      state.model.visibleLinkIds.has(link.id) &&
+      visibleIds.has(link.local_device_id) &&
+      visibleIds.has(link.remote_device_id)
+  );
+  const layoutGraph = buildRelationLayoutGraph(visibleIds, {
+    childIdsByDeviceId: state.model.childIdsByDeviceId,
+    deviceById: state.model.deviceById,
+    parentIdsByDeviceId: state.model.parentIdsByDeviceId,
+    peerIdsByDeviceId: state.model.peerIdsByDeviceId,
+    primaryChildrenByDeviceId: state.model.primaryChildrenByDeviceId,
+    primaryParentDeviceById: state.model.primaryParentDeviceById,
+    rootDeviceIds: state.model.rootDeviceIds,
+  });
+  const parentsByDeviceId = layoutGraph.parentIdsByDeviceId;
+  const roots = layoutGraph.rootDeviceIds;
+  const rootSet = new Set(roots);
+  const depthSpacing = 5.6;
+  const clusters = buildNetworkLayoutClusters(visibleLinks, {
+    depthByDeviceId: layoutGraph.depthByDeviceId,
+    deviceById,
+    parentIdsByDeviceId: parentsByDeviceId,
+  });
+  if (clusters.length === 0) {
+    return legacyTargets;
+  }
+
+  const clusterCentersById = placeClusterCenters(clusters, layoutGraph, deviceById);
+  const proposalEntriesByDeviceId = new Map<string, Array<{ position: Vector3; weight: number }>>();
+
+  for (const cluster of clusters) {
+    const clusterCenter = clusterCentersById.get(cluster.clusterId);
+    if (!clusterCenter) {
+      continue;
+    }
+
+    const clusterPositions = placeDevicesWithinCluster(cluster, clusterCenter, depthSpacing, deviceById);
+    for (const [deviceId, position] of clusterPositions.entries()) {
+      const current = proposalEntriesByDeviceId.get(deviceId) ?? [];
+      current.push({ position, weight: 1 });
+      proposalEntriesByDeviceId.set(deviceId, current);
+    }
+
+    for (const [deviceId, clusterWeights] of cluster.multiClusterDeviceWeights.entries()) {
+      if (cluster.memberDeviceIds.includes(deviceId)) {
+        continue;
+      }
+      const weight = clusterWeights.get(cluster.clusterId) ?? 0;
+      if (weight <= 0) {
+        continue;
+      }
+      const depth = layoutGraph.depthByDeviceId.get(deviceId) ?? 0;
+      const seedAngle = hash01(`${cluster.clusterId}:bridge:${deviceId}`) * Math.PI * 2;
+      const bridgeRadius = Math.max(cluster.requiredRadius * 0.55, 1.4);
+      const bridgePosition = new Vector3(
+        clusterCenter.x + Math.cos(seedAngle) * bridgeRadius,
+        -depth * depthSpacing,
+        clusterCenter.z + Math.sin(seedAngle) * bridgeRadius
+      );
+      const current = proposalEntriesByDeviceId.get(deviceId) ?? [];
+      current.push({ position: bridgePosition, weight });
+      proposalEntriesByDeviceId.set(deviceId, current);
+    }
+  }
+
+  const anchorByDeviceId = new Map<string, Vector3>(legacyTargets);
+  for (const device of devices) {
+    const proposals = proposalEntriesByDeviceId.get(device.id) ?? [];
+    if (proposals.length === 0) {
+      if (!anchorByDeviceId.has(device.id)) {
+        const depth = layoutGraph.depthByDeviceId.get(device.id) ?? 0;
+        anchorByDeviceId.set(device.id, new Vector3(0, -depth * depthSpacing, 0));
+      }
+      continue;
+    }
+
+    const combined = new Vector3();
+    let totalWeight = 0;
+    for (const proposal of proposals) {
+      combined.add(proposal.position.clone().multiplyScalar(proposal.weight));
+      totalWeight += proposal.weight;
+    }
+    if (totalWeight > 0) {
+      combined.divideScalar(totalWeight);
+    }
+
+    const fallback = legacyTargets.get(device.id);
+    const blended = fallback
+      ? fallback.clone().multiplyScalar(0.15).add(combined.multiplyScalar(0.85))
+      : combined;
+    blended.y = -(layoutGraph.depthByDeviceId.get(device.id) ?? 0) * depthSpacing;
+    anchorByDeviceId.set(device.id, blended);
+  }
+
+  const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
+  const positions = new Map(
+    Array.from(anchorByDeviceId.entries(), ([deviceId, anchor]) => [deviceId, anchor.clone()])
+  );
+  const maxStep = 0.18;
+  for (let iteration = 0; iteration < 12; iteration += 1) {
+    const forces = new Map(orderedIds.map((deviceId) => [deviceId, { x: 0, z: 0 }]));
+
+    for (let leftIndex = 0; leftIndex < orderedIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < orderedIds.length; rightIndex += 1) {
+        const leftId = orderedIds[leftIndex];
+        const rightId = orderedIds[rightIndex];
+        const leftPosition = positions.get(leftId);
+        const rightPosition = positions.get(rightId);
+        if (!leftPosition || !rightPosition) {
+          continue;
+        }
+
+        let dx = rightPosition.x - leftPosition.x;
+        let dz = rightPosition.z - leftPosition.z;
+        let distance = Math.hypot(dx, dz);
+        if (distance < 0.0001) {
+          const angle = hash01(`cluster-layout:${pairKey(leftId, rightId)}`) * Math.PI * 2;
+          dx = Math.cos(angle) * 0.001;
+          dz = Math.sin(angle) * 0.001;
+          distance = 0.001;
+        }
+
+        const minDistance =
+          layoutRadiusForDevice(deviceById.get(leftId)) +
+          layoutRadiusForDevice(deviceById.get(rightId)) +
+          0.8;
+        if (distance >= minDistance) {
+          continue;
+        }
+
+        const strength = ((minDistance - distance) / minDistance) * 0.2;
+        const unitX = dx / distance;
+        const unitZ = dz / distance;
+        const leftForce = forces.get(leftId);
+        const rightForce = forces.get(rightId);
+        if (!leftForce || !rightForce) {
+          continue;
+        }
+        leftForce.x -= unitX * strength;
+        leftForce.z -= unitZ * strength;
+        rightForce.x += unitX * strength;
+        rightForce.z += unitZ * strength;
+      }
+    }
+
+    for (const deviceId of orderedIds) {
+      const anchor = anchorByDeviceId.get(deviceId);
+      const position = positions.get(deviceId);
+      const force = forces.get(deviceId);
+      if (!anchor || !position || !force) {
+        continue;
+      }
+      const anchorStrength = rootSet.has(deviceId) ? 0.3 : 0.26;
+      force.x += (anchor.x - position.x) * anchorStrength;
+      force.z += (anchor.z - position.z) * anchorStrength;
+    }
+
+    for (const deviceId of orderedIds) {
+      const position = positions.get(deviceId);
+      const force = forces.get(deviceId);
+      if (!position || !force) {
+        continue;
+      }
+      position.x += clampMagnitude(force.x, maxStep);
+      position.z += clampMagnitude(force.z, maxStep);
+    }
+  }
+
+  recenterPositionsAroundRootCentroid(positions, roots);
+
+  return new Map(
+    Array.from(positions.entries(), ([deviceId, position]) => {
+      const anchor = anchorByDeviceId.get(deviceId) ?? position;
+      return [deviceId, new Vector3(position.x, anchor.y, position.z)];
+    })
+  );
+}
+
 export interface DeviceScreenAnchor {
   visibility: 'behind' | 'offscreen' | 'visible';
   x: number;
@@ -1537,250 +2605,7 @@ export class TopologySceneAdapter {
     devices: ViewDevice[],
     state: TopologyStoreState
   ): Map<string, Vector3> {
-    if (devices.length === 0) {
-      return new Map();
-    }
-
-    const visibleIds = new Set(devices.map((device) => device.id));
-    const deviceById = new Map(devices.map((device) => [device.id, device]));
-    const layoutGraph = buildRelationLayoutGraph(visibleIds, {
-      childIdsByDeviceId: state.model.childIdsByDeviceId,
-      deviceById: state.model.deviceById,
-      parentIdsByDeviceId: state.model.parentIdsByDeviceId,
-      peerIdsByDeviceId: state.model.peerIdsByDeviceId,
-      primaryChildrenByDeviceId: state.model.primaryChildrenByDeviceId,
-      primaryParentDeviceById: state.model.primaryParentDeviceById,
-      rootDeviceIds: state.model.rootDeviceIds,
-    });
-    const childrenByDeviceId = layoutGraph.childIdsByDeviceId;
-    const parentsByDeviceId = layoutGraph.parentIdsByDeviceId;
-    const roots = layoutGraph.rootDeviceIds;
-    const rootSet = new Set(roots);
-
-    const depthSpacing = 5.6;
-    const slotSpacing = 2.8;
-    const groupRingStart = 1.7;
-    const groupRingStep = 1.7;
-    const relaxIterations = 10;
-    const maxStep = 0.22;
-    const anchorByDeviceId = new Map<string, Vector3>();
-
-    const placeConcentricGroup = (
-      deviceIds: string[],
-      center: Vector3,
-      targetY: number,
-      seedKey: string,
-      innerRadius: number,
-      radiusStep: number
-    ) => {
-      let cursor = 0;
-      let ringIndex = 0;
-
-      while (cursor < deviceIds.length) {
-        const baseRadius = innerRadius + ringIndex * radiusStep;
-        const capacity = Math.max(6, Math.floor((Math.PI * 2 * baseRadius) / slotSpacing));
-        const ringIds = deviceIds.slice(cursor, cursor + capacity);
-        const startAngle = hash01(`${seedKey}:ring:${ringIndex}`) * Math.PI * 2;
-        const angleStep = ringIds.length > 0 ? (Math.PI * 2) / ringIds.length : 0;
-
-        for (let index = 0; index < ringIds.length; index += 1) {
-          const deviceId = ringIds[index];
-          const childIds = childrenByDeviceId.get(deviceId) ?? [];
-          const radius = baseRadius + (childIds.length > 0 ? 0.55 : 0);
-          const angle = startAngle + index * angleStep;
-          anchorByDeviceId.set(
-            deviceId,
-            new Vector3(
-              center.x + Math.cos(angle) * radius,
-              targetY,
-              center.z + Math.sin(angle) * radius
-            )
-          );
-        }
-
-        cursor += ringIds.length;
-        ringIndex += 1;
-      }
-    };
-    const rootAnchors = buildRelationRootAnchors(layoutGraph);
-    for (const [deviceId, anchor] of rootAnchors.entries()) {
-      anchorByDeviceId.set(deviceId, anchor.clone());
-    }
-
-    const devicesByDepth = new Map<number, string[]>();
-    for (const [deviceId, depth] of layoutGraph.depthByDeviceId.entries()) {
-      if (depth <= 0) {
-        continue;
-      }
-      const current = devicesByDepth.get(depth) ?? [];
-      current.push(deviceId);
-      devicesByDepth.set(depth, current);
-    }
-
-    const sortedDepths = Array.from(devicesByDepth.keys()).sort((left, right) => left - right);
-    for (const depth of sortedDepths) {
-      const layerIds = devicesByDepth.get(depth) ?? [];
-      const groups = new Map<string, { center: Vector3; deviceIds: string[] }>();
-
-      for (const deviceId of layerIds) {
-        const parentIds = parentsByDeviceId.get(deviceId) ?? [];
-        const parentAnchors = parentIds
-          .map((parentId) => anchorByDeviceId.get(parentId))
-          .filter((anchor): anchor is Vector3 => Boolean(anchor));
-
-        const rootShares = layoutGraph.rootShareByDeviceId.get(deviceId) ?? new Map();
-        const weightedRootCenter = new Vector3();
-        let weightedTotal = 0;
-        for (const [rootId, share] of rootShares.entries()) {
-          const rootAnchor = rootAnchors.get(rootId);
-          if (!rootAnchor) {
-            continue;
-          }
-          weightedRootCenter.add(rootAnchor.clone().multiplyScalar(share));
-          weightedTotal += share;
-        }
-        if (weightedTotal > 0) {
-          weightedRootCenter.divideScalar(weightedTotal);
-        }
-
-        const parentCenter = new Vector3();
-        if (parentAnchors.length > 0) {
-          for (const anchor of parentAnchors) {
-            parentCenter.add(anchor);
-          }
-          parentCenter.divideScalar(parentAnchors.length);
-        } else {
-          parentCenter.copy(weightedRootCenter);
-        }
-
-        const center =
-          weightedTotal > 0 && parentAnchors.length > 0
-            ? parentCenter.clone().lerp(weightedRootCenter, 0.25)
-            : parentCenter.clone();
-        center.y = -depth * depthSpacing;
-
-        const signatureParts = [
-          `depth:${depth}`,
-          `parents:${parentIds.join('|')}`,
-          `roots:${Array.from(rootShares.keys()).sort().join('|')}`,
-        ];
-        const signature = signatureParts.join('::');
-        const group = groups.get(signature) ?? { center: new Vector3(), deviceIds: [] };
-        group.center.add(center);
-        group.deviceIds.push(deviceId);
-        groups.set(signature, group);
-      }
-
-      const sortedGroups = Array.from(groups.entries()).sort(([leftKey], [rightKey]) =>
-        leftKey.localeCompare(rightKey)
-      );
-      for (const [signature, group] of sortedGroups) {
-        group.center.divideScalar(Math.max(group.deviceIds.length, 1));
-        group.deviceIds.sort((leftId, rightId) =>
-          `${deviceById.get(leftId)?.label ?? leftId}`.localeCompare(
-            `${deviceById.get(rightId)?.label ?? rightId}`
-          )
-        );
-
-        if (group.deviceIds.length === 1) {
-          anchorByDeviceId.set(group.deviceIds[0], group.center.clone());
-          continue;
-        }
-
-        placeConcentricGroup(
-          group.deviceIds,
-          group.center,
-          group.center.y,
-          signature,
-          groupRingStart,
-          groupRingStep
-        );
-      }
-    }
-
-    const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
-    const positions = new Map(
-      Array.from(anchorByDeviceId.entries(), ([deviceId, anchor]) => [deviceId, anchor.clone()])
-    );
-
-    for (let iteration = 0; iteration < relaxIterations; iteration += 1) {
-      const forces = new Map(orderedIds.map((deviceId) => [deviceId, { x: 0, z: 0 }]));
-
-      for (let leftIndex = 0; leftIndex < orderedIds.length; leftIndex += 1) {
-        for (let rightIndex = leftIndex + 1; rightIndex < orderedIds.length; rightIndex += 1) {
-          const leftId = orderedIds[leftIndex];
-          const rightId = orderedIds[rightIndex];
-          const leftPosition = positions.get(leftId);
-          const rightPosition = positions.get(rightId);
-          if (!leftPosition || !rightPosition) {
-            continue;
-          }
-
-          let dx = rightPosition.x - leftPosition.x;
-          let dz = rightPosition.z - leftPosition.z;
-          let distance = Math.hypot(dx, dz);
-          if (distance < 0.0001) {
-            const angle = hash01(`layout:${pairKey(leftId, rightId)}`) * Math.PI * 2;
-            dx = Math.cos(angle) * 0.001;
-            dz = Math.sin(angle) * 0.001;
-            distance = 0.001;
-          }
-
-          const minDistance =
-            layoutRadiusForDevice(deviceById.get(leftId)) +
-            layoutRadiusForDevice(deviceById.get(rightId)) +
-            0.55;
-          if (distance >= minDistance) {
-            continue;
-          }
-
-          const normalized = (minDistance - distance) / minDistance;
-          const strength = 0.18 * normalized;
-          const unitX = dx / distance;
-          const unitZ = dz / distance;
-          const leftForce = forces.get(leftId);
-          const rightForce = forces.get(rightId);
-          if (!leftForce || !rightForce) {
-            continue;
-          }
-          leftForce.x -= unitX * strength;
-          leftForce.z -= unitZ * strength;
-          rightForce.x += unitX * strength;
-          rightForce.z += unitZ * strength;
-        }
-      }
-
-      for (const deviceId of orderedIds) {
-        const anchor = anchorByDeviceId.get(deviceId);
-        const position = positions.get(deviceId);
-        const force = forces.get(deviceId);
-        if (!anchor || !position || !force) {
-          continue;
-        }
-        const anchorStrength = rootSet.has(deviceId) ? 0.24 : 0.18;
-        force.x += (anchor.x - position.x) * anchorStrength;
-        force.z += (anchor.z - position.z) * anchorStrength;
-      }
-
-      for (const deviceId of orderedIds) {
-        const position = positions.get(deviceId);
-        const force = forces.get(deviceId);
-        if (!position || !force) {
-          continue;
-        }
-        position.x += clampMagnitude(force.x, maxStep);
-        position.z += clampMagnitude(force.z, maxStep);
-      }
-    }
-
-    recenterPositionsAroundRootCentroid(positions, roots);
-
-    return new Map(
-      Array.from(positions.entries(), ([deviceId, position]) => {
-        const anchor = anchorByDeviceId.get(deviceId) ?? position;
-        return [deviceId, new Vector3(position.x, anchor.y, position.z)];
-      })
-    );
+    return computeNetworkLayoutTargets(devices, state);
   }
 
   #computeCentroid(targetByDeviceId: Map<string, Vector3>): Vector3 {
