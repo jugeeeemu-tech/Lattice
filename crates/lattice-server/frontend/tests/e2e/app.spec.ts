@@ -258,6 +258,59 @@ async function dispatchSceneClick(page: Page, point: { clientX: number; clientY:
   }, point);
 }
 
+async function blankScenePoint(page: Page) {
+  const point = await page.evaluate(() => {
+    const viewer = window.__latticeViewer;
+    const canvas = document.querySelector('canvas');
+    if (!viewer || !(canvas instanceof HTMLCanvasElement)) {
+      return null;
+    }
+
+    const state = viewer.getState();
+    const devicePoints = Array.from(state.model.sceneDeviceIds)
+      .map((deviceId) => viewer.screenPointForDevice(deviceId))
+      .filter((candidate): candidate is { x: number; y: number } => Boolean(candidate));
+
+    const margin = 96;
+    const candidates = [
+      { x: margin, y: margin },
+      { x: canvas.clientWidth - margin, y: margin },
+      { x: canvas.clientWidth - margin, y: canvas.clientHeight - margin },
+      { x: margin, y: canvas.clientHeight - margin },
+      { x: canvas.clientWidth * 0.75, y: canvas.clientHeight * 0.25 },
+      { x: canvas.clientWidth * 0.75, y: canvas.clientHeight * 0.75 },
+      { x: canvas.clientWidth * 0.6, y: canvas.clientHeight * 0.5 },
+    ];
+
+    let bestCandidate: { x: number; y: number } | null = null;
+    let bestDistance = Number.NEGATIVE_INFINITY;
+
+    for (const candidate of candidates) {
+      const minDistance = devicePoints.reduce((currentMin, devicePoint) => {
+        const distance = Math.hypot(candidate.x - devicePoint.x, candidate.y - devicePoint.y);
+        return Math.min(currentMin, distance);
+      }, Number.POSITIVE_INFINITY);
+
+      if (minDistance > bestDistance) {
+        bestDistance = minDistance;
+        bestCandidate = candidate;
+      }
+    }
+
+    return bestCandidate;
+  });
+
+  expect(point).not.toBeNull();
+  const canvas = page.locator('canvas');
+  const bounds = await canvas.boundingBox();
+  expect(bounds).not.toBeNull();
+
+  return {
+    clientX: (bounds?.x ?? 0) + (point?.x ?? 0),
+    clientY: (bounds?.y ?? 0) + (point?.y ?? 0),
+  };
+}
+
 async function discoveryControlMetrics(page: Page) {
   return page.evaluate(() => {
     const control = document.querySelector('[data-role="discovery-control"]');
@@ -641,7 +694,7 @@ test('hides scene hover cards while rotating and ignores the release click after
     page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
   ).resolves.toBe(null);
 
-  await dispatchSceneClick(page, releasePoint);
+  await dispatchSceneClick(page, await blankScenePoint(page));
   await expect(
     page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
   ).resolves.toBe(null);

@@ -1087,6 +1087,7 @@ export class TopologySceneAdapter {
     }
     this.#resizeObserver?.disconnect();
     this.#controls.dispose();
+    window.removeEventListener('click', this.#handleGlobalClickCapture, true);
     this.#renderer.dispose();
     this.#renderer.domElement.remove();
   }
@@ -1264,6 +1265,7 @@ export class TopologySceneAdapter {
     this.#renderer.domElement.addEventListener('pointercancel', this.#handlePointerCancel);
     this.#renderer.domElement.addEventListener('pointerleave', this.#handlePointerLeave);
     this.#renderer.domElement.addEventListener('click', this.#handlePointerClick);
+    window.addEventListener('click', this.#handleGlobalClickCapture, true);
     window.addEventListener('resize', this.#resize);
 
     if (typeof ResizeObserver !== 'undefined') {
@@ -1289,6 +1291,7 @@ export class TopologySceneAdapter {
       return;
     }
 
+    this.#renderer.domElement.setPointerCapture?.(event.pointerId);
     this.#primaryPointerId = event.pointerId;
     this.#pointerDownPosition = {
       x: event.clientX,
@@ -1343,6 +1346,10 @@ export class TopologySceneAdapter {
       return;
     }
 
+    if (this.#renderer.domElement.hasPointerCapture?.(event.pointerId)) {
+      this.#renderer.domElement.releasePointerCapture?.(event.pointerId);
+    }
+
     if (this.#sceneDragInProgress) {
       this.#suppressNextClick = true;
     }
@@ -1357,17 +1364,16 @@ export class TopologySceneAdapter {
       return;
     }
 
+    if (this.#renderer.domElement.hasPointerCapture?.(event.pointerId)) {
+      this.#renderer.domElement.releasePointerCapture?.(event.pointerId);
+    }
+
     this.#primaryPointerId = null;
     this.#pointerDownPosition = null;
     this.#sceneDragInProgress = false;
   };
 
   #handlePointerClick = (event: MouseEvent): void => {
-    if (this.#suppressNextClick) {
-      this.#suppressNextClick = false;
-      return;
-    }
-
     const rect = this.#renderer.domElement.getBoundingClientRect();
     this.#pointer.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
     this.#pointer.y = -(((event.clientY - rect.top) / rect.height) * 2 - 1);
@@ -1375,6 +1381,17 @@ export class TopologySceneAdapter {
     if (hits.deviceId) {
       this.#onSelectDevice(hits.deviceId);
     }
+  };
+
+  #handleGlobalClickCapture = (event: MouseEvent): void => {
+    if (!this.#suppressNextClick && !this.#sceneDragInProgress) {
+      return;
+    }
+
+    this.#suppressNextClick = false;
+    this.#sceneDragInProgress = false;
+    event.preventDefault();
+    event.stopPropagation();
   };
 
   #shouldStartRotationDrag(event: PointerEvent): boolean {
