@@ -7,12 +7,14 @@ import {
   buildRelationRootAnchors,
   buildNetworkLayoutClusters,
   computeClusterRequiredRadius,
+  computeNetworkLayoutTargets,
   computeParallelLinkOffsets,
   placeClusterCenters,
   placeDevicesWithinCluster,
   recenterPositionsAroundRootCentroid,
   resolveParentFacingDevice,
 } from '../../src/scene/topology-scene';
+import type { TopologyStoreState } from '../../src/state/topology-store';
 
 describe('computeParallelLinkOffsets', () => {
   it('spreads same-pair links symmetrically and deterministically', () => {
@@ -563,6 +565,202 @@ describe('network layout clusters', () => {
     expect(Math.abs(zValues[0])).toBeGreaterThan(0.5);
     expect(Math.abs(zValues[zValues.length - 1])).toBeGreaterThan(0.5);
     expect(zValues[zValues.length - 1] - zValues[0]).toBeGreaterThan(2);
+  });
+
+  it('separates redundant pairs that share the same children', () => {
+    const devices = [
+      device('core-a', 'core-a', 'router'),
+      device('core-b', 'core-b', 'router'),
+      device('dist', 'dist', 'switch'),
+      device('access', 'access', 'switch'),
+      device('app', 'app'),
+    ];
+    const deviceById = new Map(devices.map((entry) => [entry.id, entry]));
+    const links: ViewLink[] = [
+      {
+        id: 'core-a-dist',
+        local_device_id: 'core-a',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth1',
+      },
+      {
+        id: 'core-b-dist',
+        local_device_id: 'core-b',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth2',
+      },
+      {
+        id: 'dist-access',
+        local_device_id: 'dist',
+        local_interface: 'eth3',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.1.0/24'],
+        remote_device_id: 'access',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'access-app',
+        local_device_id: 'access',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.1.0/24'],
+        remote_device_id: 'app',
+        remote_interface: 'eth0',
+      },
+    ];
+
+    const state = {
+      model: {
+        childIdsByDeviceId: new Map([
+          ['core-a', ['dist']],
+          ['core-b', ['dist']],
+          ['dist', ['access']],
+          ['access', ['app']],
+          ['app', []],
+        ]),
+        deviceById,
+        parentIdsByDeviceId: new Map([
+          ['core-a', []],
+          ['core-b', []],
+          ['dist', ['core-a', 'core-b']],
+          ['access', ['dist']],
+          ['app', ['access']],
+        ]),
+        peerIdsByDeviceId: new Map([
+          ['core-a', ['core-b']],
+          ['core-b', ['core-a']],
+          ['dist', []],
+          ['access', []],
+          ['app', []],
+        ]),
+        primaryChildrenByDeviceId: new Map(),
+        primaryParentDeviceById: new Map(),
+        rootDeviceIds: ['core-a', 'core-b'],
+        visibleLinkIds: new Set(links.map((link) => link.id)),
+      },
+      snapshot: {
+        links,
+      },
+    } as unknown as TopologyStoreState;
+
+    const positions = computeNetworkLayoutTargets(devices, state);
+    const coreA = positions.get('core-a');
+    const coreB = positions.get('core-b');
+    expect(coreA && coreB).toBeTruthy();
+    expect(coreA?.distanceTo(coreB ?? new Vector3())).toBeGreaterThan(2.2);
+  });
+
+  it('separates redundant groups with three members around a shared center', () => {
+    const devices = [
+      device('core-a', 'core-a', 'router'),
+      device('core-b', 'core-b', 'router'),
+      device('core-c', 'core-c', 'router'),
+      device('dist', 'dist', 'switch'),
+      device('access', 'access', 'switch'),
+      device('app', 'app'),
+    ];
+    const deviceById = new Map(devices.map((entry) => [entry.id, entry]));
+    const links: ViewLink[] = [
+      {
+        id: 'core-a-dist',
+        local_device_id: 'core-a',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth1',
+      },
+      {
+        id: 'core-b-dist',
+        local_device_id: 'core-b',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth2',
+      },
+      {
+        id: 'core-c-dist',
+        local_device_id: 'core-c',
+        local_interface: 'eth0',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.0.0/24'],
+        remote_device_id: 'dist',
+        remote_interface: 'eth3',
+      },
+      {
+        id: 'dist-access',
+        local_device_id: 'dist',
+        local_interface: 'eth4',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.1.0/24'],
+        remote_device_id: 'access',
+        remote_interface: 'eth0',
+      },
+      {
+        id: 'access-app',
+        local_device_id: 'access',
+        local_interface: 'eth1',
+        protocol: 'lldp',
+        network_cidrs: ['10.0.1.0/24'],
+        remote_device_id: 'app',
+        remote_interface: 'eth0',
+      },
+    ];
+
+    const state = {
+      model: {
+        childIdsByDeviceId: new Map([
+          ['core-a', ['dist']],
+          ['core-b', ['dist']],
+          ['core-c', ['dist']],
+          ['dist', ['access']],
+          ['access', ['app']],
+          ['app', []],
+        ]),
+        deviceById,
+        parentIdsByDeviceId: new Map([
+          ['core-a', []],
+          ['core-b', []],
+          ['core-c', []],
+          ['dist', ['core-a', 'core-b', 'core-c']],
+          ['access', ['dist']],
+          ['app', ['access']],
+        ]),
+        peerIdsByDeviceId: new Map([
+          ['core-a', ['core-b', 'core-c']],
+          ['core-b', ['core-a', 'core-c']],
+          ['core-c', ['core-a', 'core-b']],
+          ['dist', []],
+          ['access', []],
+          ['app', []],
+        ]),
+        primaryChildrenByDeviceId: new Map(),
+        primaryParentDeviceById: new Map(),
+        rootDeviceIds: ['core-a', 'core-b', 'core-c'],
+        visibleLinkIds: new Set(links.map((link) => link.id)),
+      },
+      snapshot: {
+        links,
+      },
+    } as unknown as TopologyStoreState;
+
+    const positions = computeNetworkLayoutTargets(devices, state);
+    const coreIds = ['core-a', 'core-b', 'core-c'];
+    for (let leftIndex = 0; leftIndex < coreIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < coreIds.length; rightIndex += 1) {
+        const left = positions.get(coreIds[leftIndex]);
+        const right = positions.get(coreIds[rightIndex]);
+        expect(left && right).toBeTruthy();
+        expect(left?.distanceTo(right ?? new Vector3())).toBeGreaterThan(2.1);
+      }
+    }
   });
 
   it('places sibling child clusters within a forward fan instead of opposite directions', () => {

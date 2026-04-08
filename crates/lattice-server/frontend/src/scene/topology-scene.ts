@@ -1617,7 +1617,6 @@ export function placeDevicesWithinCluster(
 
   return positions;
 }
-
 function computeLegacyRelationTargets(
   devices: ViewDevice[],
   state: TopologyStoreState
@@ -1979,6 +1978,119 @@ export function computeNetworkLayoutTargets(
     anchorByDeviceId.set(device.id, blended);
   }
 
+  const redundantGroupIdByDeviceId = new Map<string, string>();
+  const redundantTargetAnchorByDeviceId = new Map<string, Vector3>();
+  const redundantMinDistanceByPair = new Map<string, number>();
+  const redundantGroupsByKey = new Map<string, string[]>();
+  for (const device of devices) {
+    const childIds = (layoutGraph.childIdsByDeviceId.get(device.id) ?? [])
+      .filter((childId) => visibleIds.has(childId))
+      .sort((leftId, rightId) => leftId.localeCompare(rightId));
+    if (childIds.length === 0) {
+      continue;
+    }
+    const groupKey = childIds.join('|');
+    const group = redundantGroupsByKey.get(groupKey) ?? [];
+    group.push(device.id);
+    redundantGroupsByKey.set(groupKey, group);
+  }
+
+  for (const [groupKey, memberIds] of redundantGroupsByKey.entries()) {
+    if (memberIds.length <= 1) {
+      continue;
+    }
+    const sortedMemberIds = [...memberIds].sort((leftId, rightId) =>
+      compareDeviceIdsByLabel(leftId, rightId, deviceById)
+    );
+    const childIds = groupKey.split('|').filter((childId) => childId.length > 0);
+    const groupCenter = new Vector3();
+    for (const memberId of sortedMemberIds) {
+      groupCenter.add(anchorByDeviceId.get(memberId)?.clone() ?? new Vector3());
+    }
+    groupCenter.divideScalar(sortedMemberIds.length);
+
+    const childCenter = new Vector3();
+    let childCount = 0;
+    for (const childId of childIds) {
+      const childAnchor = anchorByDeviceId.get(childId);
+      if (!childAnchor) {
+        continue;
+      }
+      childCenter.add(childAnchor);
+      childCount += 1;
+    }
+    if (childCount > 0) {
+      childCenter.divideScalar(childCount);
+    } else {
+      childCenter.copy(groupCenter);
+    }
+
+    const forwardX = childCenter.x - groupCenter.x;
+    const forwardZ = childCenter.z - groupCenter.z;
+    let baseAngle = Math.atan2(forwardZ, forwardX);
+    if (Math.hypot(forwardX, forwardZ) < 0.0001) {
+      baseAngle = hash01(`redundant-group:${groupKey}`) * Math.PI * 2;
+    }
+    const lateralAngle = baseAngle + Math.PI / 2;
+    const lateralStep = sortedMemberIds.reduce((maximum, memberId) => {
+      const device = deviceById.get(memberId);
+      return Math.max(
+        maximum,
+        devicePlanarMaxDiameter(device) + devicePlanarClearance(device) * 2 + 0.42
+      );
+    }, 2.4);
+
+    if (sortedMemberIds.length === 2) {
+      sortedMemberIds.forEach((memberId, index) => {
+        const direction = index === 0 ? -1 : 1;
+        const target = new Vector3(
+          groupCenter.x + Math.cos(lateralAngle) * (lateralStep * 0.5) * direction,
+          anchorByDeviceId.get(memberId)?.y ?? groupCenter.y,
+          groupCenter.z + Math.sin(lateralAngle) * (lateralStep * 0.5) * direction
+        );
+        redundantTargetAnchorByDeviceId.set(memberId, target);
+        redundantGroupIdByDeviceId.set(memberId, groupKey);
+      });
+      redundantMinDistanceByPair.set(pairKey(sortedMemberIds[0], sortedMemberIds[1]), lateralStep);
+      continue;
+    }
+
+    const ringRadius = Math.max(
+      lateralStep,
+      lateralStep / (2 * Math.sin(Math.PI / sortedMemberIds.length))
+    );
+    const startAngle = lateralAngle - Math.PI / 2;
+    sortedMemberIds.forEach((memberId, index) => {
+      const angle = startAngle + (Math.PI * 2 * index) / sortedMemberIds.length;
+      const target = new Vector3(
+        groupCenter.x + Math.cos(angle) * ringRadius,
+        anchorByDeviceId.get(memberId)?.y ?? groupCenter.y,
+        groupCenter.z + Math.sin(angle) * ringRadius
+      );
+      redundantTargetAnchorByDeviceId.set(memberId, target);
+      redundantGroupIdByDeviceId.set(memberId, groupKey);
+    });
+    for (let leftIndex = 0; leftIndex < sortedMemberIds.length; leftIndex += 1) {
+      for (let rightIndex = leftIndex + 1; rightIndex < sortedMemberIds.length; rightIndex += 1) {
+        const leftId = sortedMemberIds[leftIndex];
+        const rightId = sortedMemberIds[rightIndex];
+        const leftTarget = redundantTargetAnchorByDeviceId.get(leftId);
+        const rightTarget = redundantTargetAnchorByDeviceId.get(rightId);
+        if (!leftTarget || !rightTarget) {
+          continue;
+        }
+        redundantMinDistanceByPair.set(
+          pairKey(leftId, rightId),
+          leftTarget.distanceTo(rightTarget) * 0.92
+        );
+      }
+    }
+  }
+
+  for (const [deviceId, targetAnchor] of redundantTargetAnchorByDeviceId.entries()) {
+    anchorByDeviceId.set(deviceId, targetAnchor.clone());
+  }
+
   const orderedIds = devices.map((device) => device.id).sort((leftId, rightId) => leftId.localeCompare(rightId));
   const positions = new Map(
     Array.from(anchorByDeviceId.entries(), ([deviceId, anchor]) => [deviceId, anchor.clone()])
@@ -2013,11 +2125,13 @@ export function computeNetworkLayoutTargets(
           devicePlanarClearance(deviceById.get(leftId)) +
           devicePlanarClearance(deviceById.get(rightId)) +
           0.12;
-        if (distance >= minDistance) {
+        const redundantMinDistance = redundantMinDistanceByPair.get(pairKey(leftId, rightId)) ?? 0;
+        const effectiveMinDistance = Math.max(minDistance, redundantMinDistance);
+        if (distance >= effectiveMinDistance) {
           continue;
         }
 
-        const strength = ((minDistance - distance) / minDistance) * 0.2;
+        const strength = ((effectiveMinDistance - distance) / effectiveMinDistance) * 0.2;
         const unitX = dx / distance;
         const unitZ = dz / distance;
         const leftForce = forces.get(leftId);
@@ -2039,7 +2153,9 @@ export function computeNetworkLayoutTargets(
       if (!anchor || !position || !force) {
         continue;
       }
-      const anchorStrength = rootSet.has(deviceId) ? 0.3 : 0.26;
+      const anchorStrength =
+        (rootSet.has(deviceId) ? 0.3 : 0.26) +
+        (redundantGroupIdByDeviceId.has(deviceId) ? 0.08 : 0);
       force.x += (anchor.x - position.x) * anchorStrength;
       force.z += (anchor.z - position.z) * anchorStrength;
     }
