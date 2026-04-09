@@ -1229,11 +1229,7 @@ export function computeNetworkLayoutTargets(
     const blended = fallback
       ? fallback.clone().multiplyScalar(0.15).add(combined.multiplyScalar(0.85))
       : combined;
-    if (!fallback) {
-      blended.y = combined.y;
-    } else {
-      blended.y = defaultDepthY + (combined.y - defaultDepthY) * 0.85;
-    }
+    blended.y = defaultDepthY;
     anchorByDeviceId.set(device.id, blended);
   }
 
