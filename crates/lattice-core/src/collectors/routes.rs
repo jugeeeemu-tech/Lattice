@@ -72,13 +72,8 @@ impl Collector for RouteCollector {
         let routed_interfaces =
             routed_interface_names(&ip_addrs, &ip_if_idxs, &if_names, &if_descrs);
         let inferred_role = infer_device_role(sys_name.as_deref(), Some(&sys_descr));
-        let route_role_signal =
-            upstream_interface.is_some() && routed_interfaces.len() >= 2;
-        let device_role = if inferred_role == DeviceRole::Router || route_role_signal {
-            DeviceRole::Router
-        } else {
-            DeviceRole::Unknown
-        };
+        let route_role_signal = upstream_interface.is_some() && routed_interfaces.len() >= 2;
+        let device_role = infer_route_device_role(inferred_role, route_role_signal);
 
         let devices = vec![Device {
             id: ctx.local_device_id.clone(),
@@ -307,6 +302,20 @@ fn contains_any(haystack: &str, needles: &[&str]) -> bool {
     needles.iter().any(|needle| haystack.contains(needle))
 }
 
+fn infer_route_device_role(inferred_role: DeviceRole, route_role_signal: bool) -> DeviceRole {
+    match inferred_role {
+        DeviceRole::Router => DeviceRole::Router,
+        DeviceRole::Switch | DeviceRole::Server | DeviceRole::Bridge => inferred_role,
+        DeviceRole::Unknown => {
+            if route_role_signal {
+                DeviceRole::Router
+            } else {
+                DeviceRole::Unknown
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -433,6 +442,22 @@ mod tests {
                 "GigaEthernet0.0".to_string(),
                 "GigaEthernet2.0".to_string(),
             ])
+        );
+    }
+
+    #[test]
+    fn route_signal_only_promotes_unknown_devices_to_router() {
+        assert_eq!(
+            infer_route_device_role(DeviceRole::Unknown, true),
+            DeviceRole::Router
+        );
+        assert_eq!(
+            infer_route_device_role(DeviceRole::Switch, true),
+            DeviceRole::Switch
+        );
+        assert_eq!(
+            infer_route_device_role(DeviceRole::Server, true),
+            DeviceRole::Server
         );
     }
 }
