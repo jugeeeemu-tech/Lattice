@@ -8,12 +8,13 @@ pub mod snmp;
 
 pub use config::{
     load_config, resolve_config_path, AppConfig, DiscoveryConfig, ProxmoxSourceConfig,
-    SeedDevice, ServerConfig, SnmpSourceConfig, SourceConfig,
+    SeedDevice, ServerConfig, SnmpSourceConfig, SourceConfig, TopologyHintEndpoint,
+    TopologyHintLink, TopologyHintsConfig,
 };
 pub use discovery::{
-    build_discovery_sources, merge_source_results, DeviceRelations, DiscoveryEngine,
-    DiscoveryRelations, DiscoveryResult, DiscoverySource, DiscoverySourceOutput, DiscoveryTree,
-    DiscoveryTreeNode, SnmpDiscoverySource, SourceResult,
+    build_discovery_sources, merge_source_results, merge_source_results_with_hints,
+    DeviceRelations, DiscoveryEngine, DiscoveryRelations, DiscoveryResult, DiscoverySource,
+    DiscoverySourceOutput, DiscoveryTree, DiscoveryTreeNode, SnmpDiscoverySource, SourceResult,
 };
 pub use graph::{
     synthesize_proxmox_uplinks, DeploymentType, Device, DeviceRole, DeviceStatus, GraphStore,

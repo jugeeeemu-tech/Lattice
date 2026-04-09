@@ -3,16 +3,25 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use chrono::Utc;
 
 use crate::{
+    config::TopologyHintsConfig,
     graph::{GraphStore, LinkProtocol, Topology},
     proxmox::attach_proxmox_uplinks,
 };
 
 use super::{
+    topology_hints::attach_topology_hints,
     DeviceRelations, DiscoveryRelations, DiscoveryResult, DiscoveryTree, DiscoveryTreeNode,
     SourceResult,
 };
 
 pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
+    merge_source_results_with_hints(results, &TopologyHintsConfig::default())
+}
+
+pub fn merge_source_results_with_hints(
+    results: Vec<SourceResult>,
+    topology_hints: &TopologyHintsConfig,
+) -> DiscoveryResult {
     let mut store = GraphStore::default();
     let mut merged_source_nodes = Vec::new();
 
@@ -23,6 +32,7 @@ pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
 
     let mut topology = store.topology();
     attach_proxmox_uplinks(&mut topology);
+    attach_topology_hints(&mut topology, topology_hints);
     let base_tree = if merged_source_nodes.is_empty() {
         build_internal_tree_base(&topology)
     } else {
@@ -262,10 +272,10 @@ fn infer_display_tree(
         .collect::<HashMap<_, _>>();
     let forced_root_ids =
         infer_additional_root_routers(topology, &visible_device_ids, &base_parent_by_device);
-    let parent_by_device = base_parent_by_device
-        .into_iter()
-        .filter(|(device_id, _)| !forced_root_ids.contains(device_id))
-        .collect::<HashMap<_, _>>();
+    let parent_candidates =
+        build_parent_candidates(topology, &visible_device_ids, &base_parent_by_device);
+    let parent_by_device =
+        resolve_parent_candidates(topology, &visible_device_ids, &forced_root_ids, parent_candidates);
 
     let root_router_ids = visible_device_ids
         .iter()
@@ -355,6 +365,189 @@ fn infer_display_tree(
     )
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParentCandidate {
+    parent_id: String,
+    priority: u8,
+}
+
+fn build_parent_candidates(
+    topology: &Topology,
+    visible_device_ids: &HashSet<String>,
+    base_parent_by_device: &HashMap<String, String>,
+) -> HashMap<String, Vec<ParentCandidate>> {
+    let mut by_child = HashMap::<String, Vec<ParentCandidate>>::new();
+    let source_children = base_parent_by_device
+        .values()
+        .cloned()
+        .collect::<HashSet<_>>();
+
+    for (child_id, parent_id) in base_parent_by_device {
+        push_parent_candidate(
+            &mut by_child,
+            child_id,
+            parent_id,
+            ParentCandidate {
+                parent_id: parent_id.clone(),
+                priority: 100,
+            },
+        );
+    }
+
+    for device_id in visible_device_ids {
+        if let Some(parent_id) = proxmox_bridge_parent(topology, device_id) {
+            push_parent_candidate(
+                &mut by_child,
+                device_id,
+                &parent_id,
+                ParentCandidate {
+                    parent_id: parent_id.clone(),
+                    priority: 120,
+                },
+            );
+        }
+
+        if let Some(parent_id) = choose_topology_hint_parent(topology, device_id, visible_device_ids)
+        {
+            push_parent_candidate(
+                &mut by_child,
+                device_id,
+                &parent_id,
+                ParentCandidate {
+                    parent_id: parent_id.clone(),
+                    priority: 80,
+                },
+            );
+        }
+
+        if let Some(parent_id) = lldp_upstream_parent(topology, device_id, visible_device_ids) {
+            push_parent_candidate(
+                &mut by_child,
+                device_id,
+                &parent_id,
+                ParentCandidate {
+                    parent_id: parent_id.clone(),
+                    priority: 70,
+                },
+            );
+        }
+
+        if !base_parent_by_device.contains_key(device_id) && !source_children.contains(device_id) {
+            if let Some(parent_id) =
+                unique_visible_lldp_parent(topology, device_id, visible_device_ids)
+            {
+                push_parent_candidate(
+                    &mut by_child,
+                    device_id,
+                    &parent_id,
+                    ParentCandidate {
+                        parent_id: parent_id.clone(),
+                        priority: 60,
+                    },
+                );
+            }
+        }
+    }
+
+    by_child
+}
+
+fn push_parent_candidate(
+    by_child: &mut HashMap<String, Vec<ParentCandidate>>,
+    child_id: &str,
+    parent_id: &str,
+    candidate: ParentCandidate,
+) {
+    if child_id == parent_id {
+        return;
+    }
+
+    let candidates = by_child.entry(child_id.to_string()).or_default();
+    if candidates.iter().any(|existing| existing == &candidate) {
+        return;
+    }
+    candidates.push(candidate);
+}
+
+fn resolve_parent_candidates(
+    topology: &Topology,
+    visible_device_ids: &HashSet<String>,
+    forced_root_ids: &HashSet<String>,
+    mut parent_candidates: HashMap<String, Vec<ParentCandidate>>,
+) -> HashMap<String, String> {
+    let mut parent_by_device = HashMap::<String, String>::new();
+
+    for device_id in visible_device_ids {
+        if forced_root_ids.contains(device_id) {
+            continue;
+        }
+
+        let Some(candidates) = parent_candidates.get_mut(device_id) else {
+            continue;
+        };
+        candidates.sort_by(|left, right| {
+            right
+                .priority
+                .cmp(&left.priority)
+                .then_with(|| device_sort_key(topology, &left.parent_id).cmp(&device_sort_key(topology, &right.parent_id)))
+        });
+
+        let Some(best_priority) = candidates.first().map(|candidate| candidate.priority) else {
+            continue;
+        };
+        let best = candidates
+            .iter()
+            .filter(|candidate| candidate.priority == best_priority)
+            .map(|candidate| candidate.parent_id.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect::<Vec<_>>();
+
+        if best.len() == 1 {
+            parent_by_device.insert(device_id.clone(), best[0].clone());
+        }
+    }
+
+    break_parent_cycles(topology, &mut parent_by_device);
+    parent_by_device
+}
+
+fn break_parent_cycles(topology: &Topology, parent_by_device: &mut HashMap<String, String>) {
+    loop {
+        let mut cycle_member = None;
+
+        for device_id in parent_by_device.keys() {
+            let mut seen = HashSet::<String>::new();
+            let mut current = device_id.as_str();
+            while let Some(parent_id) = parent_by_device.get(current) {
+                if !seen.insert(current.to_string()) {
+                    cycle_member = Some(current.to_string());
+                    break;
+                }
+                current = parent_id;
+            }
+            if cycle_member.is_some() {
+                break;
+            }
+        }
+
+        let Some(device_id) = cycle_member else {
+            break;
+        };
+
+        let Some(parent_id) = parent_by_device.get(&device_id).cloned() else {
+            continue;
+        };
+        let remove_id = if device_sort_key(topology, &device_id) <= device_sort_key(topology, &parent_id)
+        {
+            device_id
+        } else {
+            parent_id
+        };
+        parent_by_device.remove(&remove_id);
+    }
+}
+
 fn build_display_relations(
     topology: &Topology,
     visible_device_ids: &HashSet<String>,
@@ -435,6 +628,99 @@ fn build_display_relations(
         root_device_ids: sort_relation_ids(topology, root_ids.to_vec()),
         by_device,
     }
+}
+
+fn choose_topology_hint_parent(
+    topology: &Topology,
+    device_id: &str,
+    visible_device_ids: &HashSet<String>,
+) -> Option<String> {
+    let child = topology.devices.get(device_id)?;
+    let candidates = topology
+        .links
+        .iter()
+        .filter(|link| link.protocol == LinkProtocol::TopologyHint)
+        .filter_map(|link| {
+            if link.local_device_id == device_id {
+                Some(link.remote_device_id.clone())
+            } else if link.remote_device_id == device_id {
+                Some(link.local_device_id.clone())
+            } else {
+                None
+            }
+        })
+        .filter(|candidate_id| {
+            candidate_id != device_id
+                && visible_device_ids.contains(candidate_id)
+                && include_in_tree(topology, candidate_id)
+        })
+        .filter(|candidate_id| {
+            topology
+                .devices
+                .get(candidate_id)
+                .is_some_and(|candidate| hint_parent_priority(child, candidate) > 0)
+        })
+        .collect::<HashSet<_>>();
+
+    if candidates.len() != 1 {
+        return None;
+    }
+
+    candidates.into_iter().next()
+}
+
+fn hint_parent_priority(child: &crate::Device, candidate: &crate::Device) -> u8 {
+    if child.device_role == crate::DeviceRole::Bridge
+        && candidate.device_role != crate::DeviceRole::Bridge
+    {
+        return 3;
+    }
+
+    if child.deployment_type.is_virtual() && candidate.deployment_type.is_physical() {
+        return 2;
+    }
+
+    if child.device_role != crate::DeviceRole::Router
+        && candidate.device_role == crate::DeviceRole::Router
+    {
+        return 1;
+    }
+
+    0
+}
+
+fn lldp_upstream_parent(
+    topology: &Topology,
+    device_id: &str,
+    visible_device_ids: &HashSet<String>,
+) -> Option<String> {
+    let device = topology.devices.get(device_id)?;
+    let upstream_interface = device.upstream_interface.as_deref()?.trim();
+    if upstream_interface.is_empty() {
+        return None;
+    }
+
+    unique_parent_from_links(
+        topology,
+        device_id,
+        |link| link.protocol == LinkProtocol::Lldp,
+        |link, is_local| {
+            let candidate_id = if is_local {
+                if link.local_interface != upstream_interface {
+                    return None;
+                }
+                link.remote_device_id.clone()
+            } else {
+                if link.remote_interface != upstream_interface {
+                    return None;
+                }
+                link.local_device_id.clone()
+            };
+
+            (visible_device_ids.contains(&candidate_id) && include_in_tree(topology, &candidate_id))
+                .then_some(candidate_id)
+        },
+    )
 }
 
 fn sort_relation_ids(topology: &Topology, device_ids: Vec<String>) -> Vec<String> {
@@ -1127,6 +1413,186 @@ mod tests {
     }
 
     #[test]
+    fn topology_hint_reparents_proxmox_bridge_below_router() {
+        let merged = merge_source_results_with_hints(
+            vec![SourceResult {
+                topology: Topology {
+                    devices: HashMap::from([
+                        (
+                            "router-1".to_string(),
+                            Device {
+                                id: "router-1".to_string(),
+                                identity_keys: IdentityKeys {
+                                    chassis_id: None,
+                                    sys_name: Some("Router".to_string()),
+                                    mgmt_ip: Some("192.168.1.1".to_string()),
+                                    mac_addresses: Vec::new(),
+                                },
+                                sys_descr: "NEC IX2215".to_string(),
+                                vendor: "nec".to_string(),
+                                model: None,
+                                device_role: DeviceRole::Router,
+                                deployment_type: DeploymentType::Physical,
+                                guest_kind: None,
+                                interfaces: vec![Interface {
+                                    if_index: 1,
+                                    if_name: "GigaEthernet2.0".to_string(),
+                                    ip_addresses: Vec::new(),
+                                    speed_bps: None,
+                                    oper_status: OperStatus::Up,
+                                }],
+                                status: DeviceStatus::Up,
+                                host_label: None,
+                                host_mgmt_ip: None,
+                                upstream_interface: None,
+                                last_seen: Utc::now(),
+                            },
+                        ),
+                        (
+                            "proxmox:pve:bridge:vmbr0".to_string(),
+                            Device {
+                                id: "proxmox:pve:bridge:vmbr0".to_string(),
+                                identity_keys: IdentityKeys {
+                                    chassis_id: None,
+                                    sys_name: Some("vmbr0".to_string()),
+                                    mgmt_ip: Some("192.168.1.50".to_string()),
+                                    mac_addresses: Vec::new(),
+                                },
+                                sys_descr: "Proxmox bridge vmbr0".to_string(),
+                                vendor: "proxmox".to_string(),
+                                model: None,
+                                device_role: DeviceRole::Bridge,
+                                deployment_type: DeploymentType::Virtual,
+                                guest_kind: None,
+                                interfaces: vec![
+                                    Interface {
+                                        if_index: 0,
+                                        if_name: "vmbr0".to_string(),
+                                        ip_addresses: Vec::new(),
+                                        speed_bps: None,
+                                        oper_status: OperStatus::Up,
+                                    },
+                                    Interface {
+                                        if_index: 1,
+                                        if_name: "enp3s0".to_string(),
+                                        ip_addresses: Vec::new(),
+                                        speed_bps: None,
+                                        oper_status: OperStatus::Up,
+                                    },
+                                ],
+                                status: DeviceStatus::Up,
+                                host_label: Some("pve".to_string()),
+                                host_mgmt_ip: Some("192.168.1.50".to_string()),
+                                upstream_interface: Some("enp3s0".to_string()),
+                                last_seen: Utc::now(),
+                            },
+                        ),
+                        (
+                            "proxmox:pve:qemu:100".to_string(),
+                            Device {
+                                id: "proxmox:pve:qemu:100".to_string(),
+                                identity_keys: IdentityKeys {
+                                    chassis_id: None,
+                                    sys_name: Some("guest-1".to_string()),
+                                    mgmt_ip: None,
+                                    mac_addresses: Vec::new(),
+                                },
+                                sys_descr: "Proxmox qemu guest".to_string(),
+                                vendor: "proxmox".to_string(),
+                                model: None,
+                                device_role: DeviceRole::Server,
+                                deployment_type: DeploymentType::Virtual,
+                                guest_kind: Some(crate::GuestKind::Vm),
+                                interfaces: vec![Interface {
+                                    if_index: 0,
+                                    if_name: "net0".to_string(),
+                                    ip_addresses: Vec::new(),
+                                    speed_bps: None,
+                                    oper_status: OperStatus::Up,
+                                }],
+                                status: DeviceStatus::Up,
+                                host_label: Some("pve".to_string()),
+                                host_mgmt_ip: Some("192.168.1.50".to_string()),
+                                upstream_interface: None,
+                                last_seen: Utc::now(),
+                            },
+                        ),
+                    ]),
+                    links: vec![Link {
+                        id: "guest-link".to_string(),
+                        local_device_id: "proxmox:pve:bridge:vmbr0".to_string(),
+                        local_interface: "vmbr0".to_string(),
+                        local_ip: None,
+                        remote_device_id: "proxmox:pve:qemu:100".to_string(),
+                        remote_interface: "net0".to_string(),
+                        remote_ip: None,
+                        speed_bps: None,
+                        protocol: LinkProtocol::ProxmoxGuestLink,
+                        guest_attachment: None,
+                    }],
+                    updated_at: Utc::now(),
+                },
+                tree: DiscoveryTree {
+                    nodes: vec![
+                        crate::discovery::DiscoveryTreeNode {
+                            row_id: "source:0/proxmox:pve:bridge:vmbr0#1".to_string(),
+                            device_id: "proxmox:pve:bridge:vmbr0".to_string(),
+                            parent_row_id: None,
+                            label: Some("vmbr0".to_string()),
+                            depth: 0,
+                        },
+                        crate::discovery::DiscoveryTreeNode {
+                            row_id: "source:0/proxmox:pve:bridge:vmbr0#1/proxmox:pve:qemu:100#1"
+                                .to_string(),
+                            device_id: "proxmox:pve:qemu:100".to_string(),
+                            parent_row_id: Some(
+                                "source:0/proxmox:pve:bridge:vmbr0#1".to_string(),
+                            ),
+                            label: Some("guest-1".to_string()),
+                            depth: 1,
+                        },
+                        crate::discovery::DiscoveryTreeNode {
+                            row_id: "source:0/router-1#1".to_string(),
+                            device_id: "router-1".to_string(),
+                            parent_row_id: None,
+                            label: Some("Router".to_string()),
+                            depth: 0,
+                        },
+                    ],
+                },
+            }],
+            &crate::TopologyHintsConfig {
+                links: vec![crate::TopologyHintLink {
+                    endpoints: vec![
+                        crate::TopologyHintEndpoint {
+                            device: "Router".to_string(),
+                            interface: None,
+                            interface_pattern: Some("GE2.*".to_string()),
+                            sys_descr_contains: Some("IX2215".to_string()),
+                        },
+                        crate::TopologyHintEndpoint {
+                            device: "vmbr0".to_string(),
+                            interface: Some("enp3s0".to_string()),
+                            interface_pattern: None,
+                            sys_descr_contains: None,
+                        },
+                    ],
+                }],
+            },
+        );
+
+        assert_eq!(
+            merged
+                .relations
+                .by_device
+                .get("proxmox:pve:bridge:vmbr0")
+                .map(|relations| relations.parents.clone())
+                .unwrap_or_default(),
+            vec!["router-1".to_string()]
+        );
+    }
+
+    #[test]
     fn merge_preserves_source_tree_structure() {
         let first = SourceResult {
             topology: Topology {
@@ -1252,7 +1718,6 @@ mod tests {
         };
 
         let merged = merge_source_results(vec![result]);
-
         assert_eq!(merged.tree.nodes.len(), 2);
         assert_eq!(
             merged

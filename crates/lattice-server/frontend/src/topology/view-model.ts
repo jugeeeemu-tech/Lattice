@@ -1209,7 +1209,7 @@ export function buildHoverCardForLink(
     `${link.local_interface}${link.local_ip ? ` · ${link.local_ip}` : ''}`,
     `${link.remote_interface}${link.remote_ip ? ` · ${link.remote_ip}` : ''}`,
     formatSpeed(link.speed_bps),
-    protocolLabel(link.protocol),
+    link.protocol === 'topology_hint' ? null : protocolLabel(link.protocol),
     attachment?.bridge_name ? `bridge ${attachment.bridge_name}` : null,
     attachment?.vlan_tag !== undefined
       ? `VLAN ${attachment.vlan_tag}`

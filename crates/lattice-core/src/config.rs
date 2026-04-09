@@ -13,6 +13,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     #[serde(default)]
     pub discovery: DiscoveryConfig,
+    #[serde(default)]
+    pub topology_hints: TopologyHintsConfig,
     pub sources: Vec<SourceConfig>,
 }
 
@@ -104,6 +106,31 @@ pub struct ProxmoxSourceConfig {
 pub struct SeedDevice {
     pub ip: String,
     pub label: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyHintsConfig {
+    #[serde(default)]
+    pub links: Vec<TopologyHintLink>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyHintLink {
+    pub endpoints: Vec<TopologyHintEndpoint>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TopologyHintEndpoint {
+    pub device: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interface_pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sys_descr_contains: Option<String>,
 }
 
 pub fn load_config<P>(path: P) -> Result<AppConfig>
@@ -294,6 +321,7 @@ mod tests {
         assert_eq!(config.server.port, 8080);
         assert_eq!(config.discovery.max_hops, 10);
         assert_eq!(config.discovery.auto_discovery_interval_seconds, 60);
+        assert!(config.topology_hints.links.is_empty());
         assert_eq!(config.sources.len(), 2);
 
         let SourceConfig::Snmp(snmp) = &config.sources[0] else {
@@ -321,6 +349,7 @@ mod tests {
         assert_eq!(json["server"]["host"], "127.0.0.1");
         assert_eq!(json["discovery"]["max_hops"], 10);
         assert_eq!(json["discovery"]["auto_discovery_interval_seconds"], 60);
+        assert_eq!(json["topology_hints"]["links"], serde_json::json!([]));
         assert_eq!(json["sources"][0]["kind"], "snmp");
         assert_eq!(json["sources"][1]["kind"], "proxmox");
     }
@@ -408,6 +437,39 @@ sources:
         assert_eq!(proxmox.token_id, "root@pam!lattice");
         assert_eq!(proxmox.token_secret, "secret");
         assert!(!proxmox.tls_verify);
+    }
+
+    #[test]
+    fn parses_topology_hints() {
+        let config = parse_config_text(
+            r#"
+topology_hints:
+  links:
+    - endpoints:
+        - device: "ix2215"
+          interface_pattern: "GE2.*"
+          sys_descr_contains: "IX2215"
+        - device: "pve"
+          interface: "enp3s0"
+sources: []
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.topology_hints.links.len(), 1);
+        let link = &config.topology_hints.links[0];
+        assert_eq!(link.endpoints.len(), 2);
+        assert_eq!(link.endpoints[0].device, "ix2215");
+        assert_eq!(
+            link.endpoints[0].interface_pattern.as_deref(),
+            Some("GE2.*")
+        );
+        assert_eq!(
+            link.endpoints[0].sys_descr_contains.as_deref(),
+            Some("IX2215")
+        );
+        assert_eq!(link.endpoints[1].device, "pve");
+        assert_eq!(link.endpoints[1].interface.as_deref(), Some("enp3s0"));
     }
 
     #[test]

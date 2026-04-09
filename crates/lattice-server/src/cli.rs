@@ -83,7 +83,11 @@ pub async fn run() -> Result<()> {
 async fn run_discover(config_path: Option<PathBuf>, output: OutputFormat) -> Result<()> {
     let config_path = resolve_config_path(config_path)?;
     let config = load_config(config_path)?;
-    let engine = DiscoveryEngine::new(config.discovery.clone(), config.sources.clone());
+    let engine = DiscoveryEngine::new(
+        config.discovery.clone(),
+        config.sources.clone(),
+        config.topology_hints.clone(),
+    );
     let result = engine.discover().await?;
 
     match output {
@@ -115,6 +119,7 @@ async fn run_serve(
     let engine = Arc::new(DiscoveryEngine::new(
         config.discovery.clone(),
         config.sources.clone(),
+        config.topology_hints.clone(),
     ));
     let coordinator = Arc::new(DiscoveryCoordinator::new(
         engine,

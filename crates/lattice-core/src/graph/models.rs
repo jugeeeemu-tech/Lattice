@@ -77,6 +77,7 @@ impl Default for OperStatus {
 #[serde(rename_all = "snake_case")]
 pub enum LinkProtocol {
     Lldp,
+    TopologyHint,
     ProxmoxBridge,
     ProxmoxGuestLink,
     ProxmoxUplink,
@@ -93,6 +94,7 @@ impl LinkProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Lldp => "lldp",
+            Self::TopologyHint => "topology_hint",
             Self::ProxmoxBridge => "proxmox_bridge",
             Self::ProxmoxGuestLink => "proxmox_guest_link",
             Self::ProxmoxUplink => "proxmox_uplink",

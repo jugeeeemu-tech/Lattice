@@ -205,6 +205,7 @@ mod tests {
     };
     use lattice_core::{
         DiscoveryConfig, DiscoveryEngine, DiscoveryResult, DiscoveryTree, Topology,
+        TopologyHintsConfig,
     };
     use serde_json::Value;
     use tokio::{
@@ -218,7 +219,11 @@ mod tests {
 
     fn test_state() -> AppState {
         let config = DiscoveryConfig::default();
-        let engine = Arc::new(DiscoveryEngine::new(config.clone(), Vec::new()));
+        let engine = Arc::new(DiscoveryEngine::new(
+            config.clone(),
+            Vec::new(),
+            TopologyHintsConfig::default(),
+        ));
         let coordinator = Arc::new(DiscoveryCoordinator::new(
             engine,
             config.auto_discovery_interval_seconds,

@@ -13,7 +13,7 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use lattice_core::{DiscoveryConfig, DiscoveryEngine};
+    use lattice_core::{DiscoveryConfig, DiscoveryEngine, TopologyHintsConfig};
 
     use crate::api::{routes::build_router, AppState, DiscoveryCoordinator};
 
@@ -27,7 +27,11 @@ mod tests {
     #[test]
     fn builds_router() {
         let config = DiscoveryConfig::default();
-        let engine = Arc::new(DiscoveryEngine::new(config.clone(), Vec::new()));
+        let engine = Arc::new(DiscoveryEngine::new(
+            config.clone(),
+            Vec::new(),
+            TopologyHintsConfig::default(),
+        ));
         let coordinator = Arc::new(DiscoveryCoordinator::new(
             engine,
             config.auto_discovery_interval_seconds,

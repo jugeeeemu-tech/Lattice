@@ -9,6 +9,9 @@ discovery:
   concurrent_devices: 1
   auto_discovery_interval_seconds: 60
 
+topology_hints:
+  links: []
+
 sources:
   - kind: "snmp"
     version: "2c"
