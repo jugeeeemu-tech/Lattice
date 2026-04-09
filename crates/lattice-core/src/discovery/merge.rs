@@ -305,7 +305,14 @@ fn infer_display_tree(
 
     let mut emitted_nodes = Vec::new();
     for root_id in &roots {
-        emit_display_tree(root_id, &node_by_device, &children_by_parent, None, 0, &mut emitted_nodes);
+        emit_display_tree(
+            root_id,
+            &node_by_device,
+            &children_by_parent,
+            None,
+            0,
+            &mut emitted_nodes,
+        );
     }
 
     let mut duplicate_scope_counts = HashMap::<String, usize>::new();
@@ -397,7 +404,8 @@ fn build_display_relations(
         .iter()
         .filter(|link| link.protocol == LinkProtocol::Lldp)
     {
-        if !root_id_set.contains(&link.local_device_id) || !root_id_set.contains(&link.remote_device_id)
+        if !root_id_set.contains(&link.local_device_id)
+            || !root_id_set.contains(&link.remote_device_id)
         {
             continue;
         }
@@ -430,8 +438,14 @@ fn build_display_relations(
 }
 
 fn sort_relation_ids(topology: &Topology, device_ids: Vec<String>) -> Vec<String> {
-    let mut deduped = device_ids.into_iter().collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
-    deduped.sort_by(|left, right| device_sort_key(topology, left).cmp(&device_sort_key(topology, right)));
+    let mut deduped = device_ids
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    deduped.sort_by(|left, right| {
+        device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+    });
     deduped
 }
 
@@ -452,7 +466,11 @@ fn infer_additional_root_routers(
         .collect::<HashSet<_>>();
 
     let mut promoted = infer_router_cycle_roots(topology, &router_ids);
-    promoted.extend(infer_shared_downstream_roots(topology, visible_device_ids, &router_ids));
+    promoted.extend(infer_shared_downstream_roots(
+        topology,
+        visible_device_ids,
+        &router_ids,
+    ));
     promoted.extend(infer_router_backbone_pair_roots(
         topology,
         &router_ids,
@@ -497,12 +515,20 @@ fn infer_router_backbone_pair_roots(
         .iter()
         .filter(|link| link.protocol == LinkProtocol::Lldp)
     {
-        if !router_ids.contains(&link.local_device_id) || !router_ids.contains(&link.remote_device_id) {
+        if !router_ids.contains(&link.local_device_id)
+            || !router_ids.contains(&link.remote_device_id)
+        {
             continue;
         }
 
-        let left_children = router_child_counts.get(&link.local_device_id).copied().unwrap_or(0);
-        let right_children = router_child_counts.get(&link.remote_device_id).copied().unwrap_or(0);
+        let left_children = router_child_counts
+            .get(&link.local_device_id)
+            .copied()
+            .unwrap_or(0);
+        let right_children = router_child_counts
+            .get(&link.remote_device_id)
+            .copied()
+            .unwrap_or(0);
         if left_children >= 2 && right_children >= 2 {
             promoted.insert(link.local_device_id.clone());
             promoted.insert(link.remote_device_id.clone());
@@ -519,7 +545,8 @@ fn infer_router_cycle_roots(topology: &Topology, router_ids: &HashSet<String>) -
         .iter()
         .filter(|link| link.protocol == LinkProtocol::Lldp)
     {
-        if router_ids.contains(&link.local_device_id) && router_ids.contains(&link.remote_device_id) {
+        if router_ids.contains(&link.local_device_id) && router_ids.contains(&link.remote_device_id)
+        {
             router_neighbors
                 .entry(link.local_device_id.clone())
                 .or_default()
@@ -583,10 +610,12 @@ fn infer_shared_downstream_roots(
             .iter()
             .filter(|link| link.protocol == LinkProtocol::Lldp)
             .filter_map(|link| {
-                if link.local_device_id == *device_id && router_ids.contains(&link.remote_device_id) {
+                if link.local_device_id == *device_id && router_ids.contains(&link.remote_device_id)
+                {
                     return Some(link.remote_device_id.clone());
                 }
-                if link.remote_device_id == *device_id && router_ids.contains(&link.local_device_id) {
+                if link.remote_device_id == *device_id && router_ids.contains(&link.local_device_id)
+                {
                     return Some(link.local_device_id.clone());
                 }
                 None
@@ -1506,7 +1535,10 @@ mod tests {
             .filter(|node| node.device_id == "access-switch-a1")
             .collect::<Vec<_>>();
         assert_eq!(access_rows.len(), 1);
-        assert_eq!(access_rows[0].parent_row_id.as_deref(), Some("dist-switch-a"));
+        assert_eq!(
+            access_rows[0].parent_row_id.as_deref(),
+            Some("dist-switch-a")
+        );
     }
 
     #[test]

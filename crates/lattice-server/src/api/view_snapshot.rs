@@ -596,7 +596,8 @@ fn build_tree(
     let mut primary_depth_by_device = HashMap::new();
     let mut primary_rank_by_device = HashMap::new();
     for node in &nodes {
-        let node_rank = primary_row_rank(topology, &node.row_id, &parent_row_by_row, &node_by_row_id);
+        let node_rank =
+            primary_row_rank(topology, &node.row_id, &parent_row_by_row, &node_by_row_id);
         match primary_depth_by_device.get(&node.device_id).copied() {
             Some(existing_depth) if existing_depth < node.depth => {}
             Some(existing_depth)
@@ -1138,7 +1139,10 @@ mod tests {
             None,
         );
 
-        assert_eq!(snapshot.primary_row_by_device["switch-e"], "device-7/device-13#1");
+        assert_eq!(
+            snapshot.primary_row_by_device["switch-e"],
+            "device-7/device-13#1"
+        );
     }
 
     #[test]
