@@ -304,7 +304,24 @@ fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceR
     }
 
     let lowered = combined.to_lowercase();
-    if lowered.contains("router") || lowered.contains("vyos") {
+    if contains_any(
+        &lowered,
+        &[
+            "router",
+            "gateway",
+            "firewall",
+            "vyos",
+            "junos",
+            "routeros",
+            "edgeos",
+            "fortios",
+            "pfsense",
+            "opnsense",
+            "internetwork",
+            "ix series",
+            "rtx",
+        ],
+    ) {
         DeviceRole::Router
     } else if lowered.contains("switch") {
         DeviceRole::Switch
@@ -314,6 +331,10 @@ fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceR
     } else {
         DeviceRole::Unknown
     }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 #[cfg(test)]
@@ -387,6 +408,10 @@ mod tests {
         );
         assert_eq!(
             infer_device_role(Some("vyos"), Some("router os")),
+            DeviceRole::Router
+        );
+        assert_eq!(
+            infer_device_role(Some("Router"), Some("NEC Portable Internetwork Core OS")),
             DeviceRole::Router
         );
         assert_eq!(

@@ -7,7 +7,10 @@ use crate::{
     collectors::{Collector, CollectorContext, GraphPatch},
     graph::{Device, DeviceRole},
     snmp::{
-        oids::{IF_DESCR, IF_NAME, IP_CIDR_ROUTE_IF_INDEX, IP_ROUTE_IF_INDEX, SYS_DESCR},
+        oids::{
+            IF_DESCR, IF_NAME, IP_AD_ENT_ADDR, IP_AD_ENT_IF_IDX, IP_CIDR_ROUTE_IF_INDEX,
+            IP_ROUTE_IF_INDEX, SYS_DESCR, SYS_NAME,
+        },
         SnmpSession, SnmpValue,
     },
 };
@@ -46,12 +49,17 @@ impl Collector for RouteCollector {
             .await
             .map(|value| value.as_text())
             .unwrap_or_default();
-        if infer_device_role(&sys_descr) != DeviceRole::Router {
-            return Ok(GraphPatch::default());
-        }
+        let sys_name = session
+            .get(SYS_NAME)
+            .await
+            .ok()
+            .map(|value| value.as_text())
+            .filter(|value| !value.is_empty());
 
         let if_names = table_by_index(session.walk(IF_NAME).await?, IF_NAME);
         let if_descrs = table_by_index(session.walk(IF_DESCR).await?, IF_DESCR);
+        let ip_addrs = table_by_index(session.walk(IP_AD_ENT_ADDR).await?, IP_AD_ENT_ADDR);
+        let ip_if_idxs = table_by_index(session.walk(IP_AD_ENT_IF_IDX).await?, IP_AD_ENT_IF_IDX);
 
         let upstream_interface =
             match resolve_cidr_default_route(session, &if_names, &if_descrs).await? {
@@ -61,15 +69,23 @@ impl Collector for RouteCollector {
                     resolve_legacy_default_route(session, &if_names, &if_descrs).await?
                 }
             };
+        let routed_interfaces =
+            routed_interface_names(&ip_addrs, &ip_if_idxs, &if_names, &if_descrs);
+        let inferred_role = infer_device_role(sys_name.as_deref(), Some(&sys_descr));
+        let route_role_signal =
+            upstream_interface.is_some() && routed_interfaces.len() >= 2;
+        let device_role = if inferred_role == DeviceRole::Router || route_role_signal {
+            DeviceRole::Router
+        } else {
+            DeviceRole::Unknown
+        };
 
-        let devices = upstream_interface
-            .into_iter()
-            .map(|interface_name| Device {
-                id: ctx.local_device_id.clone(),
-                upstream_interface: Some(interface_name),
-                ..Device::empty()
-            })
-            .collect();
+        let devices = vec![Device {
+            id: ctx.local_device_id.clone(),
+            device_role,
+            upstream_interface,
+            ..Device::empty()
+        }];
 
         Ok(GraphPatch {
             devices,
@@ -203,6 +219,27 @@ fn interface_name_for_index(
         .filter(|value| !value.trim().is_empty())
 }
 
+fn routed_interface_names(
+    ip_addrs: &HashMap<String, SnmpValue>,
+    ip_if_idxs: &HashMap<String, SnmpValue>,
+    if_names: &HashMap<String, SnmpValue>,
+    if_descrs: &HashMap<String, SnmpValue>,
+) -> BTreeSet<String> {
+    ip_addrs
+        .keys()
+        .filter_map(|index| ip_if_idxs.get(index).and_then(snmp_value_as_u32))
+        .filter_map(|if_index| interface_name_for_index(if_index, if_names, if_descrs))
+        .filter(|name| !is_non_routed_interface(name))
+        .collect()
+}
+
+fn is_non_routed_interface(interface_name: &str) -> bool {
+    let lowered = interface_name.to_ascii_lowercase();
+    lowered.starts_with("lo")
+        || lowered.starts_with("loopback")
+        || lowered.starts_with("null")
+}
+
 fn is_default_cidr_route(suffix: &str) -> bool {
     suffix_components(suffix)
         .map(|parts| parts.len() >= 8 && parts.iter().take(8).all(|value| *value == 0))
@@ -226,9 +263,35 @@ fn suffix_components(value: &str) -> Option<Vec<u32>> {
     Some(parts)
 }
 
-fn infer_device_role(sys_descr: &str) -> DeviceRole {
-    let lowered = sys_descr.to_ascii_lowercase();
-    if lowered.contains("router") || lowered.contains("vyos") {
+fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
+    let mut combined = String::new();
+    if let Some(value) = sys_name {
+        combined.push_str(value);
+        combined.push(' ');
+    }
+    if let Some(value) = sys_descr {
+        combined.push_str(value);
+    }
+
+    let lowered = combined.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "router",
+            "gateway",
+            "firewall",
+            "vyos",
+            "junos",
+            "routeros",
+            "edgeos",
+            "fortios",
+            "pfsense",
+            "opnsense",
+            "internetwork",
+            "ix series",
+            "rtx",
+        ],
+    ) {
         DeviceRole::Router
     } else if lowered.contains("switch") {
         DeviceRole::Switch
@@ -238,6 +301,10 @@ fn infer_device_role(sys_descr: &str) -> DeviceRole {
     } else {
         DeviceRole::Unknown
     }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 #[cfg(test)]
@@ -328,6 +395,44 @@ mod tests {
                 &HashMap::new(),
             ),
             RouteResolution::Resolved("ge-0/0/3".to_string())
+        );
+    }
+
+    #[test]
+    fn infers_router_from_generic_router_naming_and_platform_text() {
+        assert_eq!(
+            infer_device_role(
+                Some("Router"),
+                Some("NEC Portable Internetwork Core Operating System Software")
+            ),
+            DeviceRole::Router
+        );
+    }
+
+    #[test]
+    fn keeps_loopback_and_null_interfaces_out_of_routed_interface_signal() {
+        let ip_addrs = HashMap::from([
+            ("192.168.1.1".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 1, 1))),
+            ("192.168.10.2".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 10, 2))),
+            ("127.0.0.1".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+        ]);
+        let ip_if_idxs = HashMap::from([
+            ("192.168.1.1".to_string(), SnmpValue::Integer(646)),
+            ("192.168.10.2".to_string(), SnmpValue::Integer(644)),
+            ("127.0.0.1".to_string(), SnmpValue::Integer(949)),
+        ]);
+        let if_names = HashMap::from([
+            ("644".to_string(), SnmpValue::OctetString(b"GigaEthernet0.0".to_vec())),
+            ("646".to_string(), SnmpValue::OctetString(b"GigaEthernet2.0".to_vec())),
+            ("949".to_string(), SnmpValue::OctetString(b"Loopback0.0".to_vec())),
+        ]);
+
+        assert_eq!(
+            routed_interface_names(&ip_addrs, &ip_if_idxs, &if_names, &HashMap::new()),
+            BTreeSet::from([
+                "GigaEthernet0.0".to_string(),
+                "GigaEthernet2.0".to_string(),
+            ])
         );
     }
 }

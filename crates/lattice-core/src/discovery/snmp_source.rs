@@ -101,7 +101,10 @@ impl DiscoverySource for SnmpDiscoverySource {
             local_device.identity_keys.mgmt_ip = Some(item.target_ip.clone());
             local_device.sys_descr = sys_descr.clone();
             local_device.vendor = detect_vendor(&sys_descr).to_string();
-            local_device.device_role = infer_device_role(&sys_descr);
+            local_device.device_role = infer_device_role(
+                local_device.identity_keys.sys_name.as_deref(),
+                Some(&sys_descr),
+            );
             local_device.deployment_type = DeploymentType::Unknown;
             local_device.status = DeviceStatus::Up;
             local_device.last_seen = Utc::now();
@@ -208,9 +211,35 @@ fn next_row_id(
     }
 }
 
-fn infer_device_role(sys_descr: &str) -> DeviceRole {
-    let lowered = sys_descr.to_ascii_lowercase();
-    if lowered.contains("router") || lowered.contains("vyos") {
+fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
+    let mut combined = String::new();
+    if let Some(value) = sys_name {
+        combined.push_str(value);
+        combined.push(' ');
+    }
+    if let Some(value) = sys_descr {
+        combined.push_str(value);
+    }
+
+    let lowered = combined.to_ascii_lowercase();
+    if contains_any(
+        &lowered,
+        &[
+            "router",
+            "gateway",
+            "firewall",
+            "vyos",
+            "junos",
+            "routeros",
+            "edgeos",
+            "fortios",
+            "pfsense",
+            "opnsense",
+            "internetwork",
+            "ix series",
+            "rtx",
+        ],
+    ) {
         DeviceRole::Router
     } else if lowered.contains("switch") {
         DeviceRole::Switch
@@ -220,6 +249,10 @@ fn infer_device_role(sys_descr: &str) -> DeviceRole {
     } else {
         DeviceRole::Unknown
     }
+}
+
+fn contains_any(haystack: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| haystack.contains(needle))
 }
 
 #[cfg(test)]
@@ -253,24 +286,38 @@ mod tests {
 
     #[test]
     fn infers_router_from_vyos() {
-        assert_eq!(infer_device_role("VyOS 1.4 rolling"), DeviceRole::Router);
+        assert_eq!(
+            infer_device_role(None, Some("VyOS 1.4 rolling")),
+            DeviceRole::Router
+        );
+    }
+
+    #[test]
+    fn infers_router_from_sys_name_without_vendor_specific_model_match() {
+        assert_eq!(
+            infer_device_role(Some("Router"), Some("NEC Portable Internetwork Core OS")),
+            DeviceRole::Router
+        );
     }
 
     #[test]
     fn infers_switch_from_description() {
-        assert_eq!(infer_device_role("Layer 2 Switch"), DeviceRole::Switch);
+        assert_eq!(
+            infer_device_role(None, Some("Layer 2 Switch")),
+            DeviceRole::Switch
+        );
     }
 
     #[test]
     fn infers_physical_server_from_linux_text() {
         assert_eq!(
-            infer_device_role("Linux 6.8.0-2-pve Proxmox VE"),
+            infer_device_role(None, Some("Linux 6.8.0-2-pve Proxmox VE")),
             DeviceRole::Server
         );
     }
 
     #[test]
     fn keeps_unknown_for_unrecognized_text() {
-        assert_eq!(infer_device_role("appliance"), DeviceRole::Unknown);
+        assert_eq!(infer_device_role(None, Some("appliance")), DeviceRole::Unknown);
     }
 }
