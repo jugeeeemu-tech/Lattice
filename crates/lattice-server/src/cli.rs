@@ -2,7 +2,7 @@ use std::{path::PathBuf, sync::Arc};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
-use lattice_core::{load_config, DiscoveryEngine};
+use lattice_core::{load_config, resolve_config_path, DiscoveryEngine};
 use tokio::net::TcpListener;
 use tracing::info;
 
@@ -30,18 +30,18 @@ pub struct Cli {
 pub enum Commands {
     /// Run one discovery pass and print the resulting topology.
     Discover {
-        /// Path to the lattice configuration file.
-        #[arg(long, default_value = "config/lattice.yaml")]
-        config: PathBuf,
+        /// Path to the lattice configuration file. When omitted, lattice looks in standard locations.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Output format for the discovered topology.
         #[arg(long, value_enum, default_value_t = OutputFormat::Json)]
         output: OutputFormat,
     },
     /// Start the live topology server backed by discovery sources.
     Serve {
-        /// Path to the lattice configuration file.
-        #[arg(long, default_value = "config/lattice.yaml")]
-        config: PathBuf,
+        /// Path to the lattice configuration file. When omitted, lattice looks in standard locations.
+        #[arg(long)]
+        config: Option<PathBuf>,
         /// Override the listen host from the configuration file.
         #[arg(long)]
         host: Option<String>,
@@ -80,7 +80,8 @@ pub async fn run() -> Result<()> {
     }
 }
 
-async fn run_discover(config_path: PathBuf, output: OutputFormat) -> Result<()> {
+async fn run_discover(config_path: Option<PathBuf>, output: OutputFormat) -> Result<()> {
+    let config_path = resolve_config_path(config_path)?;
     let config = load_config(config_path)?;
     let engine = DiscoveryEngine::new(config.discovery.clone(), config.sources.clone());
     let result = engine.discover().await?;
@@ -95,12 +96,13 @@ async fn run_discover(config_path: PathBuf, output: OutputFormat) -> Result<()> 
 }
 
 async fn run_serve(
-    config_path: PathBuf,
+    config_path: Option<PathBuf>,
     host_override: Option<String>,
     port_override: Option<u16>,
 ) -> Result<()> {
     init_tracing();
 
+    let config_path = resolve_config_path(config_path)?;
     let mut config = load_config(config_path)?;
     if let Some(host) = host_override {
         config.server.host = host;

@@ -1,4 +1,7 @@
-use std::{fs, path::Path};
+use std::{
+    env, fs,
+    path::{Path, PathBuf},
+};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -108,6 +111,12 @@ where
     P: AsRef<Path>,
 {
     let path = path.as_ref();
+    load_adjacent_env_file(path).with_context(|| {
+        format!(
+            "failed to load environment file for config: {}",
+            path.display()
+        )
+    })?;
     let raw = fs::read_to_string(path)
         .with_context(|| format!("failed to open config file: {}", path.display()))?;
     let expanded = expand_env_placeholders(&raw)
@@ -117,8 +126,66 @@ where
         .with_context(|| format!("failed to parse config file: {}", path.display()))
 }
 
+pub fn resolve_config_path(explicit_path: Option<PathBuf>) -> Result<PathBuf> {
+    if let Some(path) = explicit_path {
+        return Ok(path);
+    }
+
+    let candidates = default_config_candidates()?;
+    for path in &candidates {
+        if path.is_file() {
+            return Ok(path.clone());
+        }
+    }
+
+    let searched = candidates
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    anyhow::bail!(
+        "could not find a lattice config file. looked for: {searched}. use --config to specify a file explicitly"
+    );
+}
+
 fn parse_config_text(text: &str) -> Result<AppConfig> {
     serde_yaml::from_str(text).context("invalid YAML configuration")
+}
+
+fn default_config_candidates() -> Result<Vec<PathBuf>> {
+    let current_dir = env::current_dir().context("failed to determine current directory")?;
+    let mut candidates = vec![
+        current_dir.join("config/lattice.yaml"),
+        current_dir.join("lattice.yaml"),
+    ];
+
+    if let Some(xdg_config_home) = env::var_os("XDG_CONFIG_HOME") {
+        candidates.push(PathBuf::from(xdg_config_home).join("lattice/lattice.yaml"));
+    } else if let Some(home) = env::var_os("HOME") {
+        candidates.push(PathBuf::from(home).join(".config/lattice/lattice.yaml"));
+    }
+
+    Ok(candidates)
+}
+
+fn load_adjacent_env_file(config_path: &Path) -> Result<()> {
+    let env_path = config_path.with_extension("env");
+    if !env_path.exists() {
+        return Ok(());
+    }
+
+    for item in dotenvy::from_path_iter(&env_path)
+        .with_context(|| format!("failed to read {}", env_path.display()))?
+    {
+        let (key, value) =
+            item.with_context(|| format!("failed to parse {}", env_path.display()))?;
+        if env::var_os(&key).is_none() {
+            // Keep process-level overrides higher priority than the adjacent env file.
+            unsafe { env::set_var(key, value) };
+        }
+    }
+
+    Ok(())
 }
 
 fn expand_env_placeholders(input: &str) -> Result<String> {
@@ -199,6 +266,24 @@ fn default_host() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs,
+        sync::{Mutex, OnceLock},
+        time::{SystemTime, UNIX_EPOCH},
+    };
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn unique_temp_path(name: &str) -> std::path::PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("lattice-{name}-{suffix}-{}", std::process::id()))
+    }
 
     #[test]
     fn parses_example_config() {
@@ -214,7 +299,7 @@ mod tests {
         let SourceConfig::Snmp(snmp) = &config.sources[0] else {
             panic!("first source should be snmp");
         };
-        assert_eq!(snmp.community, "public");
+        assert_eq!(snmp.community, "${LATTICE_SNMP_COMMUNITY}");
         assert_eq!(snmp.seeds.len(), 1);
 
         let SourceConfig::Proxmox(proxmox) = &config.sources[1] else {
@@ -323,5 +408,138 @@ sources:
         assert_eq!(proxmox.token_id, "root@pam!lattice");
         assert_eq!(proxmox.token_secret, "secret");
         assert!(!proxmox.tls_verify);
+    }
+
+    #[test]
+    fn loads_adjacent_env_file_before_expanding_config_placeholders() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            env::remove_var("LATTICE_PROXMOX_TOKEN_ID");
+            env::remove_var("LATTICE_PROXMOX_TOKEN_SECRET");
+        }
+
+        let dir = unique_temp_path("config-loads-env");
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("lattice.yaml");
+        let env_path = dir.join("lattice.env");
+
+        fs::write(
+            &config_path,
+            r#"
+sources:
+  - kind: "proxmox"
+    base_url: "https://192.168.10.50:8006"
+    token_id: "${LATTICE_PROXMOX_TOKEN_ID}"
+    token_secret: "${LATTICE_PROXMOX_TOKEN_SECRET}"
+    tls_verify: true
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &env_path,
+            "LATTICE_PROXMOX_TOKEN_ID=root@pam!lattice\nLATTICE_PROXMOX_TOKEN_SECRET=secret\n",
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        let SourceConfig::Proxmox(proxmox) = &config.sources[0] else {
+            panic!("first source should be proxmox");
+        };
+        assert_eq!(proxmox.token_id, "root@pam!lattice");
+        assert_eq!(proxmox.token_secret, "secret");
+
+        fs::remove_dir_all(&dir).unwrap();
+        unsafe {
+            env::remove_var("LATTICE_PROXMOX_TOKEN_ID");
+            env::remove_var("LATTICE_PROXMOX_TOKEN_SECRET");
+        }
+    }
+
+    #[test]
+    fn process_environment_overrides_adjacent_env_file() {
+        let _guard = env_lock().lock().unwrap();
+        unsafe {
+            env::set_var("LATTICE_PROXMOX_TOKEN_ID", "override-id");
+            env::set_var("LATTICE_PROXMOX_TOKEN_SECRET", "override-secret");
+        }
+
+        let dir = unique_temp_path("config-prefers-process-env");
+        fs::create_dir_all(&dir).unwrap();
+        let config_path = dir.join("lattice.yaml");
+        let env_path = dir.join("lattice.env");
+
+        fs::write(
+            &config_path,
+            r#"
+sources:
+  - kind: "proxmox"
+    base_url: "https://192.168.10.50:8006"
+    token_id: "${LATTICE_PROXMOX_TOKEN_ID}"
+    token_secret: "${LATTICE_PROXMOX_TOKEN_SECRET}"
+    tls_verify: true
+"#,
+        )
+        .unwrap();
+        fs::write(
+            &env_path,
+            "LATTICE_PROXMOX_TOKEN_ID=file-id\nLATTICE_PROXMOX_TOKEN_SECRET=file-secret\n",
+        )
+        .unwrap();
+
+        let config = load_config(&config_path).unwrap();
+        let SourceConfig::Proxmox(proxmox) = &config.sources[0] else {
+            panic!("first source should be proxmox");
+        };
+        assert_eq!(proxmox.token_id, "override-id");
+        assert_eq!(proxmox.token_secret, "override-secret");
+
+        fs::remove_dir_all(&dir).unwrap();
+        unsafe {
+            env::remove_var("LATTICE_PROXMOX_TOKEN_ID");
+            env::remove_var("LATTICE_PROXMOX_TOKEN_SECRET");
+        }
+    }
+
+    #[test]
+    fn resolve_config_path_prefers_config_directory_in_current_dir() {
+        let _guard = env_lock().lock().unwrap();
+        let original_dir = env::current_dir().unwrap();
+        let dir = unique_temp_path("config-prefers-config-dir");
+        fs::create_dir_all(dir.join("config")).unwrap();
+        fs::write(dir.join("config/lattice.yaml"), "sources: []\n").unwrap();
+        fs::write(dir.join("lattice.yaml"), "sources: []\n").unwrap();
+
+        env::set_current_dir(&dir).unwrap();
+        let resolved = resolve_config_path(None).unwrap();
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert_eq!(resolved, dir.join("config/lattice.yaml"));
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn resolve_config_path_supports_explicit_override() {
+        let explicit = PathBuf::from("/tmp/custom-lattice.yaml");
+        assert_eq!(
+            resolve_config_path(Some(explicit.clone())).unwrap(),
+            explicit
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_reports_search_locations_when_missing() {
+        let _guard = env_lock().lock().unwrap();
+        let original_dir = env::current_dir().unwrap();
+        let dir = unique_temp_path("config-missing");
+        fs::create_dir_all(&dir).unwrap();
+
+        env::set_current_dir(&dir).unwrap();
+        let error = resolve_config_path(None).unwrap_err().to_string();
+        env::set_current_dir(&original_dir).unwrap();
+
+        assert!(error.contains("could not find a lattice config file"));
+        assert!(error.contains("config/lattice.yaml"));
+        assert!(error.contains("--config"));
+        fs::remove_dir_all(&dir).unwrap();
     }
 }

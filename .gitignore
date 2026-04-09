@@ -1,6 +1,7 @@
 /target
 /config/lattice.yaml
 /config/lattice.proxmox.env
+/config/lattice.env
 /.tools/
 /scripts/*
 !/scripts/topology-reflection/

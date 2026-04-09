@@ -12,7 +12,7 @@ discovery:
 sources:
   - kind: "snmp"
     version: "2c"
-    community: "public"
+    community: "${LATTICE_SNMP_COMMUNITY}"
     seeds:
       - ip: "192.0.2.10"
         label: "vyos-core"
