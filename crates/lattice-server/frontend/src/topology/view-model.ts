@@ -50,8 +50,18 @@ export interface GuestHighlight {
 }
 
 export interface PathState {
+  deviceSequence: string[];
   deviceIds: Set<string>;
   guestHighlight: GuestHighlight | null;
+  linkSequence: string[];
+  linkIds: Set<string>;
+  resolvedNetworkCidrByLink: Record<string, string>;
+}
+
+interface PathSegment {
+  deviceSequence: string[];
+  deviceIds: Set<string>;
+  linkSequence: string[];
   linkIds: Set<string>;
   resolvedNetworkCidrByLink: Record<string, string>;
 }
@@ -118,6 +128,36 @@ function compareByLabel(
     return normalizeText(left?.id).localeCompare(normalizeText(right?.id));
   }
   return leftLabel.localeCompare(rightLabel);
+}
+
+function pushDeviceStep(sequence: string[], deviceId: string): void {
+  if (sequence[sequence.length - 1] !== deviceId) {
+    sequence.push(deviceId);
+  }
+}
+
+function pushLinkStep(sequence: string[], linkId: string): void {
+  if (sequence[sequence.length - 1] !== linkId) {
+    sequence.push(linkId);
+  }
+}
+
+function appendPathSegment(
+  target: PathSegment,
+  segment: PathSegment,
+  options: { skipFirstDevice?: boolean } = {}
+): void {
+  const deviceSequence = options.skipFirstDevice ? segment.deviceSequence.slice(1) : segment.deviceSequence;
+  for (const deviceId of deviceSequence) {
+    pushDeviceStep(target.deviceSequence, deviceId);
+  }
+  segment.deviceIds.forEach((deviceId) => target.deviceIds.add(deviceId));
+
+  for (const linkId of segment.linkSequence) {
+    pushLinkStep(target.linkSequence, linkId);
+  }
+  segment.linkIds.forEach((linkId) => target.linkIds.add(linkId));
+  Object.assign(target.resolvedNetworkCidrByLink, segment.resolvedNetworkCidrByLink);
 }
 
 export function findRowPath(
@@ -995,11 +1035,15 @@ function physicalUpstreamPathFrom(
   excludeLinkIds = new Set<string>(),
   seenDeviceIds = new Set<string>()
 ): {
+  deviceSequence: string[];
   deviceIds: Set<string>;
+  linkSequence: string[];
   linkIds: Set<string>;
   resolvedNetworkCidrByLink: Record<string, string>;
 } {
+  const deviceSequence: string[] = [];
   const deviceIds = new Set<string>();
+  const linkSequence: string[] = [];
   const linkIds = new Set<string>();
   const resolvedNetworkCidrByLink: Record<string, string> = {};
   let currentDeviceId: string | null = deviceId;
@@ -1007,6 +1051,8 @@ function physicalUpstreamPathFrom(
 
   while (currentDeviceId && !visitedDeviceIds.has(currentDeviceId)) {
     visitedDeviceIds.add(currentDeviceId);
+    pushDeviceStep(deviceSequence, currentDeviceId);
+    deviceIds.add(currentDeviceId);
     const currentDevice = model.deviceById.get(currentDeviceId) ?? null;
     const candidates = connectedLinksForDevice(snapshot, model, currentDeviceId, {
       excludeLinkIds,
@@ -1031,17 +1077,67 @@ function physicalUpstreamPathFrom(
       break;
     }
 
+    pushLinkStep(linkSequence, chosenLink.id);
     linkIds.add(chosenLink.id);
     const resolvedNetworkCidr = primaryNetworkCidr(chosenLink);
     if (resolvedNetworkCidr) {
       resolvedNetworkCidrByLink[chosenLink.id] = resolvedNetworkCidr;
     }
-    deviceIds.add(nextDeviceId);
     excludeLinkIds.add(chosenLink.id);
     currentDeviceId = nextDeviceId;
   }
 
-  return { deviceIds, linkIds, resolvedNetworkCidrByLink };
+  return { deviceSequence, deviceIds, linkSequence, linkIds, resolvedNetworkCidrByLink };
+}
+
+function guestUpstreamPathFromDevice(
+  snapshot: ViewSnapshot,
+  model: DerivedTopologyModel,
+  deviceId: string,
+  options: {
+    excludeLinkIds?: Set<string>;
+    ingressLinkId?: string | null;
+    seenDeviceIds?: Set<string>;
+  } = {}
+): PathSegment | null {
+  const guestLink = preferredGuestLinkForDevice(snapshot, model, deviceId);
+  if (!guestLink || guestLink.id === options.ingressLinkId) {
+    return null;
+  }
+
+  const bridgeDeviceId = bridgeDeviceIdForLink(snapshot, model, guestLink);
+  if (!bridgeDeviceId) {
+    return null;
+  }
+
+  const segment: PathSegment = {
+    deviceSequence: [deviceId],
+    deviceIds: new Set([deviceId]),
+    linkSequence: [],
+    linkIds: new Set<string>(),
+    resolvedNetworkCidrByLink: {},
+  };
+
+  pushLinkStep(segment.linkSequence, guestLink.id);
+  segment.linkIds.add(guestLink.id);
+  const networkCidr = primaryNetworkCidr(guestLink);
+  if (networkCidr) {
+    segment.resolvedNetworkCidrByLink[guestLink.id] = networkCidr;
+  }
+  pushDeviceStep(segment.deviceSequence, bridgeDeviceId);
+  segment.deviceIds.add(bridgeDeviceId);
+
+  const continuation = physicalUpstreamPathFrom(
+    snapshot,
+    model,
+    bridgeDeviceId,
+    new Set([...(options.excludeLinkIds ?? []), guestLink.id]),
+    new Set(
+      Array.from(options.seenDeviceIds ?? []).filter((candidateId) => candidateId !== bridgeDeviceId)
+    )
+  );
+  appendPathSegment(segment, continuation, { skipFirstDevice: true });
+  return segment;
 }
 
 export function computeUpstreamPath(
@@ -1049,53 +1145,62 @@ export function computeUpstreamPath(
   model: DerivedTopologyModel,
   deviceId: string | null
 ): PathState {
-  const deviceIds = new Set<string>();
-  const linkIds = new Set<string>();
-  const resolvedNetworkCidrByLink: Record<string, string> = {};
+  const path: PathSegment = {
+    deviceSequence: [],
+    deviceIds: new Set<string>(),
+    linkSequence: [],
+    linkIds: new Set<string>(),
+    resolvedNetworkCidrByLink: {},
+  };
   let guestHighlight: GuestHighlight | null = null;
 
   if (!deviceId) {
-    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+    return {
+      deviceSequence: path.deviceSequence,
+      deviceIds: path.deviceIds,
+      guestHighlight,
+      linkSequence: path.linkSequence,
+      linkIds: path.linkIds,
+      resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+    };
   }
 
-  deviceIds.add(deviceId);
+  pushDeviceStep(path.deviceSequence, deviceId);
+  path.deviceIds.add(deviceId);
   const guestLink = preferredAccessGuestLinkForDevice(snapshot, model, deviceId);
   if (!guestLink) {
-    const fallbackGuestLink = preferredGuestLinkForDevice(snapshot, model, deviceId);
-    if (fallbackGuestLink) {
-      linkIds.add(fallbackGuestLink.id);
-      const fallbackNetworkCidr = primaryNetworkCidr(fallbackGuestLink);
-      if (fallbackNetworkCidr) {
-        resolvedNetworkCidrByLink[fallbackGuestLink.id] = fallbackNetworkCidr;
-      }
-      const bridgeDeviceId = bridgeDeviceIdForLink(snapshot, model, fallbackGuestLink);
-      if (bridgeDeviceId) {
-        deviceIds.add(bridgeDeviceId);
-        const continuation = physicalUpstreamPathFrom(
-          snapshot,
-          model,
-          bridgeDeviceId,
-          new Set([fallbackGuestLink.id]),
-          new Set(Array.from(deviceIds).filter((candidateId) => candidateId !== bridgeDeviceId))
-        );
-        continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
-        continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-        Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
-      }
-      return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+    const guestSegment = guestUpstreamPathFromDevice(snapshot, model, deviceId, {
+      seenDeviceIds: path.deviceIds,
+    });
+    if (guestSegment) {
+      appendPathSegment(path, guestSegment, { skipFirstDevice: true });
+      return {
+        deviceSequence: path.deviceSequence,
+        deviceIds: path.deviceIds,
+        guestHighlight,
+        linkSequence: path.linkSequence,
+        linkIds: path.linkIds,
+        resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+      };
     }
 
     const continuation = physicalUpstreamPathFrom(snapshot, model, deviceId);
-    continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
-    continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-    Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
-    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+    appendPathSegment(path, continuation, { skipFirstDevice: true });
+    return {
+      deviceSequence: path.deviceSequence,
+      deviceIds: path.deviceIds,
+      guestHighlight,
+      linkSequence: path.linkSequence,
+      linkIds: path.linkIds,
+      resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+    };
   }
 
-  linkIds.add(guestLink.id);
+  pushLinkStep(path.linkSequence, guestLink.id);
+  path.linkIds.add(guestLink.id);
   const accessNetworkCidr = primaryNetworkCidr(guestLink);
   if (accessNetworkCidr) {
-    resolvedNetworkCidrByLink[guestLink.id] = accessNetworkCidr;
+    path.resolvedNetworkCidrByLink[guestLink.id] = accessNetworkCidr;
   }
   guestHighlight = {
     accessLinkId: guestLink.id,
@@ -1104,43 +1209,74 @@ export function computeUpstreamPath(
 
   const bridgeDeviceId = bridgeDeviceIdForLink(snapshot, model, guestLink);
   if (bridgeDeviceId) {
-    deviceIds.add(bridgeDeviceId);
+    pushDeviceStep(path.deviceSequence, bridgeDeviceId);
+    path.deviceIds.add(bridgeDeviceId);
   }
 
   const routerLink = routerCandidateLinkForGuestLink(snapshot, model, guestLink);
   if (!routerLink) {
-    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+    return {
+      deviceSequence: path.deviceSequence,
+      deviceIds: path.deviceIds,
+      guestHighlight,
+      linkSequence: path.linkSequence,
+      linkIds: path.linkIds,
+      resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+    };
   }
 
   const routerDeviceId = guestDeviceIdForLink(snapshot, model, routerLink);
   if (!routerDeviceId) {
-    return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+    return {
+      deviceSequence: path.deviceSequence,
+      deviceIds: path.deviceIds,
+      guestHighlight,
+      linkSequence: path.linkSequence,
+      linkIds: path.linkIds,
+      resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+    };
   }
 
-  linkIds.add(routerLink.id);
-  deviceIds.add(routerDeviceId);
+  pushLinkStep(path.linkSequence, routerLink.id);
+  path.linkIds.add(routerLink.id);
+  pushDeviceStep(path.deviceSequence, routerDeviceId);
+  path.deviceIds.add(routerDeviceId);
   const resolvedGuestNetworkCidr = resolvedNetworkCidrForTaggedGuestPath(guestLink, routerLink);
   if (resolvedGuestNetworkCidr) {
-    resolvedNetworkCidrByLink[guestLink.id] = resolvedGuestNetworkCidr;
-    resolvedNetworkCidrByLink[routerLink.id] = resolvedGuestNetworkCidr;
+    path.resolvedNetworkCidrByLink[guestLink.id] = resolvedGuestNetworkCidr;
+    path.resolvedNetworkCidrByLink[routerLink.id] = resolvedGuestNetworkCidr;
   }
   guestHighlight = {
     ...guestHighlight,
     trunkLinkId: routerLink.id,
   };
 
-  const continuation = physicalUpstreamPathFrom(
-    snapshot,
-    model,
-    routerDeviceId,
-    new Set([guestLink.id, routerLink.id]),
-    new Set(Array.from(deviceIds).filter((candidateId) => candidateId !== routerDeviceId))
-  );
-  continuation.deviceIds.forEach((pathDeviceId) => deviceIds.add(pathDeviceId));
-  continuation.linkIds.forEach((pathLinkId) => linkIds.add(pathLinkId));
-  Object.assign(resolvedNetworkCidrByLink, continuation.resolvedNetworkCidrByLink);
+  const routerUpstreamSegment = guestUpstreamPathFromDevice(snapshot, model, routerDeviceId, {
+    excludeLinkIds: new Set([guestLink.id, routerLink.id]),
+    ingressLinkId: routerLink.id,
+    seenDeviceIds: path.deviceIds,
+  });
+  if (routerUpstreamSegment) {
+    appendPathSegment(path, routerUpstreamSegment, { skipFirstDevice: true });
+  } else {
+    const continuation = physicalUpstreamPathFrom(
+      snapshot,
+      model,
+      routerDeviceId,
+      new Set([guestLink.id, routerLink.id]),
+      new Set(Array.from(path.deviceIds).filter((candidateId) => candidateId !== routerDeviceId))
+    );
+    appendPathSegment(path, continuation, { skipFirstDevice: true });
+  }
 
-  return { deviceIds, guestHighlight, linkIds, resolvedNetworkCidrByLink };
+  return {
+    deviceSequence: path.deviceSequence,
+    deviceIds: path.deviceIds,
+    guestHighlight,
+    linkSequence: path.linkSequence,
+    linkIds: path.linkIds,
+    resolvedNetworkCidrByLink: path.resolvedNetworkCidrByLink,
+  };
 }
 
 export function buildHoverCardForEntry(

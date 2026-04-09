@@ -53,6 +53,8 @@ describe('buildTopologyModel', () => {
 
     const path = computeUpstreamPath(extendedSnapshot, model, 'guest-app');
 
+    expect(path.deviceSequence).toEqual(['guest-app', 'proxmox-host', 'router-core']);
+    expect(path.linkSequence).toEqual(['link-pve-guest', 'link-pve-router-trunk']);
     expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
     expect(Array.from(path.linkIds).sort()).toEqual(['link-pve-guest', 'link-pve-router-trunk']);
     expect(path.guestHighlight).toEqual({
@@ -84,6 +86,8 @@ describe('buildTopologyModel', () => {
 
     const path = computeUpstreamPath(untaggedSnapshot, model, 'guest-app');
 
+    expect(path.deviceSequence).toEqual(['guest-app', 'proxmox-host', 'router-core']);
+    expect(path.linkSequence).toEqual(['link-pve-guest', 'link-core-pve']);
     expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
     expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-pve-guest']);
     expect(path.guestHighlight).toBeNull();
@@ -141,6 +145,8 @@ describe('buildTopologyModel', () => {
 
     const path = computeUpstreamPath(routerGuestSnapshot, model, 'guest-app');
 
+    expect(path.deviceSequence).toEqual(['guest-app', 'proxmox-host', 'router-core']);
+    expect(path.linkSequence).toEqual(['link-vyos-net0', 'link-core-pve']);
     expect(Array.from(path.deviceIds).sort()).toEqual(['guest-app', 'proxmox-host', 'router-core']);
     expect(Array.from(path.linkIds).sort()).toEqual(['link-core-pve', 'link-vyos-net0']);
     expect(path.guestHighlight).toBeNull();
@@ -189,6 +195,150 @@ describe('buildTopologyModel', () => {
     expect(path.resolvedNetworkCidrByLink).toEqual({
       'link-pve-guest': '10.120.0.0/24',
       'link-pve-router-trunk': '10.120.0.0/24',
+    });
+  });
+
+  it('continues tagged guest paths from the bridge to the physical upstream router', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const bridgedUpstreamSnapshot = {
+      ...snapshot,
+      links: [
+        snapshot.links[1],
+        {
+          id: 'link-vyos-net0',
+          local_device_id: 'vyos01',
+          local_interface: 'net0',
+          remote_device_id: 'proxmox-host',
+          remote_interface: 'vmbr0',
+          speed_bps: 1_000_000_000,
+          protocol: 'proxmox_guest_link' as const,
+          network_cidrs: ['192.0.2.0/24'],
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+          },
+        },
+        {
+          id: 'link-pve-router-trunk',
+          local_device_id: 'proxmox-host',
+          local_interface: 'vmbr0',
+          remote_device_id: 'vyos01',
+          remote_interface: 'net1',
+          speed_bps: 1_000_000_000,
+          protocol: 'proxmox_guest_link' as const,
+          network_cidrs: ['10.120.0.0/24', '10.130.0.0/24'],
+          guest_attachment: {
+            bridge_name: 'vmbr0',
+            trunk_vlans: [120, 130],
+          },
+        },
+        {
+          id: 'link-edge-pve',
+          local_device_id: 'edge-router',
+          local_interface: 'ge0/0',
+          remote_device_id: 'proxmox-host',
+          remote_interface: 'eno1',
+          speed_bps: 1_000_000_000,
+          protocol: 'topology_hint' as const,
+          network_cidrs: [],
+        },
+      ],
+      devices: [
+        ...snapshot.devices.map((device) =>
+          device.id === 'proxmox-host'
+            ? {
+                ...device,
+                device_role: 'bridge' as const,
+                upstream_interface: 'eno1',
+              }
+              : device.id === 'router-core'
+              ? {
+                  ...device,
+                  id: 'vyos01',
+                  label: 'vyos01',
+                  deployment_type: 'virtual' as const,
+                  upstream_interface: 'net0',
+                }
+              : device
+        ),
+        {
+          id: 'edge-router',
+          label: 'edge-router',
+          depth: 0,
+          device_role: 'router' as const,
+          deployment_type: 'physical' as const,
+          identity_keys: {
+            sys_name: 'edge-router',
+            mgmt_ip: '192.0.2.1',
+            mac_addresses: ['00:00:5e:00:53:99'],
+          },
+        },
+      ],
+      device_relations: {
+        'guest-app': { parents: ['proxmox-host'], peers: [], children: [] },
+        'proxmox-host': {
+          parents: ['edge-router'],
+          peers: [],
+          children: ['guest-app', 'vyos01'],
+        },
+        'vyos01': { parents: ['proxmox-host'], peers: [], children: [] },
+        'edge-router': { parents: [], peers: [], children: ['proxmox-host'] },
+      },
+      root_device_ids: ['edge-router'],
+      tree_rows: [
+        { id: 'row-edge-router', device_id: 'edge-router', label: 'edge-router' },
+        { id: 'row-proxmox-host', device_id: 'proxmox-host', label: 'proxmox-host' },
+        { id: 'row-vyos01', device_id: 'vyos01', label: 'vyos01' },
+        { id: 'row-guest-app', device_id: 'guest-app', label: 'guest-app' },
+      ],
+      tree_edges: [
+        { parent_row_id: 'row-edge-router', child_row_id: 'row-proxmox-host' },
+        { parent_row_id: 'row-proxmox-host', child_row_id: 'row-vyos01' },
+        { parent_row_id: 'row-proxmox-host', child_row_id: 'row-guest-app' },
+      ],
+      primary_row_by_device: {
+        'edge-router': 'row-edge-router',
+        'proxmox-host': 'row-proxmox-host',
+        'vyos01': 'row-vyos01',
+        'guest-app': 'row-guest-app',
+      },
+    };
+    const model = buildTopologyModel(bridgedUpstreamSnapshot, new Set());
+
+    const path = computeUpstreamPath(bridgedUpstreamSnapshot, model, 'guest-app');
+
+    expect(path.deviceSequence).toEqual([
+      'guest-app',
+      'proxmox-host',
+      'vyos01',
+      'proxmox-host',
+      'edge-router',
+    ]);
+    expect(path.linkSequence).toEqual([
+      'link-pve-guest',
+      'link-pve-router-trunk',
+      'link-vyos-net0',
+      'link-edge-pve',
+    ]);
+    expect(Array.from(path.deviceIds).sort()).toEqual([
+      'edge-router',
+      'guest-app',
+      'proxmox-host',
+      'vyos01',
+    ]);
+    expect(Array.from(path.linkIds).sort()).toEqual([
+      'link-edge-pve',
+      'link-pve-guest',
+      'link-pve-router-trunk',
+      'link-vyos-net0',
+    ]);
+    expect(path.guestHighlight).toEqual({
+      accessLinkId: 'link-pve-guest',
+      trunkLinkId: 'link-pve-router-trunk',
+    });
+    expect(path.resolvedNetworkCidrByLink).toEqual({
+      'link-pve-guest': '192.0.2.0/24',
+      'link-pve-router-trunk': '192.0.2.0/24',
+      'link-vyos-net0': '192.0.2.0/24',
     });
   });
 
@@ -322,12 +472,16 @@ describe('buildTopologyModel', () => {
     const distPath = computeUpstreamPath(snapshot, model, 'dist-switch');
     const accessPath = computeUpstreamPath(snapshot, model, 'access-switch');
 
+    expect(distPath.deviceSequence).toEqual(['dist-switch', 'core-router']);
+    expect(distPath.linkSequence).toEqual(['core-dist']);
     expect(Array.from(distPath.deviceIds).sort()).toEqual(['core-router', 'dist-switch']);
     expect(Array.from(distPath.linkIds)).toEqual(['core-dist']);
     expect(distPath.resolvedNetworkCidrByLink).toEqual({
       'core-dist': '10.0.1.0/24',
     });
 
+    expect(accessPath.deviceSequence).toEqual(['access-switch', 'dist-switch', 'core-router']);
+    expect(accessPath.linkSequence).toEqual(['dist-access', 'core-dist']);
     expect(Array.from(accessPath.deviceIds).sort()).toEqual([
       'access-switch',
       'core-router',

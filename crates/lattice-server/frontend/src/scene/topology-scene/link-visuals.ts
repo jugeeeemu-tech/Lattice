@@ -725,6 +725,13 @@ function pathHighlightColorForLink(link: ViewLink, state: TopologyStoreState): n
 function highlightedGuestLinkIds(state: TopologyStoreState): Set<string> {
   const highlighted = new Set<string>();
   for (const pathState of [state.hoveredPath, state.selectedPath]) {
+    for (const linkId of pathState.linkIds) {
+      const link = state.snapshot.links.find((candidate) => candidate.id === linkId);
+      if (link?.protocol === 'proxmox_guest_link') {
+        highlighted.add(link.id);
+      }
+    }
+
     const highlight = pathState.guestHighlight;
     if (!highlight) {
       continue;
