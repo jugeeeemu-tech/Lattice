@@ -139,13 +139,13 @@ export class LatticeSidebarTree extends LitElement {
         </div>
         </div>
 
-        ${hasChildren
+        ${hasChildren && expanded
           ? html`
-              <div class=${`tree-branch ${expanded ? 'is-expanded' : ''}`}>
+              <div class="tree-branch is-expanded">
                 <span class="tree-branch__guide" aria-hidden="true"></span>
                 <div
-                  class=${`tree-children ${expanded ? 'is-expanded' : ''}`}
-                  aria-hidden=${String(!expanded)}
+                  class="tree-children is-expanded"
+                  aria-hidden="false"
                 >
                   <div class="tree-children__inner" role="group">
                     ${childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))}
