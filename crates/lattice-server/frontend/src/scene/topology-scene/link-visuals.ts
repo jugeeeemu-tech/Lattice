@@ -68,6 +68,7 @@ const TRAFFIC_VARIANT = {
   streakWidth: 0.052,
   tintMix: 0.52,
 };
+const PATH_ANIMATION_STAGGER_SECONDS = 0.1;
 
 interface BurstState {
   headT: number;
@@ -673,6 +674,7 @@ export function createLinkGroup(link: ViewLink): LinkGroup {
     surface,
     visualState: {
       animate: false,
+      animationDelaySeconds: 0,
       bandColor: 0x4b5563,
       bandOpacity: BASE_LINK_STYLE.bandOpacity,
       dimmed: false,
@@ -720,6 +722,31 @@ function pathHighlightColorForLink(link: ViewLink, state: TopologyStoreState): n
     }
   }
   return null;
+}
+
+function pathAnimationDelayForLink(link: ViewLink, state: TopologyStoreState): number {
+  const orderedPaths = [
+    {
+      linkSequence: state.hoveredPath.linkSequence,
+      active: state.hoveredPath.linkIds.has(link.id),
+    },
+    {
+      linkSequence: state.selectedPath.linkSequence,
+      active: !state.hoveredPath.linkIds.has(link.id) && state.selectedPath.linkIds.has(link.id),
+    },
+  ];
+
+  for (const path of orderedPaths) {
+    if (!path.active) {
+      continue;
+    }
+    const stepIndex = path.linkSequence.indexOf(link.id);
+    if (stepIndex >= 0) {
+      return stepIndex * PATH_ANIMATION_STAGGER_SECONDS;
+    }
+  }
+
+  return 0;
 }
 
 function highlightedGuestLinkIds(state: TopologyStoreState): Set<string> {
@@ -815,6 +842,8 @@ function applyLinkStyle(group: LinkGroup, state: TopologyStoreState, dimmedLinkI
   const isOnHoveredPath = !isHoveredLink && state.hoveredPath.linkIds.has(link.id);
   const isOnSelectedPath = !isHoveredLink && !isOnHoveredPath && state.selectedPath.linkIds.has(link.id);
   const guestHighlightColor = pathHighlightColorForLink(link, state);
+  const animationDelaySeconds =
+    isOnHoveredPath || isOnSelectedPath ? pathAnimationDelayForLink(link, state) : 0;
   const baseColor = baseLinkColor(link);
   const activeColor = guestHighlightColor ?? baseColor;
   const fillColor = isOnHoveredPath || isOnSelectedPath ? mixColor(activeColor, 0xffffff, 0.08) : baseColor;
@@ -823,6 +852,7 @@ function applyLinkStyle(group: LinkGroup, state: TopologyStoreState, dimmedLinkI
   const bandOpacity = (isHoveredLink ? 0.36 : BASE_LINK_STYLE.bandOpacity) * (dimmed ? 0.34 : 1);
   const visualState: LinkVisualState = {
     animate: isOnHoveredPath || isOnSelectedPath,
+    animationDelaySeconds,
     bandColor: darkenColor(activeColor, 0.58),
     bandOpacity,
     dimmed,
@@ -836,6 +866,7 @@ function applyLinkStyle(group: LinkGroup, state: TopologyStoreState, dimmedLinkI
 
   const surfaceKey = [
     visualState.animate ? 1 : 0,
+    visualState.animationDelaySeconds.toFixed(3),
     visualState.hoverBandVisible ? 1 : 0,
     visualState.fillColor.toString(16),
     visualState.bandColor.toString(16),
@@ -1016,9 +1047,6 @@ export function updateLinkGeometry(
   cameraPosition: Vector3,
   elapsedSeconds: number
 ): void {
-  const burstState = computeBurstState(elapsedSeconds);
-  const tailShape = burstState.visible ? computeTailShape() : null;
-
   for (const group of linkGroups) {
     const link = group.userData.link;
     const local = deviceGroups.get(link.local_device_id);
@@ -1060,7 +1088,11 @@ export function updateLinkGeometry(
     }
 
     placeLinkHitMesh(group.userData.hitMesh, runtime.localEnd, runtime.remoteEnd);
-    updateTrafficVisuals(group, runtime, burstState, tailShape);
+    const delayedBurstState = computeBurstState(
+      Math.max(0, elapsedSeconds - group.userData.visualState.animationDelaySeconds)
+    );
+    const tailShape = delayedBurstState.visible ? computeTailShape() : null;
+    updateTrafficVisuals(group, runtime, delayedBurstState, tailShape);
   }
 }
 

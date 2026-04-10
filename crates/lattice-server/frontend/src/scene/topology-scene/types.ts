@@ -39,6 +39,7 @@ export interface LinkRuntimeState {
 
 export interface LinkVisualState {
   animate: boolean;
+  animationDelaySeconds: number;
   bandColor: number;
   bandOpacity: number;
   dimmed: boolean;
