@@ -649,6 +649,91 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   ).resolves.toBe('router-core');
 });
 
+test('scrolls the sidebar tree to a scene-selected device when it is outside the visible list', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 560 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  await page.evaluate(() => {
+    const tree = document.querySelector('.tree');
+    const row = document.querySelector('.tree-row[data-device-id="router-core"]');
+    if (!(tree instanceof HTMLElement) || !(row instanceof HTMLElement)) {
+      return;
+    }
+    const testWindow = window as Window & {
+      __latticeScrollTest?: (ScrollIntoViewOptions | null)[];
+    };
+
+    const treeRect = {
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 320,
+      bottom: 180,
+      width: 320,
+      height: 180,
+      toJSON() {
+        return this;
+      },
+    };
+    const rowRect = {
+      x: 0,
+      y: 260,
+      top: 260,
+      left: 0,
+      right: 320,
+      bottom: 308,
+      width: 320,
+      height: 48,
+      toJSON() {
+        return this;
+      },
+    };
+
+    testWindow.__latticeScrollTest = [];
+    tree.getBoundingClientRect = () => treeRect as unknown as DOMRect;
+    row.getBoundingClientRect = () => rowRect as unknown as DOMRect;
+    row.scrollIntoView = (options?: ScrollIntoViewOptions) => {
+      testWindow.__latticeScrollTest?.push(options ?? null);
+    };
+  });
+
+  await clickSceneDevice(page, 'router-core');
+
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const testWindow = window as Window & {
+          __latticeScrollTest?: (ScrollIntoViewOptions | null)[];
+        };
+        return testWindow.__latticeScrollTest?.length ?? 0;
+      })
+    )
+    .toBe(1);
+
+  await expect(
+    page.evaluate(() => {
+      const testWindow = window as Window & {
+        __latticeScrollTest?: (ScrollIntoViewOptions | null)[];
+      };
+      return testWindow.__latticeScrollTest?.[0] ?? null;
+    })
+  ).resolves.toEqual({
+    behavior: 'smooth',
+    block: 'nearest',
+    inline: 'nearest',
+  });
+});
+
 test('hides scene hover cards while rotating and ignores the release click after a drag', async ({
   page,
 }) => {

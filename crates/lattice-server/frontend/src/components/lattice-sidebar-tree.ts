@@ -1,4 +1,4 @@
-import { LitElement, html, svg, type TemplateResult } from 'lit';
+import { LitElement, html, svg, type PropertyValues, type TemplateResult } from 'lit';
 
 import type { ViewDevice } from '../generated';
 import type { TopologyStoreState } from '../state/topology-store';
@@ -11,9 +11,44 @@ export class LatticeSidebarTree extends LitElement {
   };
 
   declare state: TopologyStoreState;
+  #selectionScrollFrame: number | null = null;
 
   createRenderRoot(): this {
     return this;
+  }
+
+  disconnectedCallback(): void {
+    if (this.#selectionScrollFrame !== null) {
+      window.cancelAnimationFrame(this.#selectionScrollFrame);
+      this.#selectionScrollFrame = null;
+    }
+    super.disconnectedCallback();
+  }
+
+  updated(changedProperties: PropertyValues<this>): void {
+    if (!changedProperties.has('state')) {
+      return;
+    }
+
+    const previousState = changedProperties.get('state') as TopologyStoreState | undefined;
+    if (!this.state || this.state.hoverSource !== 'scene') {
+      return;
+    }
+
+    if (previousState?.selectedEntryId === this.state.selectedEntryId) {
+      return;
+    }
+
+    if (this.#selectionScrollFrame !== null) {
+      window.cancelAnimationFrame(this.#selectionScrollFrame);
+    }
+
+    this.#selectionScrollFrame = window.requestAnimationFrame(() => {
+      this.#selectionScrollFrame = window.requestAnimationFrame(() => {
+        this.#selectionScrollFrame = null;
+        this.#scrollSelectedEntryIntoView();
+      });
+    });
   }
 
   render() {
@@ -54,49 +89,60 @@ export class LatticeSidebarTree extends LitElement {
     const isPeer = this.state.selectedEntryPeers.has(entry.id) && !isSelected;
 
     return html`
-      <div
-        class=${[
-          'tree-row',
-          isSelected ? 'is-selected' : '',
-          isHovered ? 'is-hovered' : '',
-          isAncestor ? 'is-ancestor' : '',
-          isPeer ? 'is-peer' : '',
-        ]
-          .filter(Boolean)
-          .join(' ')}
-        data-device-id=${entry.device_id}
-        data-entry-id=${entry.id}
-        role="treeitem"
-        aria-expanded=${hasChildren ? String(expanded) : 'false'}
-        style=${`padding-inline-start:${0.4 + depth * 1.05}rem;`}
-      >
-        <button
-          type="button"
-          class=${`tree-toggle ${hasChildren && expanded ? 'is-open' : ''} ${
-            hasChildren ? '' : 'tree-toggle--leaf'
-          }`}
-          aria-label=${hasChildren ? (expanded ? '折りたたむ' : '展開する') : 'leaf'}
-          ?disabled=${!hasChildren}
-          @click=${() => this.#dispatch('entry-toggle', { entryId: entry.id })}
-        ></button>
-
-        <button
-          type="button"
-          class="tree-row__label"
-          @click=${() => this.#dispatch('entry-primary-action', { entryId: entry.id })}
-          @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
+      <div class="tree-entry">
+        <div
+          class=${[
+            'tree-row',
+            isSelected ? 'is-selected' : '',
+            isHovered ? 'is-hovered' : '',
+            isAncestor ? 'is-ancestor' : '',
+            isPeer ? 'is-peer' : '',
+          ]
+            .filter(Boolean)
+            .join(' ')}
+          data-device-id=${entry.device_id}
+          data-entry-id=${entry.id}
+          role="treeitem"
+          aria-expanded=${hasChildren ? String(expanded) : 'false'}
+          style=${`padding-inline-start:${0.4 + depth * 1.05}rem;`}
         >
-          ${this.#renderDeviceMark(device)}
-          <span class="tree-row__copy">
-            <span class="tree-row__name">${entry.label || device.label || 'Unknown'}</span>
-            <span class="tree-row__meta">${entryMetaText(this.state.model, entry)}</span>
-          </span>
-        </button>
-      </div>
+          <button
+            type="button"
+            class=${`tree-toggle ${hasChildren && expanded ? 'is-open' : ''} ${
+              hasChildren ? '' : 'tree-toggle--leaf'
+            }`}
+            aria-label=${hasChildren ? (expanded ? '折りたたむ' : '展開する') : 'leaf'}
+            ?disabled=${!hasChildren}
+            @click=${() => this.#dispatch('entry-toggle', { entryId: entry.id })}
+          ></button>
 
-      ${hasChildren && expanded
-        ? childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))
-        : html``}
+          <button
+            type="button"
+            class="tree-row__label"
+            @click=${() => this.#dispatch('entry-primary-action', { entryId: entry.id })}
+            @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
+          >
+            ${this.#renderDeviceMark(device)}
+            <span class="tree-row__copy">
+              <span class="tree-row__name">${entry.label || device.label || 'Unknown'}</span>
+              <span class="tree-row__meta">${entryMetaText(this.state.model, entry)}</span>
+            </span>
+          </button>
+        </div>
+
+        ${hasChildren
+          ? html`
+              <div
+                class=${`tree-children ${expanded ? 'is-expanded' : ''}`}
+                aria-hidden=${String(!expanded)}
+              >
+                <div class="tree-children__inner" role="group">
+                  ${childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))}
+                </div>
+              </div>
+            `
+          : null}
+      </div>
     `;
   }
 
@@ -144,6 +190,32 @@ export class LatticeSidebarTree extends LitElement {
         composed: true,
       })
     );
+  }
+
+  #scrollSelectedEntryIntoView() {
+    const selectedEntryId = this.state.selectedEntryId;
+    if (!selectedEntryId) {
+      return;
+    }
+
+    const tree = this.querySelector<HTMLElement>('.tree');
+    const row = this.querySelector<HTMLElement>(`.tree-row[data-entry-id="${selectedEntryId}"]`);
+    if (!tree || !row) {
+      return;
+    }
+
+    const treeRect = tree.getBoundingClientRect();
+    const rowRect = row.getBoundingClientRect();
+    const rowOutsideViewport = rowRect.top < treeRect.top || rowRect.bottom > treeRect.bottom;
+    if (!rowOutsideViewport) {
+      return;
+    }
+
+    row.scrollIntoView({
+      behavior: 'smooth',
+      block: 'nearest',
+      inline: 'nearest',
+    });
   }
 }
 
