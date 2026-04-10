@@ -12,6 +12,9 @@ export class LatticeSidebarTree extends LitElement {
 
   declare state: TopologyStoreState;
   #selectionScrollFrame: number | null = null;
+  #closingEntryIds = new Set<string>();
+  #openingEntryIds = new Set<string>();
+  #openingAnimationFrame: number | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -22,7 +25,20 @@ export class LatticeSidebarTree extends LitElement {
       window.cancelAnimationFrame(this.#selectionScrollFrame);
       this.#selectionScrollFrame = null;
     }
+    if (this.#openingAnimationFrame !== null) {
+      window.cancelAnimationFrame(this.#openingAnimationFrame);
+      this.#openingAnimationFrame = null;
+    }
     super.disconnectedCallback();
+  }
+
+  willUpdate(changedProperties: PropertyValues<this>): void {
+    if (!changedProperties.has('state')) {
+      return;
+    }
+
+    const previousState = changedProperties.get('state') as TopologyStoreState | undefined;
+    this.#syncClosingEntries(previousState);
   }
 
   updated(changedProperties: PropertyValues<this>): void {
@@ -31,6 +47,7 @@ export class LatticeSidebarTree extends LitElement {
     }
 
     const previousState = changedProperties.get('state') as TopologyStoreState | undefined;
+
     if (!this.state || this.state.hoverSource !== 'scene') {
       return;
     }
@@ -80,6 +97,8 @@ export class LatticeSidebarTree extends LitElement {
     const childIds = this.state.model.sidebarChildrenById.get(entry.id) ?? [];
     const hasChildren = childIds.length > 0;
     const expanded = !this.state.collapsedEntryIds.has(entry.id);
+    const isClosing = this.#closingEntryIds.has(entry.id);
+    const isOpening = this.#openingEntryIds.has(entry.id);
     const isSelected = entry.id === this.state.selectedEntryId;
     const isHovered =
       entry.id === this.state.hoveredEntryId ||
@@ -139,13 +158,15 @@ export class LatticeSidebarTree extends LitElement {
         </div>
         </div>
 
-        ${hasChildren && expanded
+        ${hasChildren && (expanded || isClosing || isOpening)
           ? html`
-              <div class="tree-branch is-expanded">
+              <div class=${`tree-branch ${expanded && !isOpening ? 'is-expanded' : ''}`}>
                 <span class="tree-branch__guide" aria-hidden="true"></span>
                 <div
-                  class="tree-children is-expanded"
-                  aria-hidden="false"
+                  class=${`tree-children ${expanded && !isOpening ? 'is-expanded' : ''}`}
+                  aria-hidden=${String(!expanded || isOpening)}
+                  @transitionend=${(event: TransitionEvent) =>
+                    this.#handleChildrenTransitionEnd(event, entry.id)}
                 >
                   <div class="tree-children__inner" role="group">
                     ${childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))}
@@ -166,6 +187,70 @@ export class LatticeSidebarTree extends LitElement {
         detail,
       })
     );
+  }
+
+  #syncClosingEntries(previousState?: TopologyStoreState): void {
+    if (!previousState) {
+      return;
+    }
+
+    const previousCollapsed = previousState.collapsedEntryIds;
+    const currentCollapsed = this.state.collapsedEntryIds;
+
+    for (const entryId of this.#closingEntryIds) {
+      if (!currentCollapsed.has(entryId)) {
+        this.#closingEntryIds.delete(entryId);
+      }
+    }
+
+    for (const entryId of this.#openingEntryIds) {
+      if (currentCollapsed.has(entryId)) {
+        this.#openingEntryIds.delete(entryId);
+      }
+    }
+
+    for (const entryId of currentCollapsed) {
+      if (previousCollapsed.has(entryId)) {
+        continue;
+      }
+
+      const previousChildren = previousState.model.sidebarChildrenById.get(entryId) ?? [];
+      const currentChildren = this.state.model.sidebarChildrenById.get(entryId) ?? [];
+      if (previousChildren.length > 0 || currentChildren.length > 0) {
+        this.#closingEntryIds.add(entryId);
+      }
+    }
+
+    for (const [entryId, children] of this.state.model.sidebarChildrenById) {
+      if (children.length === 0 || currentCollapsed.has(entryId) || !previousCollapsed.has(entryId)) {
+        continue;
+      }
+      this.#openingEntryIds.add(entryId);
+    }
+
+    if (this.#openingEntryIds.size > 0 && this.#openingAnimationFrame === null) {
+      this.#openingAnimationFrame = window.requestAnimationFrame(() => {
+        this.#openingAnimationFrame = null;
+        if (this.#openingEntryIds.size === 0) {
+          return;
+        }
+        this.#openingEntryIds.clear();
+        this.requestUpdate();
+      });
+    }
+  }
+
+  #handleChildrenTransitionEnd(event: TransitionEvent, entryId: string) {
+    if (event.target !== event.currentTarget || event.propertyName !== 'grid-template-rows') {
+      return;
+    }
+
+    if (!this.state.collapsedEntryIds.has(entryId) || !this.#closingEntryIds.has(entryId)) {
+      return;
+    }
+
+    this.#closingEntryIds.delete(entryId);
+    this.requestUpdate();
   }
 
   #handleRowClick(event: MouseEvent, entryId: string) {
