@@ -366,6 +366,7 @@ lattice-sidebar-tree {
   gap: 0.18rem;
   grid-auto-rows: max-content;
   padding-right: 0.35rem;
+  cursor: pointer;
   scrollbar-width: thin;
   scrollbar-color: rgba(63, 72, 88, 0.58) transparent;
 }
@@ -395,11 +396,13 @@ lattice-sidebar-tree {
 .tree__empty {
   padding: 1rem 0.2rem;
   color: var(--muted);
+  cursor: default;
 }
 
 .tree-entry {
   display: grid;
   align-content: start;
+  cursor: pointer;
 }
 
 .tree-children {
@@ -423,6 +426,7 @@ lattice-sidebar-tree {
   align-content: start;
   gap: 0.18rem;
   padding-top: 0.08rem;
+  cursor: pointer;
 }
 
 .tree-children .tree-row {
@@ -495,6 +499,8 @@ lattice-sidebar-tree {
   gap: 0.55rem;
   padding: 0.34rem 0.45rem;
   border-radius: 18px;
+  cursor: pointer;
+  user-select: none;
   transition:
     background 140ms ease,
     color 140ms ease,
@@ -512,10 +518,6 @@ lattice-sidebar-tree {
 
 .tree-row.is-hovered {
   background: rgba(217, 119, 6, 0.08);
-}
-
-.tree-row.is-ancestor {
-  background: rgba(15, 118, 110, 0.08);
 }
 
 .tree-row.is-peer {

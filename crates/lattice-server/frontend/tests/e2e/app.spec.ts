@@ -606,6 +606,13 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   await expect(hoverCard.locator('[data-role="hover-body"]')).toHaveText(
     'Server · VM · Virtual · pve-01 上'
   );
+  await expect(page.locator('.tree-row[data-device-id="guest-app"]')).toHaveClass(/is-hovered/);
+  await expect(page.locator('.tree-row[data-device-id="router-core"]')).not.toHaveClass(
+    /is-hovered/
+  );
+  await expect(page.locator('.tree-row[data-device-id="proxmox-host"]')).not.toHaveClass(
+    /is-hovered/
+  );
   const hoverPlacement = await page.evaluate(() => {
     const viewer = window.__latticeViewer;
     const hoverCardElement = document.querySelector('[data-role="hover-card"]');
@@ -647,6 +654,64 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   await expect(
     page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
   ).resolves.toBe('router-core');
+});
+
+test('selects a device from the full tree row hit area without highlighting ancestors', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1366, height: 768 });
+  await installTestHooks(page);
+  const currentSnapshotRef = {
+    value: scheduledSnapshot(await loadViewSnapshotFixture('populated')),
+  };
+  await installApiRoutes(page, currentSnapshotRef);
+
+  await page.goto('/');
+  await waitForViewer(page);
+
+  await expect(
+    page.evaluate(() => {
+      const rows = Array.from(document.querySelectorAll<HTMLElement>('.tree-row'));
+      const pair = rows
+        .map((row, index) => [row, rows[index + 1] ?? null] as const)
+        .find(([upperRow, lowerRow]) => {
+          if (!upperRow || !lowerRow) {
+            return false;
+          }
+
+          const upperRect = upperRow.getBoundingClientRect();
+          const lowerRect = lowerRow.getBoundingClientRect();
+          return lowerRect.top > upperRect.bottom;
+        });
+
+      if (!pair) {
+        return null;
+      }
+
+      const [upperRow, lowerRow] = pair;
+      const upperRect = upperRow.getBoundingClientRect();
+      const lowerRect = lowerRow.getBoundingClientRect();
+      const sampleX = upperRect.left + 24;
+      const sampleY = upperRect.bottom + (lowerRect.top - upperRect.bottom) / 2;
+      const hit = document.elementFromPoint(sampleX, sampleY);
+      return hit instanceof Element ? getComputedStyle(hit).cursor : null;
+    })
+  ).resolves.toBe('pointer');
+
+  await page.locator('.tree-row[data-device-id="guest-app"]').click({
+    position: { x: 6, y: 12 },
+  });
+
+  await expect(page.locator('[data-device-id="guest-app"].is-selected')).toBeVisible();
+  await expect(
+    page.evaluate(() => window.__latticeViewer?.getState().selectedDeviceId)
+  ).resolves.toBe('guest-app');
+  await expect(page.locator('.tree-row[data-device-id="router-core"]')).not.toHaveClass(
+    /is-ancestor/
+  );
+  await expect(page.locator('.tree-row[data-device-id="proxmox-host"]')).not.toHaveClass(
+    /is-ancestor/
+  );
 });
 
 test('scrolls the sidebar tree to a scene-selected device when it is outside the visible list', async ({
@@ -755,6 +820,13 @@ test('hides scene hover cards while rotating and ignores the release click after
   await expect(
     page.evaluate(() => window.__latticeViewer?.getState().hoveredDeviceId)
   ).resolves.toBe('router-core');
+  await expect(page.locator('.tree-row[data-device-id="router-core"]')).toHaveClass(/is-hovered/);
+  await expect(page.locator('.tree-row[data-device-id="router-core"]')).not.toHaveClass(
+    /is-ancestor/
+  );
+  await expect(page.locator('.tree-row[data-device-id="proxmox-host"]')).not.toHaveClass(
+    /is-hovered/
+  );
 
   const releasePoint = await beginSceneDragFromDevice(page, 'router-core', { x: 18, y: 6 });
 

@@ -83,9 +83,7 @@ export class LatticeSidebarTree extends LitElement {
     const isSelected = entry.id === this.state.selectedEntryId;
     const isHovered =
       entry.id === this.state.hoveredEntryId ||
-      this.state.hoveredPathEntryIds.has(entry.id) ||
       (this.state.hoverSource === 'scene' && this.state.hoveredEntryPeers.has(entry.id));
-    const isAncestor = this.state.selectedPathEntryIds.has(entry.id) && !isSelected;
     const isPeer = this.state.selectedEntryPeers.has(entry.id) && !isSelected;
 
     return html`
@@ -95,7 +93,6 @@ export class LatticeSidebarTree extends LitElement {
             'tree-row',
             isSelected ? 'is-selected' : '',
             isHovered ? 'is-hovered' : '',
-            isAncestor ? 'is-ancestor' : '',
             isPeer ? 'is-peer' : '',
           ]
             .filter(Boolean)
@@ -105,6 +102,8 @@ export class LatticeSidebarTree extends LitElement {
           role="treeitem"
           aria-expanded=${hasChildren ? String(expanded) : 'false'}
           style=${`padding-inline-start:${0.4 + depth * 1.05}rem;`}
+          @click=${(event: MouseEvent) => this.#handleRowClick(event, entry.id)}
+          @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
         >
           <button
             type="button"
@@ -113,14 +112,12 @@ export class LatticeSidebarTree extends LitElement {
             }`}
             aria-label=${hasChildren ? (expanded ? '折りたたむ' : '展開する') : 'leaf'}
             ?disabled=${!hasChildren}
-            @click=${() => this.#dispatch('entry-toggle', { entryId: entry.id })}
+            @click=${(event: MouseEvent) => this.#handleToggleClick(event, entry.id)}
           ></button>
 
           <button
             type="button"
             class="tree-row__label"
-            @click=${() => this.#dispatch('entry-primary-action', { entryId: entry.id })}
-            @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
           >
             ${this.#renderDeviceMark(device)}
             <span class="tree-row__copy">
@@ -154,6 +151,20 @@ export class LatticeSidebarTree extends LitElement {
         detail,
       })
     );
+  }
+
+  #handleRowClick(event: MouseEvent, entryId: string) {
+    const target = event.target;
+    if (target instanceof Element && target.closest('.tree-toggle')) {
+      return;
+    }
+
+    this.#dispatch('entry-primary-action', { entryId });
+  }
+
+  #handleToggleClick(event: MouseEvent, entryId: string) {
+    event.stopPropagation();
+    this.#dispatch('entry-toggle', { entryId });
   }
 
   #renderDeviceMark(device: ViewDevice): TemplateResult {
