@@ -85,9 +85,21 @@ export class LatticeSidebarTree extends LitElement {
       entry.id === this.state.hoveredEntryId ||
       (this.state.hoverSource === 'scene' && this.state.hoveredEntryPeers.has(entry.id));
     const isPeer = this.state.selectedEntryPeers.has(entry.id) && !isSelected;
+    const isSelectedPath = this.state.selectedPathEntryIds.has(entry.id);
+    const isHoveredPath = this.state.hoveredPathEntryIds.has(entry.id);
 
     return html`
-      <div class="tree-entry">
+      <div
+        class=${[
+          'tree-entry',
+          isSelectedPath ? 'is-selected-path' : '',
+          isHoveredPath ? 'is-hovered-path' : '',
+        ]
+          .filter(Boolean)
+          .join(' ')}
+        style=${`--tree-indent:${0.4 + depth * 1.05}rem;`}
+      >
+        <div class="tree-row-shell">
         <div
           class=${[
             'tree-row',
@@ -101,7 +113,6 @@ export class LatticeSidebarTree extends LitElement {
           data-entry-id=${entry.id}
           role="treeitem"
           aria-expanded=${hasChildren ? String(expanded) : 'false'}
-          style=${`padding-inline-start:${0.4 + depth * 1.05}rem;`}
           @click=${(event: MouseEvent) => this.#handleRowClick(event, entry.id)}
           @pointerover=${() => this.#dispatch('entry-hover', { entryId: entry.id })}
         >
@@ -126,15 +137,19 @@ export class LatticeSidebarTree extends LitElement {
             </span>
           </button>
         </div>
+        </div>
 
         ${hasChildren
           ? html`
-              <div
-                class=${`tree-children ${expanded ? 'is-expanded' : ''}`}
-                aria-hidden=${String(!expanded)}
-              >
-                <div class="tree-children__inner" role="group">
-                  ${childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))}
+              <div class=${`tree-branch ${expanded ? 'is-expanded' : ''}`}>
+                <span class="tree-branch__guide" aria-hidden="true"></span>
+                <div
+                  class=${`tree-children ${expanded ? 'is-expanded' : ''}`}
+                  aria-hidden=${String(!expanded)}
+                >
+                  <div class="tree-children__inner" role="group">
+                    ${childIds.map((childEntryId) => this.#renderEntry(childEntryId, depth + 1))}
+                  </div>
                 </div>
               </div>
             `

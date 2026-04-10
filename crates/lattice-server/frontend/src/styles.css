@@ -405,6 +405,43 @@ lattice-sidebar-tree {
   cursor: pointer;
 }
 
+.tree-row-shell {
+  position: relative;
+}
+
+.tree-branch {
+  position: relative;
+}
+
+.tree-branch__guide {
+  position: absolute;
+  inset: 0 auto 0 calc(var(--tree-indent, 0rem) + 0.58rem);
+  width: 1px;
+  border-radius: 999px;
+  background: rgba(120, 132, 155, 0.32);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 140ms ease,
+    background 140ms ease,
+    box-shadow 140ms ease;
+}
+
+.tree-entry.is-hovered-path > .tree-branch.is-expanded > .tree-branch__guide {
+  opacity: 1;
+  background: rgba(120, 132, 155, 0.48);
+}
+
+.tree-entry.is-selected-path > .tree-branch.is-expanded > .tree-branch__guide {
+  opacity: 1;
+  background: rgba(120, 132, 155, 0.48);
+  box-shadow: none;
+}
+
+.tree-entry.is-selected-path.is-hovered-path > .tree-branch.is-expanded > .tree-branch__guide {
+  background: rgba(120, 132, 155, 0.48);
+}
+
 .tree-children {
   display: grid;
   grid-template-rows: 0fr;
@@ -443,52 +480,44 @@ lattice-sidebar-tree {
 }
 
 .tree-toggle {
-  --toggle-stroke: 1.75px;
-  --toggle-glyph-size: 0.58rem;
-  width: 1.2rem;
-  height: 1.2rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: white;
-  color: var(--muted);
+  width: 1.15rem;
+  height: 1.15rem;
+  border: none;
+  background: transparent;
+  color: color-mix(in srgb, var(--muted) 82%, #223047 18%);
   display: inline-grid;
   place-items: center;
   flex: 0 0 auto;
   position: relative;
+  padding: 0;
+  transition:
+    color 140ms ease,
+    transform 140ms ease;
 }
 
-.tree-toggle::before,
-.tree-toggle::after {
+.tree-toggle::before {
   content: "";
   position: absolute;
   top: 50%;
   left: 50%;
-  background: currentColor;
-  border-radius: 999px;
-  transform: translate(-50%, -50%);
+  width: 0.38rem;
+  height: 0.38rem;
+  border-right: 1.6px solid currentColor;
+  border-bottom: 1.6px solid currentColor;
+  transform: translate(-58%, -50%) rotate(-45deg);
+  transform-origin: 50% 50%;
+  transition: transform 320ms cubic-bezier(0.18, 0.9, 0.28, 1);
 }
 
-.tree-toggle::before {
-  width: var(--toggle-glyph-size);
-  height: var(--toggle-stroke);
-}
-
-.tree-toggle::after {
-  width: var(--toggle-stroke);
-  height: var(--toggle-glyph-size);
-  transition: opacity 140ms ease;
-}
-
-.tree-toggle.is-open::after {
-  opacity: 0;
+.tree-toggle.is-open::before {
+  transform: translate(-50%, -60%) rotate(45deg);
 }
 
 .tree-toggle--leaf {
   visibility: hidden;
 }
 
-.tree-toggle--leaf::before,
-.tree-toggle--leaf::after {
+.tree-toggle--leaf::before {
   content: none;
 }
 
@@ -497,7 +526,7 @@ lattice-sidebar-tree {
   grid-template-columns: auto minmax(0, 1fr) auto;
   align-items: center;
   gap: 0.55rem;
-  padding: 0.34rem 0.45rem;
+  padding: 0.34rem 0.45rem 0.34rem calc(var(--tree-indent, 0rem) + 0.45rem);
   border-radius: 18px;
   cursor: pointer;
   user-select: none;
