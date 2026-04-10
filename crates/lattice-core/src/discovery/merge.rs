@@ -198,6 +198,13 @@ fn preserve_source_tree_base(
         .keys()
         .cloned()
         .collect::<HashSet<_>>();
+    let all_tree_device_ids = topology
+        .devices
+        .keys()
+        .filter(|device_id| include_in_tree(topology, device_id))
+        .cloned()
+        .collect::<HashSet<_>>();
+    let internal_parent_by_device = build_internal_parent_by_device(topology, &all_tree_device_ids);
     let resolved_parent_by_device = chosen_node_by_device
         .iter()
         .filter_map(|(device_id, (_, parent_device_id))| {
@@ -212,26 +219,43 @@ fn preserve_source_tree_base(
                     None
                 } else {
                     unique_visible_lldp_parent(topology, device_id, &visible_device_ids)
+                        .or_else(|| internal_parent_by_device.get(device_id).cloned())
                 }
             });
 
             inferred_parent.map(|parent_id| (device_id.clone(), parent_id))
         })
         .collect::<HashMap<_, _>>();
+    let uncovered_parent_by_device = all_tree_device_ids
+        .iter()
+        .filter(|device_id| !visible_device_ids.contains(*device_id))
+        .filter_map(|device_id| {
+            internal_parent_by_device
+                .get(device_id)
+                .cloned()
+                .or_else(|| unique_visible_lldp_parent(topology, device_id, &visible_device_ids))
+                .map(|parent_id| (device_id.clone(), parent_id))
+        })
+        .collect::<HashMap<_, _>>();
 
     let mut children_by_parent: HashMap<String, Vec<String>> = HashMap::new();
-    let mut covered_device_ids = HashSet::new();
 
     for (device_id, (node, _)) in &chosen_node_by_device {
-        covered_device_ids.insert(device_id.clone());
         if let Some(parent_device_id) = resolved_parent_by_device.get(device_id) {
-            if parent_device_id != device_id && chosen_node_by_device.contains_key(parent_device_id)
-            {
+            if parent_device_id != device_id && all_tree_device_ids.contains(parent_device_id) {
                 children_by_parent
                     .entry(parent_device_id.clone())
                     .or_default()
                     .push(node.device_id.clone());
             }
+        }
+    }
+    for (device_id, parent_device_id) in &uncovered_parent_by_device {
+        if parent_device_id != device_id && all_tree_device_ids.contains(parent_device_id) {
+            children_by_parent
+                .entry(parent_device_id.clone())
+                .or_default()
+                .push(device_id.clone());
         }
     }
 
@@ -241,9 +265,12 @@ fn preserve_source_tree_base(
         });
     }
 
-    let mut roots = chosen_node_by_device
-        .keys()
-        .filter(|device_id| !resolved_parent_by_device.contains_key(*device_id))
+    let mut roots = all_tree_device_ids
+        .iter()
+        .filter(|device_id| {
+            !resolved_parent_by_device.contains_key(*device_id)
+                && !uncovered_parent_by_device.contains_key(*device_id)
+        })
         .cloned()
         .collect::<Vec<_>>();
     roots.sort_by(|left, right| {
@@ -264,29 +291,41 @@ fn preserve_source_tree_base(
         );
     }
 
-    let fallback_tree = build_internal_tree_base(topology);
-    let depth_by_device = nodes
-        .iter()
-        .map(|node| (node.device_id.clone(), node.depth))
-        .collect::<HashMap<_, _>>();
+    let mut remaining_device_ids = all_tree_device_ids.into_iter().collect::<Vec<_>>();
+    remaining_device_ids.sort_by(|left, right| {
+        device_sort_key(topology, left).cmp(&device_sort_key(topology, right))
+    });
 
-    for mut node in fallback_tree.nodes {
-        if covered_device_ids.contains(&node.device_id) {
-            continue;
+    for device_id in remaining_device_ids {
+        if !visited.contains(&device_id) {
+            walk_tree(
+                topology,
+                &device_id,
+                None,
+                0,
+                &children_by_parent,
+                &mut visited,
+                &mut nodes,
+            );
         }
-        if node.parent_row_id.is_none() {
-            if let Some(parent_device_id) =
-                unique_visible_lldp_parent(topology, &node.device_id, &covered_device_ids)
-            {
-                node.parent_row_id = Some(parent_device_id.clone());
-                node.row_id = format!("{parent_device_id}/{}", node.device_id);
-                node.depth = depth_by_device.get(&parent_device_id).copied().unwrap_or(0) + 1;
-            }
-        }
-        nodes.push(node);
     }
 
     DiscoveryTree { nodes }
+}
+
+fn build_internal_parent_by_device(
+    topology: &Topology,
+    visible_device_ids: &HashSet<String>,
+) -> HashMap<String, String> {
+    visible_device_ids
+        .iter()
+        .filter_map(|device_id| {
+            determine_parent(topology, device_id).and_then(|parent_id| {
+                (visible_device_ids.contains(&parent_id) && parent_id != *device_id)
+                    .then_some((device_id.clone(), parent_id))
+            })
+        })
+        .collect()
 }
 
 fn infer_display_tree(
@@ -2178,6 +2217,69 @@ mod tests {
             Some("hub-router-2")
         );
         assert_eq!(branch_router_07.depth, 2);
+    }
+
+    #[test]
+    fn merge_reparents_source_leaf_using_internal_parent_when_source_parent_is_missing() {
+        let mut core = device("core-router", DeviceRole::Router, DeploymentType::Unknown);
+        core.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth0".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+
+        let mut edge = device("edge-router", DeviceRole::Router, DeploymentType::Unknown);
+        edge.upstream_interface = Some("eth1".to_string());
+        edge.interfaces = vec![Interface {
+            if_index: 1,
+            if_name: "eth1".to_string(),
+            ip_addresses: Vec::new(),
+            speed_bps: None,
+            oper_status: OperStatus::Up,
+        }];
+
+        let merged = merge_source_results(vec![SourceResult {
+            topology: Topology {
+                devices: HashMap::from([
+                    (core.id.clone(), core.clone()),
+                    (edge.id.clone(), edge.clone()),
+                ]),
+                links: vec![Link {
+                    id: "core-edge".to_string(),
+                    local_device_id: edge.id.clone(),
+                    local_interface: "eth1".to_string(),
+                    local_ip: None,
+                    remote_device_id: core.id.clone(),
+                    remote_interface: "eth0".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: LinkProtocol::Lldp,
+                    guest_attachment: None,
+                }],
+                updated_at: Utc::now(),
+            },
+            tree: DiscoveryTree {
+                nodes: vec![DiscoveryTreeNode {
+                    row_id: "seed:192.0.2.1/edge-router#1".to_string(),
+                    device_id: "edge-router".to_string(),
+                    parent_row_id: None,
+                    label: Some("edge-router".to_string()),
+                    depth: 0,
+                }],
+            },
+        }]);
+
+        let edge_node = merged
+            .tree
+            .nodes
+            .iter()
+            .find(|node| node.device_id == "edge-router")
+            .expect("edge-router should exist");
+
+        assert_eq!(edge_node.parent_row_id.as_deref(), Some("core-router"));
+        assert_eq!(edge_node.depth, 1);
     }
 
     #[test]
