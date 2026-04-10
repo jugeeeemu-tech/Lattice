@@ -342,6 +342,17 @@ describe('buildTopologyModel', () => {
     });
   });
 
+  it('does not invent an upstream path for a root router with a single child link', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const model = buildTopologyModel(snapshot, new Set());
+
+    const path = computeUpstreamPath(snapshot, model, 'router-core');
+
+    expect(path.deviceSequence).toEqual(['router-core']);
+    expect(path.linkSequence).toEqual([]);
+    expect(Array.from(path.linkIds)).toEqual([]);
+  });
+
   it('continues from intermediate physical devices to their primary tree parent', () => {
     const snapshot: ViewSnapshot = {
       auto_discovery_interval_seconds: 30,

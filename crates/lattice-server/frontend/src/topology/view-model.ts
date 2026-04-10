@@ -902,7 +902,7 @@ function choosePhysicalUpstreamLink(
     }
   }
 
-  return candidates.length === 1 ? candidates[0] : null;
+  return null;
 }
 
 function guestDeviceIdForLink(
