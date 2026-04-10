@@ -250,6 +250,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: upstream_interface.map(|value| value.to_string()),
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         }
     }

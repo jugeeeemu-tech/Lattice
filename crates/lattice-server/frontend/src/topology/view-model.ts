@@ -883,6 +883,15 @@ function choosePhysicalUpstreamLink(
     }
   }
 
+  if (currentDevice?.default_upstream_device_id) {
+    const upstreamDeviceMatches = candidates.filter(
+      (link) => otherDeviceId(link, currentDeviceId) === currentDevice.default_upstream_device_id
+    );
+    if (upstreamDeviceMatches.length === 1) {
+      return upstreamDeviceMatches[0];
+    }
+  }
+
   const primaryParentDeviceId = model.primaryParentDeviceById.get(currentDeviceId) ?? null;
   if (primaryParentDeviceId) {
     const parentMatches = candidates.filter(

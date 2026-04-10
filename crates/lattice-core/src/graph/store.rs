@@ -290,6 +290,12 @@ impl GraphStore {
         current.host_mgmt_ip = merge_optional_stable(&current.host_mgmt_ip, &incoming.host_mgmt_ip);
         current.upstream_interface =
             merge_optional_stable(&current.upstream_interface, &incoming.upstream_interface);
+        current.default_gateway_ip =
+            merge_optional_stable(&current.default_gateway_ip, &incoming.default_gateway_ip);
+        current.default_upstream_device_id = merge_optional_stable(
+            &current.default_upstream_device_id,
+            &incoming.default_upstream_device_id,
+        );
         current.last_seen = incoming.last_seen;
         current
     }
@@ -846,6 +852,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         }
     }
@@ -1099,6 +1107,8 @@ mod tests {
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
             upstream_interface: Some("eno1".to_string()),
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -1126,6 +1136,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 
@@ -1164,6 +1176,8 @@ mod tests {
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -1191,6 +1205,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 
@@ -1238,6 +1254,8 @@ mod tests {
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -1265,6 +1283,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 
@@ -1302,6 +1322,8 @@ mod tests {
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -1329,6 +1351,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 
@@ -1366,6 +1390,8 @@ mod tests {
             host_label: Some("pve-a".to_string()),
             host_mgmt_ip: None,
             upstream_interface: Some("eno1".to_string()),
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let left = Device {
@@ -1393,6 +1419,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let right = Device {
@@ -1420,6 +1448,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 

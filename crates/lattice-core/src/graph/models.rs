@@ -137,6 +137,10 @@ pub struct Device {
     pub host_mgmt_ip: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_gateway_ip: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_upstream_device_id: Option<String>,
     pub last_seen: DateTime<Utc>,
 }
 
@@ -156,6 +160,8 @@ impl Device {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         }
     }
@@ -255,6 +261,8 @@ mod tests {
                 host_label: Some("pve-01".to_string()),
                 host_mgmt_ip: Some("192.0.2.10".to_string()),
                 upstream_interface: Some("eno1".to_string()),
+                default_gateway_ip: Some("192.0.2.1".to_string()),
+                default_upstream_device_id: Some("device-2".to_string()),
                 last_seen: Utc::now(),
             },
         );

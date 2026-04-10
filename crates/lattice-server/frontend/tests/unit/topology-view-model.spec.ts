@@ -494,6 +494,107 @@ describe('buildTopologyModel', () => {
     });
   });
 
+  it('prefers the resolved default upstream device over the primary tree parent', () => {
+    const snapshot: ViewSnapshot = {
+      auto_discovery_interval_seconds: 30,
+      next_auto_discovery_at_ms: 0,
+      discovery_status: {
+        state: 'ready',
+      },
+      devices: [
+        {
+          id: 'router-a',
+          label: 'router-a',
+          depth: 0,
+          device_role: 'router',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'router-a',
+            mgmt_ip: '10.0.0.1',
+            mac_addresses: ['00:00:5e:00:53:01'],
+          },
+        },
+        {
+          id: 'router-b',
+          label: 'router-b',
+          depth: 0,
+          device_role: 'router',
+          deployment_type: 'physical',
+          identity_keys: {
+            sys_name: 'router-b',
+            mgmt_ip: '10.0.0.2',
+            mac_addresses: ['00:00:5e:00:53:02'],
+          },
+        },
+        {
+          id: 'edge-router',
+          label: 'edge-router',
+          depth: 1,
+          device_role: 'router',
+          deployment_type: 'physical',
+          upstream_interface: 'wan0',
+          default_upstream_device_id: 'router-b',
+          identity_keys: {
+            sys_name: 'edge-router',
+            mgmt_ip: '10.0.1.1',
+            mac_addresses: ['00:00:5e:00:53:03'],
+          },
+        },
+      ],
+      links: [
+        {
+          id: 'edge-router-a',
+          local_device_id: 'edge-router',
+          local_interface: 'wan0',
+          local_ip: '10.0.10.2/24',
+          remote_device_id: 'router-a',
+          remote_interface: 'lan0',
+          remote_ip: '10.0.10.1/24',
+          speed_bps: 1_000_000_000,
+          protocol: 'lldp',
+          network_cidrs: ['10.0.10.0/24'],
+        },
+        {
+          id: 'edge-router-b',
+          local_device_id: 'edge-router',
+          local_interface: 'wan0',
+          local_ip: '10.0.20.2/24',
+          remote_device_id: 'router-b',
+          remote_interface: 'lan0',
+          remote_ip: '10.0.20.1/24',
+          speed_bps: 1_000_000_000,
+          protocol: 'topology_hint',
+          network_cidrs: ['10.0.20.0/24'],
+        },
+      ],
+      device_relations: {
+        'router-a': { parents: [], peers: ['router-b'], children: ['edge-router'] },
+        'router-b': { parents: [], peers: ['router-a'], children: [] },
+        'edge-router': { parents: ['router-a'], peers: [], children: [] },
+      },
+      root_device_ids: ['router-a', 'router-b'],
+      tree_rows: [
+        { id: 'row-router-a', device_id: 'router-a', label: 'router-a' },
+        { id: 'row-edge-router', device_id: 'edge-router', label: 'edge-router' },
+        { id: 'row-router-b', device_id: 'router-b', label: 'router-b' },
+      ],
+      tree_edges: [
+        { parent_row_id: 'row-router-a', child_row_id: 'row-edge-router' },
+      ],
+      primary_row_by_device: {
+        'router-a': 'row-router-a',
+        'edge-router': 'row-edge-router',
+        'router-b': 'row-router-b',
+      },
+    };
+
+    const model = buildTopologyModel(snapshot, new Set());
+    const path = computeUpstreamPath(snapshot, model, 'edge-router');
+
+    expect(path.deviceSequence).toEqual(['edge-router', 'router-b']);
+    expect(path.linkSequence).toEqual(['edge-router-b']);
+  });
+
   it('keeps multiple sidebar entries for a shared downstream subtree', () => {
     const snapshot: ViewSnapshot = {
       auto_discovery_interval_seconds: 30,

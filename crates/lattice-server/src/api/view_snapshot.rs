@@ -76,6 +76,9 @@ pub struct ViewDevice {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub upstream_interface: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub default_upstream_device_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, TS)]
@@ -231,6 +234,7 @@ fn build_devices(
             identity_keys: device.identity_keys.clone(),
             host_label: device.host_label.clone(),
             upstream_interface: device.upstream_interface.clone(),
+            default_upstream_device_id: device.default_upstream_device_id.clone(),
         })
         .collect();
 
@@ -752,6 +756,8 @@ mod tests {
             host_label: host_label.map(str::to_string),
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         }
     }
@@ -1517,6 +1523,8 @@ mod tests {
                         host_label: Some("pve-1".to_string()),
                         host_mgmt_ip: Some("192.168.10.50".to_string()),
                         upstream_interface: None,
+                        default_gateway_ip: None,
+                        default_upstream_device_id: None,
                         last_seen: Utc::now(),
                     },
                 ),
@@ -1603,6 +1611,8 @@ mod tests {
                         host_label: Some("pve-1".to_string()),
                         host_mgmt_ip: Some("192.168.10.50".to_string()),
                         upstream_interface: None,
+                        default_gateway_ip: None,
+                        default_upstream_device_id: None,
                         last_seen: Utc::now(),
                     },
                 ),

@@ -148,6 +148,8 @@ async fn get_static_devices(State(state): State<StaticAppState>) -> Json<Vec<Dev
             host_label: device.host_label.clone(),
             host_mgmt_ip: None,
             upstream_interface: device.upstream_interface.clone(),
+            default_gateway_ip: None,
+            default_upstream_device_id: device.default_upstream_device_id.clone(),
             last_seen: chrono::Utc::now(),
         })
         .collect::<Vec<_>>();

@@ -158,6 +158,8 @@ pub struct NodeNetworkInterface {
     pub cidr: Option<CidrValue>,
     #[serde(default)]
     pub active: Option<u8>,
+    #[serde(default)]
+    pub gateway: Option<String>,
     #[serde(default, alias = "bridge_ports", alias = "bridge-ports")]
     pub bridge_ports: Option<String>,
 }

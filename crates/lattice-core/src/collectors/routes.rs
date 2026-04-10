@@ -6,10 +6,10 @@ use async_trait::async_trait;
 use crate::{
     collectors::{Collector, CollectorContext, GraphPatch},
     graph::{Device, DeviceRole},
-    snmp::{
-        oids::{
+        snmp::{
+            oids::{
             IF_DESCR, IF_NAME, IP_AD_ENT_ADDR, IP_AD_ENT_IF_IDX, IP_CIDR_ROUTE_IF_INDEX,
-            IP_ROUTE_IF_INDEX, SYS_DESCR, SYS_NAME,
+            IP_ROUTE_IF_INDEX, IP_ROUTE_NEXT_HOP, SYS_DESCR, SYS_NAME,
         },
         SnmpSession, SnmpValue,
     },
@@ -61,14 +61,17 @@ impl Collector for RouteCollector {
         let ip_addrs = table_by_index(session.walk(IP_AD_ENT_ADDR).await?, IP_AD_ENT_ADDR);
         let ip_if_idxs = table_by_index(session.walk(IP_AD_ENT_IF_IDX).await?, IP_AD_ENT_IF_IDX);
 
-        let upstream_interface =
+        let default_route =
             match resolve_cidr_default_route(session, &if_names, &if_descrs).await? {
-                RouteResolution::Resolved(interface_name) => Some(interface_name),
+                RouteResolution::Resolved(route) => Some(route),
                 RouteResolution::Ambiguous => None,
                 RouteResolution::RetryLegacy => {
                     resolve_legacy_default_route(session, &if_names, &if_descrs).await?
                 }
             };
+        let upstream_interface = default_route
+            .as_ref()
+            .map(|route| route.interface_name.clone());
         let routed_interfaces =
             routed_interface_names(&ip_addrs, &ip_if_idxs, &if_names, &if_descrs);
         let inferred_role = infer_device_role(sys_name.as_deref(), Some(&sys_descr));
@@ -78,6 +81,7 @@ impl Collector for RouteCollector {
         let devices = vec![Device {
             id: ctx.local_device_id.clone(),
             device_role,
+            default_gateway_ip: default_route.and_then(|route| route.gateway_ip),
             upstream_interface,
             ..Device::empty()
         }];
@@ -91,9 +95,15 @@ impl Collector for RouteCollector {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum RouteResolution {
-    Resolved(String),
+    Resolved(DefaultRoute),
     Ambiguous,
     RetryLegacy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct DefaultRoute {
+    interface_name: String,
+    gateway_ip: Option<String>,
 }
 
 async fn resolve_cidr_default_route(
@@ -114,7 +124,7 @@ async fn resolve_cidr_default_route(
             if_names,
             if_descrs,
         ) {
-            RouteResolution::Resolved(interface_name) => RouteResolution::Resolved(interface_name),
+            RouteResolution::Resolved(route) => RouteResolution::Resolved(route),
             RouteResolution::Ambiguous => RouteResolution::Ambiguous,
             RouteResolution::RetryLegacy => RouteResolution::RetryLegacy,
         },
@@ -125,11 +135,16 @@ async fn resolve_legacy_default_route(
     session: &SnmpSession,
     if_names: &HashMap<String, SnmpValue>,
     if_descrs: &HashMap<String, SnmpValue>,
-) -> Result<Option<String>> {
+) -> Result<Option<DefaultRoute>> {
     let rows = match session.walk(IP_ROUTE_IF_INDEX).await {
         Ok(rows) => rows,
         Err(_) => return Ok(None),
     };
+    let next_hop_rows = match session.walk(IP_ROUTE_NEXT_HOP).await {
+        Ok(rows) => rows,
+        Err(_) => Vec::new(),
+    };
+    let next_hop_by_suffix = table_by_index(next_hop_rows, IP_ROUTE_NEXT_HOP);
 
     Ok(
         match resolve_default_route_interface(
@@ -139,7 +154,13 @@ async fn resolve_legacy_default_route(
             if_names,
             if_descrs,
         ) {
-            RouteResolution::Resolved(interface_name) => Some(interface_name),
+            RouteResolution::Resolved(route) => Some(DefaultRoute {
+                gateway_ip: next_hop_by_suffix
+                    .get("0.0.0.0")
+                    .and_then(snmp_value_as_ipv4_string)
+                    .filter(|value| value != "0.0.0.0"),
+                ..route
+            }),
             RouteResolution::Ambiguous | RouteResolution::RetryLegacy => None,
         },
     )
@@ -154,9 +175,18 @@ fn resolve_default_route_interface(
 ) -> RouteResolution {
     let candidates = rows
         .iter()
-        .filter(|(oid, _)| matcher(index_after_prefix(oid, base).unwrap_or_default()))
-        .filter_map(|(_, value)| snmp_value_as_u32(value))
-        .filter_map(|if_index| interface_name_for_index(if_index, if_names, if_descrs))
+        .filter_map(|(oid, value)| {
+            let suffix = index_after_prefix(oid, base)?;
+            matcher(suffix).then_some((suffix, value))
+        })
+        .filter_map(|(suffix, value)| {
+            let if_index = snmp_value_as_u32(value)?;
+            let interface_name = interface_name_for_index(if_index, if_names, if_descrs)?;
+            Some(DefaultRoute {
+                interface_name,
+                gateway_ip: cidr_default_route_next_hop(suffix),
+            })
+        })
         .collect::<BTreeSet<_>>();
 
     match candidates.len() {
@@ -199,6 +229,10 @@ fn snmp_value_as_u32(value: &SnmpValue) -> Option<u32> {
         SnmpValue::Timeticks(value) => Some(*value),
         _ => None,
     }
+}
+
+fn snmp_value_as_ipv4_string(value: &SnmpValue) -> Option<String> {
+    value.as_ipv4().map(|value| value.to_string())
 }
 
 fn interface_name_for_index(
@@ -256,6 +290,19 @@ fn suffix_components(value: &str) -> Option<Vec<u32>> {
         parts.push(part.parse().ok()?);
     }
     Some(parts)
+}
+
+fn cidr_default_route_next_hop(suffix: &str) -> Option<String> {
+    let parts = suffix_components(suffix)?;
+    if parts.len() < 12 {
+        return None;
+    }
+    let next_hop = parts[parts.len().saturating_sub(4)..]
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>();
+    let value = next_hop.join(".");
+    (value != "0.0.0.0").then_some(value)
 }
 
 fn infer_device_role(sys_name: Option<&str>, sys_descr: Option<&str>) -> DeviceRole {
@@ -345,7 +392,10 @@ mod tests {
                 &if_names,
                 &HashMap::new(),
             ),
-            RouteResolution::Resolved("eth7".to_string())
+            RouteResolution::Resolved(DefaultRoute {
+                interface_name: "eth7".to_string(),
+                gateway_ip: Some("192.0.2.1".to_string()),
+            })
         );
     }
 
@@ -403,7 +453,18 @@ mod tests {
                 &if_names,
                 &HashMap::new(),
             ),
-            RouteResolution::Resolved("ge-0/0/3".to_string())
+            RouteResolution::Resolved(DefaultRoute {
+                interface_name: "ge-0/0/3".to_string(),
+                gateway_ip: None,
+            })
+        );
+    }
+
+    #[test]
+    fn parses_cidr_default_route_next_hop_from_index_suffix() {
+        assert_eq!(
+            cidr_default_route_next_hop("0.0.0.0.0.0.0.0.0.203.0.113.1"),
+            Some("203.0.113.1".to_string())
         );
     }
 

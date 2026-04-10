@@ -33,6 +33,7 @@ pub fn merge_source_results_with_hints(
     let mut topology = store.topology();
     attach_proxmox_uplinks(&mut topology);
     attach_topology_hints(&mut topology, topology_hints);
+    resolve_default_upstream_devices(&mut topology);
     let base_tree = if merged_source_nodes.is_empty() {
         build_internal_tree_base(&topology)
     } else {
@@ -46,6 +47,56 @@ pub fn merge_source_results_with_hints(
         relations,
         discovered_at: Utc::now(),
     }
+}
+
+fn resolve_default_upstream_devices(topology: &mut Topology) {
+    let resolved_by_device_id = topology
+        .devices
+        .values()
+        .map(|device| {
+            let upstream_id = device
+                .default_gateway_ip
+                .as_deref()
+                .and_then(|gateway_ip| find_device_id_by_ip(topology, gateway_ip, &device.id));
+            (device.id.clone(), upstream_id)
+        })
+        .collect::<HashMap<_, _>>();
+
+    for (device_id, upstream_id) in resolved_by_device_id {
+        if let Some(device) = topology.devices.get_mut(&device_id) {
+            device.default_upstream_device_id = upstream_id;
+        }
+    }
+}
+
+fn find_device_id_by_ip(topology: &Topology, ip: &str, excluded_device_id: &str) -> Option<String> {
+    let normalized_ip = ip.trim();
+    if normalized_ip.is_empty() {
+        return None;
+    }
+
+    let candidates = topology
+        .devices
+        .values()
+        .filter(|device| device.id != excluded_device_id)
+        .filter(|device| device_matches_ip(device, normalized_ip))
+        .map(|device| device.id.clone())
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+
+    (candidates.len() == 1).then(|| candidates[0].clone())
+}
+
+fn device_matches_ip(device: &crate::Device, ip: &str) -> bool {
+    device.identity_keys.mgmt_ip.as_deref() == Some(ip)
+        || device.host_mgmt_ip.as_deref() == Some(ip)
+        || device
+            .interfaces
+            .iter()
+            .flat_map(|interface| interface.ip_addresses.iter())
+            .filter_map(|value| value.split_once('/').map(|(candidate_ip, _)| candidate_ip))
+            .any(|candidate_ip| candidate_ip == ip)
 }
 
 fn remap_tree_nodes(
@@ -1401,6 +1452,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc.with_ymd_and_hms(2026, 3, 27, 0, 0, 0).unwrap(),
         }
     }
@@ -1445,6 +1498,8 @@ mod tests {
                                 host_label: None,
                                 host_mgmt_ip: None,
                                 upstream_interface: None,
+                                default_gateway_ip: None,
+                                default_upstream_device_id: None,
                                 last_seen: Utc::now(),
                             },
                         ),
@@ -1484,6 +1539,8 @@ mod tests {
                                 host_label: Some("pve".to_string()),
                                 host_mgmt_ip: Some("192.168.1.50".to_string()),
                                 upstream_interface: Some("enp3s0".to_string()),
+                                default_gateway_ip: None,
+                                default_upstream_device_id: None,
                                 last_seen: Utc::now(),
                             },
                         ),
@@ -1514,6 +1571,8 @@ mod tests {
                                 host_label: Some("pve".to_string()),
                                 host_mgmt_ip: Some("192.168.1.50".to_string()),
                                 upstream_interface: None,
+                                default_gateway_ip: None,
+                                default_upstream_device_id: None,
                                 last_seen: Utc::now(),
                             },
                         ),
@@ -1589,6 +1648,36 @@ mod tests {
                 .map(|relations| relations.parents.clone())
                 .unwrap_or_default(),
             vec!["router-1".to_string()]
+        );
+    }
+
+    #[test]
+    fn resolves_default_gateway_to_upstream_device_id() {
+        let mut bridge = device(
+            "proxmox:pve:bridge:vmbr0",
+            DeviceRole::Bridge,
+            DeploymentType::Virtual,
+        );
+        bridge.identity_keys.mgmt_ip = Some("192.168.1.50".to_string());
+        bridge.default_gateway_ip = Some("192.168.1.1".to_string());
+
+        let mut router = device("router-1", DeviceRole::Router, DeploymentType::Physical);
+        router.identity_keys.mgmt_ip = Some("192.168.1.1".to_string());
+
+        let merged = merge_source_results(vec![source_result(Topology {
+            devices: HashMap::from([
+                (bridge.id.clone(), bridge.clone()),
+                (router.id.clone(), router.clone()),
+            ]),
+            links: Vec::new(),
+            updated_at: Utc::now(),
+        })]);
+
+        assert_eq!(
+            merged.topology.devices[&bridge.id]
+                .default_upstream_device_id
+                .as_deref(),
+            Some(router.id.as_str())
         );
     }
 
@@ -2175,6 +2264,8 @@ mod tests {
             host_label: Some("pve-1".to_string()),
             host_mgmt_ip: Some("192.0.2.10".to_string()),
             upstream_interface: Some("eno1".to_string()),
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
         let physical = Device {
@@ -2202,6 +2293,8 @@ mod tests {
             host_label: None,
             host_mgmt_ip: None,
             upstream_interface: None,
+            default_gateway_ip: None,
+            default_upstream_device_id: None,
             last_seen: Utc::now(),
         };
 

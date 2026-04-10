@@ -115,6 +115,8 @@ impl Collector for LldpCollector {
                 host_label: None,
                 host_mgmt_ip: None,
                 upstream_interface: None,
+                default_gateway_ip: None,
+                default_upstream_device_id: None,
                 last_seen: Utc::now(),
             });
 

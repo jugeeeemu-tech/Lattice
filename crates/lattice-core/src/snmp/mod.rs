@@ -31,7 +31,9 @@ pub mod oids {
     pub const IP_AD_ENT_ADDR: &str = "1.3.6.1.2.1.4.20.1.1";
     pub const IP_AD_ENT_IF_IDX: &str = "1.3.6.1.2.1.4.20.1.2";
     pub const IP_AD_ENT_NET_MASK: &str = "1.3.6.1.2.1.4.20.1.3";
+    pub const IP_CIDR_ROUTE_NEXT_HOP: &str = "1.3.6.1.2.1.4.24.4.1.4";
     pub const IP_CIDR_ROUTE_IF_INDEX: &str = "1.3.6.1.2.1.4.24.4.1.5";
+    pub const IP_ROUTE_NEXT_HOP: &str = "1.3.6.1.2.1.4.21.1.7";
     pub const IP_ROUTE_IF_INDEX: &str = "1.3.6.1.2.1.4.21.1.2";
 }
 

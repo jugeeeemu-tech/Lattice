@@ -271,6 +271,13 @@ fn build_bridge_device(
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
         upstream_interface: network.bridge_ports_list().into_iter().next(),
+        default_gateway_ip: network
+            .gateway
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string),
+        default_upstream_device_id: None,
         status: device_status_from_active(network.active),
         last_seen: Utc::now(),
     }
@@ -295,6 +302,8 @@ fn build_node_device(node: &str, node_resource: Option<&ClusterResource>) -> Dev
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
         upstream_interface: None,
+        default_gateway_ip: None,
+        default_upstream_device_id: None,
         status: match node_resource.and_then(|resource| resource.status.as_deref()) {
             Some("online") => DeviceStatus::Up,
             Some("offline") => DeviceStatus::Down,
@@ -381,6 +390,8 @@ fn build_guest_device(
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
         upstream_interface: None,
+        default_gateway_ip: None,
+        default_upstream_device_id: None,
         status: match resource.status.as_deref() {
             Some("running") => DeviceStatus::Up,
             Some("stopped") => DeviceStatus::Down,
@@ -506,6 +517,8 @@ fn ensure_bridge_device(
         host_label: Some(node.to_string()),
         host_mgmt_ip: node_resource.and_then(|resource| resource.ip.clone()),
         upstream_interface: None,
+        default_gateway_ip: None,
+        default_upstream_device_id: None,
         status: DeviceStatus::Unknown,
         last_seen: Utc::now(),
     };
@@ -608,6 +621,7 @@ mod tests {
                 address: Some("192.0.2.10".to_string()),
                 cidr: Some(crate::proxmox::client::CidrValue::Prefix(24)),
                 active: Some(1),
+                gateway: None,
                 bridge_ports: Some("eno1".to_string()),
             }])
         }
