@@ -19,8 +19,8 @@ import {
   type PathState,
 } from '../topology/view-model';
 export type HoverSource = 'scene' | 'tree' | null;
-export type SnapshotSource = 'boot' | 'http' | 'polling' | 'ws';
-export type TransportMode = 'idle' | 'polling' | 'websocket';
+export type SnapshotSource = 'boot' | 'http' | 'ws';
+export type TransportMode = 'idle' | 'connecting' | 'websocket';
 
 export interface TopologyStoreState {
   autoDiscoveryIntervalSeconds: number;
@@ -102,7 +102,7 @@ export class TopologyStore {
 
     this.#transport = {
       mode: source === 'ws' ? 'websocket' : this.#transport.mode,
-      note: source === 'ws' ? 'Live snapshot received' : 'Snapshot loaded',
+      note: source === 'ws' ? 'ライブ更新を反映しました' : 'スナップショットを読み込みました',
     };
 
     this.#emit();

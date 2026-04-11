@@ -127,7 +127,7 @@ export class LatticeApp extends LitElement {
   firstUpdated(): void {
     const sceneHost = this.querySelector<HTMLElement>('#scene-host');
     if (!sceneHost) {
-      throw new Error('Scene host #scene-host was not found.');
+      throw new Error('シーン描画先 #scene-host が見つかりません。');
     }
     this.#sceneLoadPromise ??= this.#mountScene(sceneHost);
     this.#bindLayoutObserver();
@@ -506,7 +506,7 @@ export class LatticeApp extends LitElement {
           <div
             class="viewport__scene"
             id="scene-host"
-            aria-label="3D network topology view"
+            aria-label="3Dネットワーク構成図"
           ></div>
 
           <div class="viewport__toolbar viewport__toolbar--start">
@@ -578,15 +578,15 @@ export class LatticeApp extends LitElement {
                   <div
                     class="sidebar-stat"
                     data-role="device-stat"
-                    aria-label=${`${this.state.deviceCount} devices`}
+                    aria-label=${`機器 ${this.state.deviceCount} 台`}
                   >
                     <span class="sidebar-stat__icon">${this.#renderDeviceStatIcon()}</span>
                     <span class="sidebar-stat__value">${this.state.deviceCount}</span>
                   </div>
                   <div class="floating-tooltip" data-role="device-stat-tooltip">
-                    <p class="floating-tooltip__title">表示中の機器数</p>
+                    <p class="floating-tooltip__title">探索結果の機器数</p>
                     <p class="floating-tooltip__body">
-                      3Dシーンと構成ツリーに含まれる機器の数です。
+                      直近の探索結果に含まれる機器の総数です。
                     </p>
                   </div>
                 </div>
@@ -595,14 +595,14 @@ export class LatticeApp extends LitElement {
                   <div
                     class="sidebar-stat"
                     data-role="link-stat"
-                    aria-label=${`${this.state.visibleLinkCount} links`}
+                    aria-label=${`接続 ${this.state.visibleLinkCount} 本`}
                   >
                     <span class="sidebar-stat__icon">${this.#renderLinkStatIcon()}</span>
                     <span class="sidebar-stat__value">${this.state.visibleLinkCount}</span>
                   </div>
                   <div class="floating-tooltip" data-role="link-stat-tooltip">
-                    <p class="floating-tooltip__title">表示中のリンク数</p>
-                    <p class="floating-tooltip__body">現在表示している接続の数です。</p>
+                    <p class="floating-tooltip__title">探索結果のリンク数</p>
+                    <p class="floating-tooltip__body">直近の探索結果に含まれる接続の総数です。</p>
                   </div>
                 </div>
               </div>

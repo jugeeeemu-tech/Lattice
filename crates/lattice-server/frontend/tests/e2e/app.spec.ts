@@ -467,7 +467,7 @@ test('fits into one screen and keeps the sidebar inside the viewport overlay', a
   await page.goto('/');
   await waitForViewer(page);
 
-  await expect(page.getByText('Topology is warming up')).toBeVisible();
+  await expect(page.getByText('構成を準備しています')).toBeVisible();
   await expect(
     page.getByText('初回探索が完了すると、3Dビューと構成が表示されます。')
   ).toBeVisible();
@@ -604,7 +604,7 @@ test('keeps tree and scene selection in sync inside the overlaid sidebar', async
   await expect(hoverCard).toBeVisible();
   await expect(hoverCard.locator('[data-role="hover-title"]')).toHaveText('vm-app-01');
   await expect(hoverCard.locator('[data-role="hover-body"]')).toHaveText(
-    'Server · VM · Virtual · pve-01 上'
+    'サーバー · VM · 仮想 · pve-01 上'
   );
   await expect(page.locator('.tree-row[data-device-id="guest-app"]')).toHaveClass(/is-hovered/);
   await expect(page.locator('.tree-row[data-device-id="router-core"]')).not.toHaveClass(
@@ -1194,15 +1194,15 @@ test('shows explanatory tooltips for device and link counts', async ({ page }) =
     transform: 'none',
     transitionDuration: '0s',
   });
-  await expect(page.locator('[data-role="device-stat-tooltip"]')).toContainText('表示中の機器数');
+  await expect(page.locator('[data-role="device-stat-tooltip"]')).toContainText('探索結果の機器数');
   await expect(page.locator('[data-role="device-stat-tooltip"]')).toContainText(
-    '3Dシーンと構成ツリーに含まれる機器の数です。'
+    '直近の探索結果に含まれる機器の総数です。'
   );
 
   await page.locator('[data-role="link-stat"]').hover();
-  await expect(page.locator('[data-role="link-stat-tooltip"]')).toContainText('表示中のリンク数');
+  await expect(page.locator('[data-role="link-stat-tooltip"]')).toContainText('探索結果のリンク数');
   await expect(page.locator('[data-role="link-stat-tooltip"]')).toContainText(
-    '現在表示している接続の数です。'
+    '直近の探索結果に含まれる接続の総数です。'
   );
 });
 
@@ -1316,7 +1316,9 @@ test('switches the sidebar to a drawer on narrow screens', async ({ page }) => {
     .toBe(0);
 });
 
-test('preserves collapsed state across websocket and polling updates', async ({ page }) => {
+test('preserves collapsed state across websocket updates and reconnect refreshes', async ({
+  page,
+}) => {
   await page.setViewportSize({ width: 1366, height: 768 });
   await installTestHooks(page);
   const currentSnapshotRef = {
@@ -1353,6 +1355,9 @@ test('preserves collapsed state across websocket and polling updates', async ({ 
   });
 
   await expect(page.locator('[data-device-id="proxmox-host"]')).toHaveCount(0);
+  await expect
+    .poll(() => page.evaluate(() => window.__latticeViewer?.getState().transport.mode))
+    .toBe('connecting');
   await expect
     .poll(() => page.evaluate(() => window.__latticeViewer?.getState().nextAutoDiscoveryAtMs))
     .toBe(currentSnapshotRef.value.next_auto_discovery_at_ms);

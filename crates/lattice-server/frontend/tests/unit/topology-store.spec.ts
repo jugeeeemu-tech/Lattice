@@ -62,6 +62,39 @@ describe('TopologyStore', () => {
     const refreshedState = store.getState();
     expect(refreshedState.collapsedEntryIds.has('tree:seed:192.0.2.1/router-core#1')).toBe(true);
     expect(refreshedState.selectedDeviceId).toBe('router-core');
-    expect(refreshedState.transport.note).toBe('Live snapshot received');
+    expect(refreshedState.transport.note).toBe('ライブ更新を反映しました');
+  });
+
+  it('keeps device and link counters tied to the full discovery result even when some entries are hidden', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const store = new TopologyStore();
+
+    store.applySnapshot(
+      {
+        ...snapshot,
+        devices: [
+          ...snapshot.devices,
+          {
+            ...snapshot.devices[0],
+            id: 'hidden-device',
+            label: 'hidden-device',
+          },
+        ],
+        links: [
+          ...snapshot.links,
+          {
+            ...snapshot.links[0],
+            id: 'hidden-link',
+            local_device_id: 'hidden-device',
+            remote_device_id: snapshot.devices[0].id,
+          },
+        ],
+      },
+      'http'
+    );
+
+    const state = store.getState();
+    expect(state.deviceCount).toBe(snapshot.devices.length + 1);
+    expect(state.visibleLinkCount).toBe(snapshot.links.length + 1);
   });
 });

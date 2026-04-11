@@ -102,12 +102,9 @@ async fn send_static_snapshot(
     socket: &mut WebSocket,
     snapshot: &super::ViewSnapshot,
 ) -> Result<(), axum::Error> {
-    let payload = match serde_json::to_string(&snapshot) {
-        Ok(payload) => payload,
-        Err(error) => {
-            warn!(error = %error, "failed to serialize websocket snapshot");
-            "{}".to_string()
-        }
-    };
+    let payload = serde_json::to_string(&snapshot).map_err(|error| {
+        warn!(error = %error, "failed to serialize websocket snapshot");
+        axum::Error::new(error)
+    })?;
     socket.send(Message::Text(payload.into())).await
 }
