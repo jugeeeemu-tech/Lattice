@@ -9,9 +9,8 @@ use crate::{
 };
 
 use super::{
-    topology_hints::attach_topology_hints,
-    DeviceRelations, DiscoveryRelations, DiscoveryResult, DiscoveryTree, DiscoveryTreeNode,
-    SourceResult,
+    topology_hints::attach_topology_hints, DeviceRelations, DiscoveryRelations, DiscoveryResult,
+    DiscoveryTree, DiscoveryTreeNode, SourceResult,
 };
 
 pub fn merge_source_results(results: Vec<SourceResult>) -> DiscoveryResult {
@@ -45,6 +44,7 @@ pub fn merge_source_results_with_hints(
         topology,
         tree,
         relations,
+        warnings: Vec::new(),
         discovered_at: Utc::now(),
     }
 }
@@ -364,8 +364,12 @@ fn infer_display_tree(
         infer_additional_root_routers(topology, &visible_device_ids, &base_parent_by_device);
     let parent_candidates =
         build_parent_candidates(topology, &visible_device_ids, &base_parent_by_device);
-    let parent_by_device =
-        resolve_parent_candidates(topology, &visible_device_ids, &forced_root_ids, parent_candidates);
+    let parent_by_device = resolve_parent_candidates(
+        topology,
+        &visible_device_ids,
+        &forced_root_ids,
+        parent_candidates,
+    );
 
     let root_router_ids = visible_device_ids
         .iter()
@@ -497,7 +501,8 @@ fn build_parent_candidates(
             );
         }
 
-        if let Some(parent_id) = choose_topology_hint_parent(topology, device_id, visible_device_ids)
+        if let Some(parent_id) =
+            choose_topology_hint_parent(topology, device_id, visible_device_ids)
         {
             push_parent_candidate(
                 &mut by_child,
@@ -576,10 +581,10 @@ fn resolve_parent_candidates(
             continue;
         };
         candidates.sort_by(|left, right| {
-            right
-                .priority
-                .cmp(&left.priority)
-                .then_with(|| device_sort_key(topology, &left.parent_id).cmp(&device_sort_key(topology, &right.parent_id)))
+            right.priority.cmp(&left.priority).then_with(|| {
+                device_sort_key(topology, &left.parent_id)
+                    .cmp(&device_sort_key(topology, &right.parent_id))
+            })
         });
 
         let Some(best_priority) = candidates.first().map(|candidate| candidate.priority) else {
@@ -628,12 +633,12 @@ fn break_parent_cycles(topology: &Topology, parent_by_device: &mut HashMap<Strin
         let Some(parent_id) = parent_by_device.get(&device_id).cloned() else {
             continue;
         };
-        let remove_id = if device_sort_key(topology, &device_id) <= device_sort_key(topology, &parent_id)
-        {
-            device_id
-        } else {
-            parent_id
-        };
+        let remove_id =
+            if device_sort_key(topology, &device_id) <= device_sort_key(topology, &parent_id) {
+                device_id
+            } else {
+                parent_id
+            };
         parent_by_device.remove(&remove_id);
     }
 }
@@ -1643,9 +1648,7 @@ mod tests {
                             row_id: "source:0/proxmox:pve:bridge:vmbr0#1/proxmox:pve:qemu:100#1"
                                 .to_string(),
                             device_id: "proxmox:pve:qemu:100".to_string(),
-                            parent_row_id: Some(
-                                "source:0/proxmox:pve:bridge:vmbr0#1".to_string(),
-                            ),
+                            parent_row_id: Some("source:0/proxmox:pve:bridge:vmbr0#1".to_string()),
                             label: Some("guest-1".to_string()),
                             depth: 1,
                         },

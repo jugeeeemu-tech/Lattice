@@ -85,6 +85,7 @@ function asDiscoveryState(value: unknown): DiscoveryState {
   switch (value) {
     case 'loading':
     case 'discovering':
+    case 'partial':
     case 'ready':
     case 'failed':
       return value;

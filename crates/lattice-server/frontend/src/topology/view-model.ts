@@ -715,6 +715,8 @@ export function buildEmptyState(
     body:
       ({
         discovering: '最新の構成を組み立てています。完了後に自動で切り替わります。',
+        partial:
+          snapshot.discovery_status.message ?? '一部の探索に失敗しました。取得できた構成を表示しています。',
         failed:
           snapshot.discovery_status.message ?? '探索に失敗しました。旧構成があればそのまま保持しています。',
         loading: '初回探索が完了すると、3Dビューと構成が表示されます。',
@@ -722,6 +724,7 @@ export function buildEmptyState(
       } satisfies Record<DiscoveryState, string>)[status],
     title:
       ({
+        partial: '一部の探索で問題がありました',
         discovering: '探索を実行しています',
         failed: '探索に失敗しました',
         loading: '構成を準備しています',

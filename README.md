@@ -24,12 +24,16 @@ cp config/lattice.example.env config/lattice.env
 server:
   host: "127.0.0.1"
   port: 8080
+  allowed_origins: []
+  max_websocket_connections: 64
+  request_header_timeout_seconds: 5
 
 discovery:
   max_hops: 10
   timeout_seconds: 5
   retries: 2
   concurrent_devices: 1
+  manual_discovery_cooldown_seconds: 10
 
 sources:
   - kind: "snmp"
@@ -78,6 +82,19 @@ lattice serve
 
 ```bash
 lattice serve --host 0.0.0.0 --port 8080
+```
+
+LAN へ公開する場合は、`server.allowed_origins` に実際に使う URL を必ず列挙します。
+
+```yaml
+server:
+  host: "0.0.0.0"
+  port: 8080
+  allowed_origins:
+    - "http://lattice.example.internal:8080"
+    - "https://lattice.example.internal"
+  max_websocket_connections: 64
+  request_header_timeout_seconds: 5
 ```
 
 標準の場所とは別の設定ファイルを使いたい場合だけ、`--config` を使います。

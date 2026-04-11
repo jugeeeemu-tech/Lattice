@@ -7,9 +7,9 @@ pub mod proxmox;
 pub mod snmp;
 
 pub use config::{
-    load_config, resolve_config_path, AppConfig, DiscoveryConfig, ProxmoxSourceConfig,
-    SeedDevice, ServerConfig, SnmpSourceConfig, SourceConfig, TopologyHintEndpoint,
-    TopologyHintLink, TopologyHintsConfig,
+    load_config, resolve_config_path, AppConfig, DiscoveryConfig, ProxmoxSourceConfig, SeedDevice,
+    ServerConfig, SnmpSourceConfig, SourceConfig, TopologyHintEndpoint, TopologyHintLink,
+    TopologyHintsConfig,
 };
 pub use discovery::{
     build_discovery_sources, merge_source_results, merge_source_results_with_hints,

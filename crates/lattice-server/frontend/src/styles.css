@@ -240,6 +240,13 @@ lattice-sidebar-tree {
   );
 }
 
+.discovery-control[data-discovery-state="partial"] .discovery-control__ring {
+  background: conic-gradient(
+    var(--virtual) calc(var(--ring-progress) * 1turn),
+    color-mix(in srgb, var(--virtual) 18%, transparent) 0
+  );
+}
+
 .discovery-control[data-discovery-state="discovering"] .discovery-control__ring,
 .discovery-control[data-discovery-state="loading"] .discovery-control__ring {
   background: conic-gradient(

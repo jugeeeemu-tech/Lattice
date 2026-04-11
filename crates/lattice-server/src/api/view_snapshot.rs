@@ -1,6 +1,6 @@
 use std::{
     cmp::Ordering,
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeSet, HashMap, HashSet},
     net::{IpAddr, Ipv4Addr, Ipv6Addr},
 };
 
@@ -17,6 +17,7 @@ use ts_rs::TS;
 pub enum DiscoveryState {
     Loading,
     Discovering,
+    Partial,
     Ready,
     Failed,
 }
@@ -48,6 +49,13 @@ impl DiscoveryStatus {
         Self {
             state: DiscoveryState::Ready,
             message: None,
+        }
+    }
+
+    pub fn partial(message: impl Into<String>) -> Self {
+        Self {
+            state: DiscoveryState::Partial,
+            message: Some(message.into()),
         }
     }
 
@@ -158,6 +166,15 @@ pub struct ViewSnapshot {
     pub next_auto_discovery_at_ms: Option<i64>,
 }
 
+const MAX_TRANSPORT_ID_CHARS: usize = 120;
+const MAX_TRANSPORT_TEXT_CHARS: usize = 256;
+const MAX_TRANSPORT_MESSAGE_CHARS: usize = 512;
+const MAX_TRANSPORT_DEVICES: usize = 4096;
+const MAX_TRANSPORT_LINKS: usize = 8192;
+const MAX_TRANSPORT_TREE_ROWS: usize = 8192;
+const MAX_TRANSPORT_TREE_EDGES: usize = 8192;
+const MAX_TRANSPORT_RELATION_IDS: usize = 256;
+
 impl ViewSnapshot {
     pub fn empty(
         status: DiscoveryStatus,
@@ -175,6 +192,156 @@ impl ViewSnapshot {
             discovery_status: status,
             auto_discovery_interval_seconds,
             next_auto_discovery_at_ms,
+        }
+    }
+
+    pub fn sanitize_for_transport(self) -> Self {
+        let self_ = enforce_transport_budget(self);
+        let mut device_ids = StableIdMap::default();
+        let mut row_ids = StableIdMap::default();
+        let mut link_ids = StableIdMap::default();
+
+        for device in &self_.devices {
+            device_ids.id_for(&device.id);
+        }
+        for row in &self_.tree_rows {
+            row_ids.id_for(&row.id);
+        }
+        for link in &self_.links {
+            link_ids.id_for(&link.id);
+        }
+
+        let devices = self_
+            .devices
+            .into_iter()
+            .map(|device| ViewDevice {
+                id: device_ids.id_for(&device.id),
+                label: sanitize_text(&device.label, MAX_TRANSPORT_TEXT_CHARS),
+                depth: device.depth,
+                device_role: device.device_role,
+                deployment_type: device.deployment_type,
+                guest_kind: device.guest_kind,
+                identity_keys: sanitize_identity_keys(device.identity_keys),
+                host_label: device
+                    .host_label
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+                upstream_interface: device
+                    .upstream_interface
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+                default_upstream_device_id: device
+                    .default_upstream_device_id
+                    .map(|value| device_ids.id_for(&value)),
+            })
+            .collect();
+
+        let links = self_
+            .links
+            .into_iter()
+            .map(|link| ViewLink {
+                id: link_ids.id_for(&link.id),
+                local_device_id: device_ids.id_for(&link.local_device_id),
+                local_interface: sanitize_text(&link.local_interface, MAX_TRANSPORT_TEXT_CHARS),
+                local_ip: link
+                    .local_ip
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+                remote_device_id: device_ids.id_for(&link.remote_device_id),
+                remote_interface: sanitize_text(&link.remote_interface, MAX_TRANSPORT_TEXT_CHARS),
+                remote_ip: link
+                    .remote_ip
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+                speed_bps: link.speed_bps,
+                protocol: sanitize_text(&link.protocol, MAX_TRANSPORT_TEXT_CHARS),
+                guest_attachment: link.guest_attachment.map(|attachment| ViewGuestAttachment {
+                    bridge_name: sanitize_text(&attachment.bridge_name, MAX_TRANSPORT_TEXT_CHARS),
+                    vlan_tag: attachment.vlan_tag,
+                    trunk_vlans: attachment.trunk_vlans,
+                }),
+                network_cidrs: link
+                    .network_cidrs
+                    .into_iter()
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS))
+                    .collect(),
+            })
+            .collect();
+
+        let tree_rows = self_
+            .tree_rows
+            .into_iter()
+            .map(|row| TreeRow {
+                id: row_ids.id_for(&row.id),
+                device_id: device_ids.id_for(&row.device_id),
+                label: sanitize_text(&row.label, MAX_TRANSPORT_TEXT_CHARS),
+            })
+            .collect();
+
+        let tree_edges = self_
+            .tree_edges
+            .into_iter()
+            .map(|edge| TreeEdge {
+                parent_row_id: row_ids.id_for(&edge.parent_row_id),
+                child_row_id: row_ids.id_for(&edge.child_row_id),
+            })
+            .collect();
+
+        let primary_row_by_device = self_
+            .primary_row_by_device
+            .into_iter()
+            .map(|(device_id, row_id)| (device_ids.id_for(&device_id), row_ids.id_for(&row_id)))
+            .collect();
+
+        let root_device_ids = self_
+            .root_device_ids
+            .into_iter()
+            .map(|device_id| device_ids.id_for(&device_id))
+            .collect();
+
+        let device_relations = self_
+            .device_relations
+            .into_iter()
+            .map(|(device_id, relations)| {
+                (
+                    device_ids.id_for(&device_id),
+                    ViewDeviceRelations {
+                        parents: relations
+                            .parents
+                            .into_iter()
+                            .take(MAX_TRANSPORT_RELATION_IDS)
+                            .map(|value| device_ids.id_for(&value))
+                            .collect(),
+                        peers: relations
+                            .peers
+                            .into_iter()
+                            .take(MAX_TRANSPORT_RELATION_IDS)
+                            .map(|value| device_ids.id_for(&value))
+                            .collect(),
+                        children: relations
+                            .children
+                            .into_iter()
+                            .take(MAX_TRANSPORT_RELATION_IDS)
+                            .map(|value| device_ids.id_for(&value))
+                            .collect(),
+                    },
+                )
+            })
+            .collect();
+
+        Self {
+            devices,
+            links,
+            tree_rows,
+            tree_edges,
+            primary_row_by_device,
+            root_device_ids,
+            device_relations,
+            discovery_status: DiscoveryStatus {
+                state: self_.discovery_status.state,
+                message: self_
+                    .discovery_status
+                    .message
+                    .map(|value| sanitize_text(&value, MAX_TRANSPORT_MESSAGE_CHARS)),
+            },
+            auto_discovery_interval_seconds: self_.auto_discovery_interval_seconds,
+            next_auto_discovery_at_ms: self_.next_auto_discovery_at_ms,
         }
     }
 }
@@ -204,6 +371,121 @@ pub fn build_view_snapshot(
         auto_discovery_interval_seconds,
         next_auto_discovery_at_ms,
     }
+    .sanitize_for_transport()
+}
+
+#[derive(Default)]
+struct StableIdMap {
+    by_raw: HashMap<String, String>,
+    used: HashSet<String>,
+}
+
+impl StableIdMap {
+    fn id_for(&mut self, raw: &str) -> String {
+        if let Some(existing) = self.by_raw.get(raw) {
+            return existing.clone();
+        }
+
+        let base = sanitize_identifier_candidate(raw);
+        let mut candidate = base.clone();
+        let mut suffix = 1usize;
+        while !self.used.insert(candidate.clone()) {
+            suffix += 1;
+            candidate = with_suffix(&base, &format!("-{suffix}"), MAX_TRANSPORT_ID_CHARS);
+        }
+
+        self.by_raw.insert(raw.to_string(), candidate.clone());
+        candidate
+    }
+}
+
+fn sanitize_identity_keys(identity: IdentityKeys) -> IdentityKeys {
+    IdentityKeys {
+        chassis_id: identity
+            .chassis_id
+            .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+        sys_name: identity
+            .sys_name
+            .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+        mgmt_ip: identity
+            .mgmt_ip
+            .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS)),
+        mac_addresses: identity
+            .mac_addresses
+            .into_iter()
+            .map(|value| sanitize_text(&value, MAX_TRANSPORT_TEXT_CHARS))
+            .collect(),
+    }
+}
+
+fn sanitize_identifier_candidate(raw: &str) -> String {
+    let normalized = sanitize_text(raw, MAX_TRANSPORT_ID_CHARS);
+    if normalized.chars().count() < raw.chars().count() || contains_control_char(raw) {
+        let hash = fnv1a64(raw.as_bytes());
+        return with_suffix(
+            &normalized,
+            &format!("~{hash:016x}"),
+            MAX_TRANSPORT_ID_CHARS,
+        );
+    }
+    normalized
+}
+
+fn with_suffix(base: &str, suffix: &str, limit: usize) -> String {
+    let suffix_chars = suffix.chars().count();
+    if suffix_chars >= limit {
+        return suffix.chars().take(limit).collect();
+    }
+
+    let keep = limit - suffix_chars;
+    let prefix = base.chars().take(keep).collect::<String>();
+    format!("{prefix}{suffix}")
+}
+
+fn sanitize_text(raw: &str, limit: usize) -> String {
+    if limit == 0 {
+        return String::new();
+    }
+
+    let raw_len = raw.chars().count();
+    let mut sanitized = String::new();
+    let mut count = 0usize;
+
+    for ch in raw.chars() {
+        let normalized = if ch.is_control() && !matches!(ch, '\n' | '\r' | '\t') {
+            ' '
+        } else {
+            ch
+        };
+        if count >= limit {
+            break;
+        }
+        sanitized.push(normalized);
+        count += 1;
+    }
+
+    if count < raw_len {
+        if count == limit {
+            sanitized.pop();
+        }
+        sanitized.push('~');
+    }
+
+    sanitized
+}
+
+fn contains_control_char(raw: &str) -> bool {
+    raw.chars()
+        .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t'))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf29ce484222325u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 fn build_min_depths(tree: &DiscoveryTree) -> HashMap<String, u32> {
@@ -641,6 +923,26 @@ fn normalized_label_path(
     parent_row_by_row: &HashMap<String, String>,
     node_by_row_id: &HashMap<String, DiscoveryTreeNode>,
 ) -> String {
+    normalized_label_path_inner(
+        topology,
+        row_id,
+        parent_row_by_row,
+        node_by_row_id,
+        &mut HashSet::new(),
+    )
+}
+
+fn normalized_label_path_inner(
+    topology: &Topology,
+    row_id: &str,
+    parent_row_by_row: &HashMap<String, String>,
+    node_by_row_id: &HashMap<String, DiscoveryTreeNode>,
+    visited: &mut HashSet<String>,
+) -> String {
+    if !visited.insert(row_id.to_string()) {
+        return format!("cycle/{row_id}");
+    }
+
     let Some(node) = node_by_row_id.get(row_id) else {
         return row_id.to_string();
     };
@@ -652,7 +954,13 @@ fn normalized_label_path(
     match parent_row_by_row.get(row_id) {
         Some(parent_row_id) => format!(
             "{}/{}",
-            normalized_label_path(topology, parent_row_id, parent_row_by_row, node_by_row_id),
+            normalized_label_path_inner(
+                topology,
+                parent_row_id,
+                parent_row_by_row,
+                node_by_row_id,
+                visited,
+            ),
             label
         ),
         None => format!("seed/{label}"),
@@ -698,6 +1006,124 @@ fn build_device_relations(
         .iter()
         .map(|(device_id, relation)| (device_id.clone(), view_device_relations(relation)))
         .collect()
+}
+
+fn enforce_transport_budget(mut snapshot: ViewSnapshot) -> ViewSnapshot {
+    let original_device_count = snapshot.devices.len();
+    snapshot.devices.truncate(MAX_TRANSPORT_DEVICES);
+    let kept_device_ids = snapshot
+        .devices
+        .iter()
+        .map(|device| device.id.clone())
+        .collect::<HashSet<_>>();
+    let omitted_devices = original_device_count.saturating_sub(snapshot.devices.len());
+
+    let original_link_count = snapshot.links.len();
+    snapshot.links = snapshot
+        .links
+        .into_iter()
+        .filter(|link| {
+            kept_device_ids.contains(&link.local_device_id)
+                && kept_device_ids.contains(&link.remote_device_id)
+        })
+        .take(MAX_TRANSPORT_LINKS)
+        .collect();
+    let omitted_links = original_link_count.saturating_sub(snapshot.links.len());
+
+    let original_tree_row_count = snapshot.tree_rows.len();
+    snapshot.tree_rows = snapshot
+        .tree_rows
+        .into_iter()
+        .filter(|row| kept_device_ids.contains(&row.device_id))
+        .take(MAX_TRANSPORT_TREE_ROWS)
+        .collect();
+    let kept_row_ids = snapshot
+        .tree_rows
+        .iter()
+        .map(|row| row.id.clone())
+        .collect::<HashSet<_>>();
+    let omitted_tree_rows = original_tree_row_count.saturating_sub(snapshot.tree_rows.len());
+
+    let original_tree_edge_count = snapshot.tree_edges.len();
+    snapshot.tree_edges = snapshot
+        .tree_edges
+        .into_iter()
+        .filter(|edge| {
+            kept_row_ids.contains(&edge.parent_row_id) && kept_row_ids.contains(&edge.child_row_id)
+        })
+        .take(MAX_TRANSPORT_TREE_EDGES)
+        .collect();
+    let omitted_tree_edges = original_tree_edge_count.saturating_sub(snapshot.tree_edges.len());
+
+    snapshot.primary_row_by_device = snapshot
+        .primary_row_by_device
+        .into_iter()
+        .filter(|(device_id, row_id)| {
+            kept_device_ids.contains(device_id) && kept_row_ids.contains(row_id)
+        })
+        .collect();
+    snapshot.root_device_ids = snapshot
+        .root_device_ids
+        .into_iter()
+        .filter(|device_id| kept_device_ids.contains(device_id))
+        .collect();
+    snapshot.device_relations = snapshot
+        .device_relations
+        .into_iter()
+        .filter(|(device_id, _)| kept_device_ids.contains(device_id))
+        .map(|(device_id, relations)| {
+            (
+                device_id,
+                ViewDeviceRelations {
+                    parents: relations
+                        .parents
+                        .into_iter()
+                        .filter(|value| kept_device_ids.contains(value))
+                        .take(MAX_TRANSPORT_RELATION_IDS)
+                        .collect(),
+                    peers: relations
+                        .peers
+                        .into_iter()
+                        .filter(|value| kept_device_ids.contains(value))
+                        .take(MAX_TRANSPORT_RELATION_IDS)
+                        .collect(),
+                    children: relations
+                        .children
+                        .into_iter()
+                        .filter(|value| kept_device_ids.contains(value))
+                        .take(MAX_TRANSPORT_RELATION_IDS)
+                        .collect(),
+                },
+            )
+        })
+        .collect();
+
+    let mut notes = Vec::new();
+    if omitted_devices > 0 {
+        notes.push(format!("{omitted_devices} 台の機器"));
+    }
+    if omitted_links > 0 {
+        notes.push(format!("{omitted_links} 本の接続"));
+    }
+    if omitted_tree_rows > 0 {
+        notes.push(format!("{omitted_tree_rows} 件のツリー項目"));
+    }
+    if omitted_tree_edges > 0 {
+        notes.push(format!("{omitted_tree_edges} 件のツリー接続"));
+    }
+
+    if !notes.is_empty() {
+        let budget_note = format!(
+            "表示を安定させるため、一部のデータを省略しました: {}",
+            notes.join("、")
+        );
+        snapshot.discovery_status.message = Some(match snapshot.discovery_status.message {
+            Some(existing) => format!("{existing} / {budget_note}"),
+            None => budget_note,
+        });
+    }
+
+    snapshot
 }
 
 fn view_device_relations(relations: &CoreDeviceRelations) -> ViewDeviceRelations {
@@ -1064,6 +1490,69 @@ mod tests {
 
         assert_eq!(snapshot.primary_row_by_device["switch-1"], "switch-1");
         assert_eq!(snapshot.primary_row_by_device["switch-2"], "switch-2");
+    }
+
+    #[test]
+    fn snapshot_handles_cyclic_tree_rows_without_recursing_forever() {
+        let topology = Topology {
+            devices: HashMap::from([
+                (
+                    "device-a".to_string(),
+                    device(
+                        "device-a",
+                        "device-a",
+                        DeviceRole::Router,
+                        DeploymentType::Unknown,
+                        None,
+                        None,
+                    ),
+                ),
+                (
+                    "device-b".to_string(),
+                    device(
+                        "device-b",
+                        "device-b",
+                        DeviceRole::Switch,
+                        DeploymentType::Unknown,
+                        None,
+                        None,
+                    ),
+                ),
+            ]),
+            links: Vec::new(),
+            updated_at: Utc::now(),
+        };
+        let tree = DiscoveryTree {
+            nodes: vec![
+                DiscoveryTreeNode {
+                    row_id: "row-a".to_string(),
+                    device_id: "device-a".to_string(),
+                    parent_row_id: Some("row-b".to_string()),
+                    label: Some("device-a".to_string()),
+                    depth: 0,
+                },
+                DiscoveryTreeNode {
+                    row_id: "row-b".to_string(),
+                    device_id: "device-b".to_string(),
+                    parent_row_id: Some("row-a".to_string()),
+                    label: Some("device-b".to_string()),
+                    depth: 0,
+                },
+            ],
+        };
+
+        let snapshot = build_view_snapshot(
+            &topology,
+            &tree,
+            &CoreDiscoveryRelations::default(),
+            &DiscoveryStatus::ready(),
+            60,
+            None,
+        );
+
+        assert_eq!(snapshot.tree_rows.len(), 2);
+        assert_eq!(snapshot.primary_row_by_device["device-a"], "row-a");
+        assert_eq!(snapshot.primary_row_by_device["device-b"], "row-b");
     }
 
     #[test]
@@ -1646,5 +2135,176 @@ mod tests {
         );
 
         assert_eq!(snapshot.links[0].network_cidrs, vec!["192.168.20.0/24"]);
+    }
+
+    #[test]
+    fn sanitize_for_transport_truncates_large_strings_and_keeps_references_consistent() {
+        let huge = "node-".repeat(400);
+        let snapshot = ViewSnapshot {
+            devices: vec![ViewDevice {
+                id: huge.clone(),
+                label: huge.clone(),
+                depth: 0,
+                device_role: DeviceRole::Unknown,
+                deployment_type: DeploymentType::Unknown,
+                guest_kind: None,
+                identity_keys: IdentityKeys {
+                    chassis_id: Some(huge.clone()),
+                    sys_name: Some(huge.clone()),
+                    mgmt_ip: Some(huge.clone()),
+                    mac_addresses: vec![huge.clone()],
+                },
+                host_label: Some(huge.clone()),
+                upstream_interface: Some(huge.clone()),
+                default_upstream_device_id: Some(huge.clone()),
+            }],
+            links: vec![ViewLink {
+                id: huge.clone(),
+                local_device_id: huge.clone(),
+                local_interface: huge.clone(),
+                local_ip: Some(huge.clone()),
+                remote_device_id: huge.clone(),
+                remote_interface: huge.clone(),
+                remote_ip: Some(huge.clone()),
+                speed_bps: None,
+                protocol: huge.clone(),
+                guest_attachment: Some(ViewGuestAttachment {
+                    bridge_name: huge.clone(),
+                    vlan_tag: None,
+                    trunk_vlans: vec![10, 20],
+                }),
+                network_cidrs: vec![huge.clone()],
+            }],
+            tree_rows: vec![TreeRow {
+                id: huge.clone(),
+                device_id: huge.clone(),
+                label: huge.clone(),
+            }],
+            tree_edges: vec![TreeEdge {
+                parent_row_id: huge.clone(),
+                child_row_id: huge.clone(),
+            }],
+            primary_row_by_device: HashMap::from([(huge.clone(), huge.clone())]),
+            root_device_ids: vec![huge.clone()],
+            device_relations: HashMap::from([(
+                huge.clone(),
+                ViewDeviceRelations {
+                    parents: vec![huge.clone()],
+                    peers: vec![huge.clone()],
+                    children: vec![huge.clone()],
+                },
+            )]),
+            discovery_status: DiscoveryStatus::failed(huge.clone()),
+            auto_discovery_interval_seconds: 60,
+            next_auto_discovery_at_ms: None,
+        };
+
+        let sanitized = snapshot.sanitize_for_transport();
+        let device_id = sanitized.devices[0].id.clone();
+        let row_id = sanitized.tree_rows[0].id.clone();
+
+        assert!(device_id.len() <= MAX_TRANSPORT_ID_CHARS + 8);
+        assert!(row_id.len() <= MAX_TRANSPORT_ID_CHARS + 8);
+        assert!(sanitized.devices[0].label.chars().count() <= MAX_TRANSPORT_TEXT_CHARS);
+        assert!(sanitized.devices[0]
+            .identity_keys
+            .sys_name
+            .as_ref()
+            .is_some_and(|value| value.chars().count() <= MAX_TRANSPORT_TEXT_CHARS));
+        assert!(sanitized
+            .discovery_status
+            .message
+            .is_some_and(|value| { value.chars().count() <= MAX_TRANSPORT_MESSAGE_CHARS }));
+        assert_eq!(sanitized.links[0].local_device_id, device_id);
+        assert_eq!(sanitized.links[0].remote_device_id, device_id);
+        assert_eq!(sanitized.tree_rows[0].device_id, device_id);
+        assert_eq!(sanitized.tree_edges[0].parent_row_id, row_id);
+        assert_eq!(sanitized.tree_edges[0].child_row_id, row_id);
+        assert_eq!(sanitized.primary_row_by_device[&device_id], row_id);
+        assert_eq!(sanitized.root_device_ids, vec![device_id.clone()]);
+        assert_eq!(
+            sanitized.device_relations[&device_id].parents,
+            vec![device_id.clone()]
+        );
+        assert_eq!(
+            sanitized.device_relations[&device_id].peers,
+            vec![device_id.clone()]
+        );
+        assert_eq!(
+            sanitized.device_relations[&device_id].children,
+            vec![device_id.clone()]
+        );
+    }
+
+    #[test]
+    fn sanitize_for_transport_caps_collection_sizes_and_reports_truncation() {
+        let make_device = |index: usize| ViewDevice {
+            id: format!("device-{index}"),
+            label: format!("device-{index}"),
+            depth: 0,
+            device_role: DeviceRole::Unknown,
+            deployment_type: DeploymentType::Unknown,
+            guest_kind: None,
+            identity_keys: IdentityKeys {
+                chassis_id: None,
+                sys_name: Some(format!("device-{index}")),
+                mgmt_ip: None,
+                mac_addresses: Vec::new(),
+            },
+            host_label: None,
+            upstream_interface: None,
+            default_upstream_device_id: None,
+        };
+        let snapshot = ViewSnapshot {
+            devices: (0..(MAX_TRANSPORT_DEVICES + 10)).map(make_device).collect(),
+            links: (0..(MAX_TRANSPORT_LINKS + 10))
+                .map(|index| ViewLink {
+                    id: format!("link-{index}"),
+                    local_device_id: "device-0".to_string(),
+                    local_interface: "eth0".to_string(),
+                    local_ip: None,
+                    remote_device_id: "device-1".to_string(),
+                    remote_interface: "eth1".to_string(),
+                    remote_ip: None,
+                    speed_bps: None,
+                    protocol: "lldp".to_string(),
+                    guest_attachment: None,
+                    network_cidrs: Vec::new(),
+                })
+                .collect(),
+            tree_rows: (0..(MAX_TRANSPORT_TREE_ROWS + 10))
+                .map(|index| TreeRow {
+                    id: format!("row-{index}"),
+                    device_id: "device-0".to_string(),
+                    label: format!("row-{index}"),
+                })
+                .collect(),
+            tree_edges: (0..(MAX_TRANSPORT_TREE_EDGES + 10))
+                .map(|index| TreeEdge {
+                    parent_row_id: "row-0".to_string(),
+                    child_row_id: format!("row-{index}"),
+                })
+                .collect(),
+            primary_row_by_device: HashMap::from([("device-0".to_string(), "row-0".to_string())]),
+            root_device_ids: (0..(MAX_TRANSPORT_DEVICES + 10))
+                .map(|index| format!("device-{index}"))
+                .collect(),
+            device_relations: HashMap::new(),
+            discovery_status: DiscoveryStatus::ready(),
+            auto_discovery_interval_seconds: 60,
+            next_auto_discovery_at_ms: None,
+        };
+
+        let sanitized = snapshot.sanitize_for_transport();
+
+        assert_eq!(sanitized.devices.len(), MAX_TRANSPORT_DEVICES);
+        assert_eq!(sanitized.links.len(), MAX_TRANSPORT_LINKS);
+        assert_eq!(sanitized.tree_rows.len(), MAX_TRANSPORT_TREE_ROWS);
+        assert_eq!(sanitized.tree_edges.len(), MAX_TRANSPORT_TREE_EDGES);
+        assert_eq!(sanitized.root_device_ids.len(), MAX_TRANSPORT_DEVICES);
+        assert!(sanitized
+            .discovery_status
+            .message
+            .is_some_and(|message| message.contains("表示を安定させるため")));
     }
 }

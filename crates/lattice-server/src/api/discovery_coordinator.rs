@@ -35,11 +35,15 @@ pub struct DiscoveryCoordinator {
     discovery_lock: Arc<Mutex<()>>,
     auto_discovery_interval: Duration,
     auto_discovery_interval_seconds: u64,
+    manual_discovery_cooldown: Duration,
+    last_manual_discovery_started_at: Arc<RwLock<Option<Instant>>>,
     pub current_result: Arc<RwLock<Option<DiscoveryResult>>>,
     pub discovery_status: Arc<RwLock<DiscoveryStatus>>,
     next_auto_discovery_at: Arc<RwLock<Option<DateTime<Utc>>>>,
+    cached_snapshot: Arc<RwLock<ViewSnapshot>>,
     schedule_notify: Arc<Notify>,
     scheduler_started: AtomicBool,
+    discovery_running: AtomicBool,
     pub tx: broadcast::Sender<DiscoveryEvent>,
 }
 
@@ -48,6 +52,13 @@ pub enum DiscoveryEvent {
     Started,
     Completed,
     Failed,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ManualDiscoveryRequest {
+    Started,
+    Busy,
+    Cooldown { retry_after_seconds: u64 },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -68,7 +79,11 @@ impl DiscoveryTrigger {
 }
 
 impl DiscoveryCoordinator {
-    pub fn new(runner: Arc<dyn DiscoveryRunner>, auto_discovery_interval_seconds: u64) -> Self {
+    pub fn new(
+        runner: Arc<dyn DiscoveryRunner>,
+        auto_discovery_interval_seconds: u64,
+        manual_discovery_cooldown_seconds: u64,
+    ) -> Self {
         let (tx, _) = broadcast::channel(32);
         let normalized_interval_seconds = auto_discovery_interval_seconds.max(1);
         Self {
@@ -76,11 +91,19 @@ impl DiscoveryCoordinator {
             discovery_lock: Arc::new(Mutex::new(())),
             auto_discovery_interval: Duration::from_secs(normalized_interval_seconds),
             auto_discovery_interval_seconds: normalized_interval_seconds,
+            manual_discovery_cooldown: Duration::from_secs(manual_discovery_cooldown_seconds),
+            last_manual_discovery_started_at: Arc::new(RwLock::new(None)),
             current_result: Arc::new(RwLock::new(None)),
             discovery_status: Arc::new(RwLock::new(DiscoveryStatus::loading())),
             next_auto_discovery_at: Arc::new(RwLock::new(None)),
+            cached_snapshot: Arc::new(RwLock::new(ViewSnapshot::empty(
+                DiscoveryStatus::loading(),
+                normalized_interval_seconds,
+                None,
+            ))),
             schedule_notify: Arc::new(Notify::new()),
             scheduler_started: AtomicBool::new(false),
+            discovery_running: AtomicBool::new(false),
             tx,
         }
     }
@@ -110,39 +133,30 @@ impl DiscoveryCoordinator {
         });
     }
 
-    pub async fn trigger_manual_discovery(self: &Arc<Self>) -> Option<ViewSnapshot> {
-        self.try_start_discovery(DiscoveryTrigger::Manual).await
+    pub async fn trigger_manual_discovery(
+        self: &Arc<Self>,
+    ) -> (ManualDiscoveryRequest, Option<ViewSnapshot>) {
+        if self.discovery_running.load(Ordering::SeqCst) {
+            return (ManualDiscoveryRequest::Busy, None);
+        }
+
+        if let Some(retry_after_seconds) = self.manual_discovery_retry_after().await {
+            return (
+                ManualDiscoveryRequest::Cooldown {
+                    retry_after_seconds,
+                },
+                None,
+            );
+        }
+
+        match self.try_start_discovery(DiscoveryTrigger::Manual).await {
+            Some(snapshot) => (ManualDiscoveryRequest::Started, Some(snapshot)),
+            None => (ManualDiscoveryRequest::Busy, None),
+        }
     }
 
     pub async fn current_snapshot(&self) -> ViewSnapshot {
-        let status = self.discovery_status.read().await.clone();
-        let current_result = self.current_result.read().await.clone();
-        let next_auto_discovery_at_ms = self
-            .next_auto_discovery_at
-            .read()
-            .await
-            .as_ref()
-            .map(DateTime::<Utc>::timestamp_millis);
-
-        if let Some(result) = current_result {
-            build_view_snapshot(
-                &result.topology,
-                &result.tree,
-                &result.relations,
-                &status,
-                self.auto_discovery_interval_seconds,
-                next_auto_discovery_at_ms,
-            )
-        } else {
-            build_view_snapshot(
-                &Topology::default(),
-                &DiscoveryTree::default(),
-                &DiscoveryRelations::default(),
-                &status,
-                self.auto_discovery_interval_seconds,
-                next_auto_discovery_at_ms,
-            )
-        }
+        self.cached_snapshot.read().await.clone()
     }
 
     pub async fn current_devices(&self) -> Vec<Device> {
@@ -188,6 +202,10 @@ impl DiscoveryCoordinator {
         };
 
         self.pause_auto_discovery().await;
+        self.discovery_running.store(true, Ordering::SeqCst);
+        if matches!(trigger, DiscoveryTrigger::Manual) {
+            *self.last_manual_discovery_started_at.write().await = Some(Instant::now());
+        }
         {
             let mut status = self.discovery_status.write().await;
             *status = match trigger {
@@ -197,6 +215,7 @@ impl DiscoveryCoordinator {
                 }
             };
         }
+        self.refresh_cached_snapshot().await;
         let snapshot = self.current_snapshot().await;
         info!(trigger = trigger.as_str(), "discovery started");
         let _ = self.tx.send(DiscoveryEvent::Started);
@@ -222,14 +241,20 @@ impl DiscoveryCoordinator {
             Ok(result) => {
                 let device_count = result.topology.devices.len();
                 let link_count = result.topology.links.len();
+                let warning_message = warning_summary(&result.warnings);
                 *self.current_result.write().await = Some(result);
-                *self.discovery_status.write().await = DiscoveryStatus::ready();
+                *self.discovery_status.write().await = match warning_message.as_ref() {
+                    Some(message) => DiscoveryStatus::partial(message.clone()),
+                    None => DiscoveryStatus::ready(),
+                };
                 self.schedule_next_auto_discovery().await;
+                self.refresh_cached_snapshot().await;
                 info!(
                     trigger = trigger.as_str(),
                     duration_ms = started_at.elapsed().as_millis(),
                     device_count,
                     link_count,
+                    warning = warning_message.as_deref().unwrap_or(""),
                     "discovery completed"
                 );
                 let _ = self.tx.send(DiscoveryEvent::Completed);
@@ -238,6 +263,7 @@ impl DiscoveryCoordinator {
                 let message = short_error_message(&error.to_string());
                 *self.discovery_status.write().await = DiscoveryStatus::failed(message.clone());
                 self.schedule_next_auto_discovery().await;
+                self.refresh_cached_snapshot().await;
                 error!(
                     trigger = trigger.as_str(),
                     duration_ms = started_at.elapsed().as_millis(),
@@ -249,6 +275,7 @@ impl DiscoveryCoordinator {
             }
         }
 
+        self.discovery_running.store(false, Ordering::SeqCst);
         drop(discovery_guard);
     }
 
@@ -289,6 +316,7 @@ impl DiscoveryCoordinator {
 
     async fn pause_auto_discovery(&self) {
         *self.next_auto_discovery_at.write().await = None;
+        self.refresh_cached_snapshot().await;
         self.schedule_notify.notify_waiters();
     }
 
@@ -298,16 +326,84 @@ impl DiscoveryCoordinator {
                 chrono::Duration::seconds(self.auto_discovery_interval_seconds as i64)
             });
         *self.next_auto_discovery_at.write().await = Some(next_due);
+        self.refresh_cached_snapshot().await;
         self.schedule_notify.notify_waiters();
+    }
+
+    async fn manual_discovery_retry_after(&self) -> Option<u64> {
+        if self.manual_discovery_cooldown.is_zero() {
+            return None;
+        }
+
+        let last_started_at = *self.last_manual_discovery_started_at.read().await;
+        let elapsed = last_started_at?.elapsed();
+        if elapsed >= self.manual_discovery_cooldown {
+            return None;
+        }
+
+        let remaining = self.manual_discovery_cooldown.saturating_sub(elapsed);
+        let seconds = remaining.as_secs();
+        Some(seconds.max(1))
+    }
+
+    async fn refresh_cached_snapshot(&self) {
+        let status = self.discovery_status.read().await.clone();
+        let current_result = self.current_result.read().await.clone();
+        let next_auto_discovery_at_ms = self
+            .next_auto_discovery_at
+            .read()
+            .await
+            .as_ref()
+            .map(DateTime::<Utc>::timestamp_millis);
+
+        let snapshot = if let Some(result) = current_result {
+            build_view_snapshot(
+                &result.topology,
+                &result.tree,
+                &result.relations,
+                &status,
+                self.auto_discovery_interval_seconds,
+                next_auto_discovery_at_ms,
+            )
+        } else {
+            build_view_snapshot(
+                &Topology::default(),
+                &DiscoveryTree::default(),
+                &DiscoveryRelations::default(),
+                &status,
+                self.auto_discovery_interval_seconds,
+                next_auto_discovery_at_ms,
+            )
+        };
+
+        *self.cached_snapshot.write().await = snapshot;
     }
 }
 
 fn short_error_message(message: &str) -> String {
     let first_line = message.lines().next().unwrap_or("Discovery failed");
-    if first_line.len() > 160 {
-        format!("{}...", &first_line[..157])
+    let first_line_chars = first_line.chars().count();
+    if first_line_chars > 160 {
+        let prefix = first_line.chars().take(157).collect::<String>();
+        format!("{prefix}...")
     } else {
         first_line.to_string()
+    }
+}
+
+fn warning_summary(warnings: &[String]) -> Option<String> {
+    if warnings.is_empty() {
+        return None;
+    }
+
+    let first = short_error_message(&warnings[0]);
+    if warnings.len() == 1 {
+        Some(format!("一部の探索に失敗しました: {first}"))
+    } else {
+        Some(format!(
+            "一部の探索に失敗しました: {first} / ほか {} 件",
+            warnings.len() - 1
+        ))
     }
 }
 
@@ -427,6 +523,7 @@ mod tests {
                 }],
             },
             relations: DiscoveryRelations::default(),
+            warnings: Vec::new(),
             discovered_at: Utc::now(),
         }
     }
@@ -437,10 +534,13 @@ mod tests {
             Ok(sample_result("first")),
             Err(anyhow!("boom")),
         ]));
-        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60, 0));
         let mut receiver = coordinator.subscribe();
 
-        assert!(coordinator.trigger_manual_discovery().await.is_some());
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await.0,
+            ManualDiscoveryRequest::Started
+        );
         assert!(matches!(
             receiver.recv().await.unwrap(),
             DiscoveryEvent::Started
@@ -457,7 +557,10 @@ mod tests {
             crate::api::view_snapshot::DiscoveryState::Ready
         );
 
-        assert!(coordinator.trigger_manual_discovery().await.is_some());
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await.0,
+            ManualDiscoveryRequest::Started
+        );
         assert!(matches!(
             receiver.recv().await.unwrap(),
             DiscoveryEvent::Started
@@ -479,6 +582,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn warnings_mark_snapshot_as_partial_but_keep_latest_result() {
+        let mut partial = sample_result("partial");
+        partial.warnings = vec!["snmp: timed out".to_string()];
+        let runner = Arc::new(FakeRunner::new(vec![Ok(partial)]));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60, 0));
+        let mut receiver = coordinator.subscribe();
+
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await.0,
+            ManualDiscoveryRequest::Started
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            DiscoveryEvent::Started
+        ));
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            DiscoveryEvent::Completed
+        ));
+
+        let snapshot = coordinator.current_snapshot().await;
+        assert_eq!(snapshot.devices.len(), 1);
+        assert_eq!(
+            snapshot.discovery_status.state,
+            crate::api::view_snapshot::DiscoveryState::Partial
+        );
+        assert!(snapshot
+            .discovery_status
+            .message
+            .as_deref()
+            .is_some_and(|message| message.contains("一部の探索に失敗しました")));
+    }
+
+    #[tokio::test]
     async fn scheduler_restarts_after_completion_and_manual_runs_reset_it() {
         let runner = Arc::new(FakeRunner::new(vec![
             Ok(sample_result("initial")),
@@ -486,7 +623,7 @@ mod tests {
             Ok(sample_result("manual")),
             Ok(sample_result("next-automatic")),
         ]));
-        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 1));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 1, 0));
         let mut receiver = coordinator.subscribe();
 
         coordinator.start();
@@ -533,7 +670,10 @@ mod tests {
         );
 
         tokio::time::sleep(Duration::from_millis(150)).await;
-        assert!(coordinator.trigger_manual_discovery().await.is_some());
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await.0,
+            ManualDiscoveryRequest::Started
+        );
         assert!(matches!(
             timeout(Duration::from_secs(1), receiver.recv())
                 .await
@@ -588,13 +728,12 @@ mod tests {
             release: Arc::clone(&release),
             result: sample_result("blocking"),
         });
-        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60, 0));
         let mut receiver = coordinator.subscribe();
 
-        let started_snapshot = coordinator
-            .trigger_manual_discovery()
-            .await
-            .expect("manual discovery should start");
+        let (request, started_snapshot) = coordinator.trigger_manual_discovery().await;
+        assert_eq!(request, ManualDiscoveryRequest::Started);
+        let started_snapshot = started_snapshot.expect("manual discovery should start");
         assert_eq!(
             started_snapshot.discovery_status.state,
             crate::api::view_snapshot::DiscoveryState::Discovering
@@ -612,7 +751,10 @@ mod tests {
             .await
             .expect("runner should enter discovery");
 
-        assert!(coordinator.trigger_manual_discovery().await.is_none());
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await,
+            (ManualDiscoveryRequest::Busy, None)
+        );
 
         release.notify_waiters();
 
@@ -623,5 +765,47 @@ mod tests {
                 .unwrap(),
             DiscoveryEvent::Completed
         ));
+    }
+
+    #[tokio::test]
+    async fn manual_discovery_enforces_cooldown_after_completion() {
+        let runner = Arc::new(FakeRunner::new(vec![
+            Ok(sample_result("first")),
+            Ok(sample_result("second")),
+        ]));
+        let coordinator = Arc::new(DiscoveryCoordinator::new(runner, 60, 10));
+        let mut receiver = coordinator.subscribe();
+
+        assert_eq!(
+            coordinator.trigger_manual_discovery().await.0,
+            ManualDiscoveryRequest::Started
+        );
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            DiscoveryEvent::Started
+        ));
+        assert!(matches!(
+            receiver.recv().await.unwrap(),
+            DiscoveryEvent::Completed
+        ));
+
+        let (request, snapshot) = coordinator.trigger_manual_discovery().await;
+        let ManualDiscoveryRequest::Cooldown {
+            retry_after_seconds,
+        } = request
+        else {
+            panic!("manual discovery should be rate limited");
+        };
+        assert!((9..=10).contains(&retry_after_seconds));
+        assert!(snapshot.is_none());
+    }
+
+    #[test]
+    fn short_error_message_truncates_multibyte_text_without_panicking() {
+        let message = "あ".repeat(200);
+        let shortened = short_error_message(&message);
+
+        assert!(shortened.ends_with("..."));
+        assert_eq!(shortened.chars().count(), 160);
     }
 }

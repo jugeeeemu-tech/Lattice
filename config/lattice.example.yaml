@@ -1,6 +1,9 @@
 server:
   host: "127.0.0.1"
   port: 8080
+  allowed_origins: []
+  max_websocket_connections: 64
+  request_header_timeout_seconds: 5
 
 discovery:
   max_hops: 10
@@ -8,6 +11,7 @@ discovery:
   retries: 2
   concurrent_devices: 1
   auto_discovery_interval_seconds: 60
+  manual_discovery_cooldown_seconds: 10
 
 topology_hints:
   links: []

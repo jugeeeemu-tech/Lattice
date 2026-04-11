@@ -1,3 +1,4 @@
+use std::time::Duration;
 use std::{
     collections::{HashMap, HashSet},
     net::IpAddr,
@@ -44,9 +45,9 @@ impl ProxmoxDiscoverySource {
         Self { api }
     }
 
-    pub fn from_config(config: ProxmoxSourceConfig) -> Result<Self> {
+    pub fn from_config(config: ProxmoxSourceConfig, request_timeout: Duration) -> Result<Self> {
         Ok(Self {
-            api: Arc::new(ProxmoxApiClient::new(&config)?),
+            api: Arc::new(ProxmoxApiClient::new(&config, request_timeout)?),
         })
     }
 }

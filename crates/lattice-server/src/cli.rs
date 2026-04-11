@@ -4,14 +4,16 @@ use anyhow::Result;
 use clap::{Parser, Subcommand, ValueEnum};
 use lattice_core::{load_config, resolve_config_path, DiscoveryEngine};
 use tokio::net::TcpListener;
+use tokio::sync::Semaphore;
 use tracing::info;
 
 use crate::{
     api::{
-        routes::{build_router, build_static_router},
+        routes::{build_router, build_static_router, AccessPolicy},
         AppState, DiscoveryCoordinator, StaticAppState, ViewSnapshot,
     },
     observability::init_tracing,
+    serve::serve_router,
 };
 
 #[derive(Debug, Parser)]
@@ -60,6 +62,12 @@ pub enum Commands {
         /// TCP port to bind the snapshot viewer to.
         #[arg(long, default_value_t = 8080)]
         port: u16,
+        /// Explicit browser origins that may access the viewer when binding to a non-loopback host.
+        #[arg(long = "allow-origin")]
+        allow_origins: Vec<String>,
+        /// Maximum concurrent websocket clients.
+        #[arg(long, default_value_t = 64)]
+        max_websocket_connections: usize,
     },
 }
 
@@ -76,7 +84,18 @@ pub async fn run() -> Result<()> {
             snapshot,
             host,
             port,
-        } => run_serve_snapshot(snapshot, host, port).await,
+            allow_origins,
+            max_websocket_connections,
+        } => {
+            run_serve_snapshot(
+                snapshot,
+                host,
+                port,
+                allow_origins,
+                max_websocket_connections,
+            )
+            .await
+        }
     }
 }
 
@@ -116,6 +135,11 @@ async fn run_serve(
     }
 
     let bind_addr = config.server.listen_addr();
+    let access_policy = AccessPolicy::for_bind_target(
+        &config.server.host,
+        config.server.port,
+        &config.server.allowed_origins,
+    )?;
     let engine = Arc::new(DiscoveryEngine::new(
         config.discovery.clone(),
         config.sources.clone(),
@@ -124,30 +148,54 @@ async fn run_serve(
     let coordinator = Arc::new(DiscoveryCoordinator::new(
         engine,
         config.discovery.auto_discovery_interval_seconds,
+        config.discovery.manual_discovery_cooldown_seconds,
     ));
     coordinator.start();
 
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(listen_addr = %bind_addr, "lattice server listening");
 
-    let state = AppState { coordinator };
-    axum::serve(listener, build_router(state)).await?;
+    let state = AppState {
+        coordinator,
+        access_policy,
+        websocket_slots: Arc::new(Semaphore::new(config.server.max_websocket_connections)),
+    };
+    serve_router(
+        listener,
+        build_router(state),
+        std::time::Duration::from_secs(config.server.request_header_timeout_seconds.max(1)),
+    )
+    .await?;
 
     Ok(())
 }
 
-async fn run_serve_snapshot(snapshot_path: PathBuf, host: String, port: u16) -> Result<()> {
+async fn run_serve_snapshot(
+    snapshot_path: PathBuf,
+    host: String,
+    port: u16,
+    allow_origins: Vec<String>,
+    max_websocket_connections: usize,
+) -> Result<()> {
     init_tracing();
 
     let snapshot = load_snapshot(snapshot_path)?;
+    let access_policy = AccessPolicy::for_bind_target(&host, port, &allow_origins)?;
     let bind_addr = format!("{host}:{port}");
     let listener = TcpListener::bind(&bind_addr).await?;
     info!(listen_addr = %bind_addr, "lattice snapshot viewer listening");
 
     let state = StaticAppState {
         snapshot: Arc::new(snapshot),
+        access_policy,
+        websocket_slots: Arc::new(Semaphore::new(max_websocket_connections)),
     };
-    axum::serve(listener, build_static_router(state)).await?;
+    serve_router(
+        listener,
+        build_static_router(state),
+        std::time::Duration::from_secs(5),
+    )
+    .await?;
 
     Ok(())
 }
@@ -155,7 +203,7 @@ async fn run_serve_snapshot(snapshot_path: PathBuf, host: String, port: u16) -> 
 fn load_snapshot(snapshot_path: PathBuf) -> Result<ViewSnapshot> {
     let raw = std::fs::read_to_string(&snapshot_path)?;
     let snapshot = serde_json::from_str::<ViewSnapshot>(&raw)?;
-    Ok(snapshot)
+    Ok(snapshot.sanitize_for_transport())
 }
 
 #[cfg(test)]

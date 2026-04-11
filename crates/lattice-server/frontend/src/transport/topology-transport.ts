@@ -3,7 +3,8 @@ import type { TopologyStore } from '../state/topology-store';
 
 type DiscoveryRequestResponse =
   | { snapshot: unknown; status: 'started' }
-  | { status: 'busy' };
+  | { status: 'busy' }
+  | { retry_after_seconds: number; status: 'rate_limited' };
 
 export class TopologyTransport {
   #store: TopologyStore;
@@ -85,14 +86,30 @@ export class TopologyTransport {
         method: 'POST',
         headers: { Accept: 'application/json' },
       });
+      const payload = (await response.json()) as DiscoveryRequestResponse;
       if (!response.ok) {
+        if (payload.status === 'rate_limited') {
+          this.#store.setTransport(
+            this.#transportModeForConnectionState(),
+            `探索は短時間に繰り返せません。あと ${payload.retry_after_seconds} 秒ほど待ってください`
+          );
+          return;
+        }
+
         throw new Error(`HTTP ${response.status}`);
       }
 
-      const payload = (await response.json()) as DiscoveryRequestResponse;
       if (payload.status === 'started') {
         this.#store.applySnapshot(decodeViewSnapshot(payload.snapshot), 'http');
         this.connectWebSocket(true);
+        return;
+      }
+
+      if (payload.status === 'busy') {
+        this.#store.setTransport(
+          this.#transportModeForConnectionState(),
+          '別の探索が進行中です。完了後に再度お試しください'
+        );
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);

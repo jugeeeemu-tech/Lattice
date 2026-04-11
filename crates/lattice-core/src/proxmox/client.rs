@@ -1,9 +1,10 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use reqwest::{
     header::{HeaderMap, HeaderValue, AUTHORIZATION},
+    redirect::Policy,
     Client,
 };
 use serde::de::DeserializeOwned;
@@ -26,12 +27,13 @@ pub trait ProxmoxApi: Send + Sync {
 
 #[derive(Debug, Clone)]
 pub struct ProxmoxApiClient {
-    base_url: String,
+    base_url: reqwest::Url,
+    base_path_segments: Vec<String>,
     client: Client,
 }
 
 impl ProxmoxApiClient {
-    pub fn new(config: &ProxmoxSourceConfig) -> Result<Self> {
+    pub fn new(config: &ProxmoxSourceConfig, request_timeout: Duration) -> Result<Self> {
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -44,60 +46,96 @@ impl ProxmoxApiClient {
 
         let client = Client::builder()
             .default_headers(headers)
+            .connect_timeout(request_timeout)
+            .timeout(request_timeout)
+            .redirect(Policy::none())
             .danger_accept_invalid_certs(!config.tls_verify)
             .build()
             .context("failed to build proxmox HTTP client")?;
 
+        let mut base_url =
+            reqwest::Url::parse(&config.base_url).context("failed to parse proxmox base_url")?;
+        base_url.set_query(None);
+        base_url.set_fragment(None);
+        let base_path_segments = base_url
+            .path()
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+
         Ok(Self {
-            base_url: config.base_url.trim_end_matches('/').to_string(),
+            base_url,
+            base_path_segments,
             client,
         })
     }
 
-    async fn get<T>(&self, path: &str) -> Result<T>
+    async fn get<T>(&self, segments: &[&str]) -> Result<T>
     where
         T: DeserializeOwned,
     {
-        let url = format!("{}/api2/json{}", self.base_url, path);
+        let url = self.api_url(segments)?;
         let response = self
             .client
-            .get(&url)
+            .get(url.clone())
             .send()
             .await
-            .with_context(|| format!("proxmox request failed: GET {path}"))?;
+            .with_context(|| format!("proxmox request failed: GET {}", url.path()))?;
         let status = response.status();
         let body = response
             .text()
             .await
-            .with_context(|| format!("proxmox response read failed: GET {path}"))?;
+            .with_context(|| format!("proxmox response read failed: GET {}", url.path()))?;
 
         if !status.is_success() {
             let detail = body.lines().next().unwrap_or("no response body");
-            return Err(anyhow!("GET {path} returned {status}: {detail}"));
+            return Err(anyhow!("GET {} returned {status}: {detail}", url.path()));
         }
 
         let envelope = serde_json::from_str::<ApiEnvelope<T>>(&body)
-            .with_context(|| format!("failed to decode proxmox response for {path}"))?;
+            .with_context(|| format!("failed to decode proxmox response for {}", url.path()))?;
         Ok(envelope.data)
+    }
+
+    fn api_url(&self, segments: &[&str]) -> Result<reqwest::Url> {
+        let mut url = self.base_url.clone();
+        {
+            let mut path_segments = url
+                .path_segments_mut()
+                .map_err(|_| anyhow!("proxmox api root cannot be used as a base URL"))?;
+            path_segments.clear();
+            for segment in &self.base_path_segments {
+                path_segments.push(segment);
+            }
+            path_segments.push("api2");
+            path_segments.push("json");
+            for segment in segments {
+                path_segments.push(segment);
+            }
+        }
+        Ok(url)
     }
 }
 
 #[async_trait]
 impl ProxmoxApi for ProxmoxApiClient {
     async fn cluster_resources(&self) -> Result<Vec<ClusterResource>> {
-        self.get("/cluster/resources").await
+        self.get(&["cluster", "resources"]).await
     }
 
     async fn node_network(&self, node: &str) -> Result<Vec<NodeNetworkInterface>> {
-        self.get(&format!("/nodes/{node}/network")).await
+        self.get(&["nodes", node, "network"]).await
     }
 
     async fn qemu_config(&self, node: &str, vmid: u64) -> Result<GuestConfig> {
-        self.get(&format!("/nodes/{node}/qemu/{vmid}/config")).await
+        let vmid = vmid.to_string();
+        self.get(&["nodes", node, "qemu", &vmid, "config"]).await
     }
 
     async fn lxc_config(&self, node: &str, vmid: u64) -> Result<GuestConfig> {
-        self.get(&format!("/nodes/{node}/lxc/{vmid}/config")).await
+        let vmid = vmid.to_string();
+        self.get(&["nodes", node, "lxc", &vmid, "config"]).await
     }
 
     async fn qemu_agent_network_interfaces(
@@ -105,10 +143,16 @@ impl ProxmoxApi for ProxmoxApiClient {
         node: &str,
         vmid: u64,
     ) -> Result<Vec<GuestAgentNetworkInterface>> {
+        let vmid = vmid.to_string();
         let response = self
-            .get::<GuestAgentNetworkInterfacesResponse>(&format!(
-                "/nodes/{node}/qemu/{vmid}/agent/network-get-interfaces"
-            ))
+            .get::<GuestAgentNetworkInterfacesResponse>(&[
+                "nodes",
+                node,
+                "qemu",
+                &vmid,
+                "agent",
+                "network-get-interfaces",
+            ])
             .await?;
         Ok(response.result)
     }
@@ -477,12 +521,15 @@ mod tests {
             .with_state(state.clone());
 
         let addr = spawn_server(router).await;
-        let client = ProxmoxApiClient::new(&crate::config::ProxmoxSourceConfig {
-            base_url: format!("http://{addr}"),
-            token_id: "root@pam!token".to_string(),
-            token_secret: "secret".to_string(),
-            tls_verify: false,
-        })
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_secs(1),
+        )
         .unwrap();
 
         let resources = client.cluster_resources().await.unwrap();
@@ -538,12 +585,15 @@ mod tests {
         );
 
         let addr = spawn_server(router).await;
-        let client = ProxmoxApiClient::new(&crate::config::ProxmoxSourceConfig {
-            base_url: format!("http://{addr}"),
-            token_id: "root@pam!token".to_string(),
-            token_secret: "secret".to_string(),
-            tls_verify: false,
-        })
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_secs(1),
+        )
         .unwrap();
 
         let networks = client.node_network("pve").await.unwrap();
@@ -562,17 +612,144 @@ mod tests {
             get(|| async { (StatusCode::UNAUTHORIZED, "denied").into_response() }),
         );
         let addr = spawn_server(router).await;
-        let client = ProxmoxApiClient::new(&crate::config::ProxmoxSourceConfig {
-            base_url: format!("http://{addr}"),
-            token_id: "root@pam!token".to_string(),
-            token_secret: "secret".to_string(),
-            tls_verify: false,
-        })
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_secs(1),
+        )
         .unwrap();
 
         let error = client.cluster_resources().await.unwrap_err().to_string();
 
         assert!(error.contains("/cluster/resources"));
         assert!(error.contains("401"));
+    }
+
+    #[tokio::test]
+    async fn client_times_out_when_proxmox_does_not_respond() {
+        let router = Router::new().route(
+            "/api2/json/cluster/resources",
+            get(|| async {
+                tokio::time::sleep(Duration::from_millis(250)).await;
+                Json(serde_json::json!({ "data": [] }))
+            }),
+        );
+        let addr = spawn_server(router).await;
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let error = client.cluster_resources().await.unwrap_err().to_string();
+
+        assert!(error.contains("proxmox request failed"));
+    }
+
+    #[tokio::test]
+    async fn client_does_not_follow_redirects_to_other_hosts() {
+        let redirected = Arc::new(Mutex::new(false));
+        let redirected_flag = Arc::clone(&redirected);
+
+        let target_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target_addr = target_listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            if let Ok((_, _)) = target_listener.accept().await {
+                *redirected_flag.lock().await = true;
+            }
+        });
+
+        let redirect_router = Router::new().route(
+            "/api2/json/cluster/resources",
+            get(move || async move {
+                (
+                    StatusCode::FOUND,
+                    [(
+                        reqwest::header::LOCATION.as_str(),
+                        format!("http://{target_addr}/api2/json/cluster/resources"),
+                    )],
+                )
+                    .into_response()
+            }),
+        );
+        let redirect_addr = spawn_server(redirect_router).await;
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{redirect_addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let error = client.cluster_resources().await.unwrap_err().to_string();
+
+        assert!(error.contains("302"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(!*redirected.lock().await);
+    }
+
+    #[tokio::test]
+    async fn client_percent_encodes_dynamic_path_segments() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let seen_request_line = Arc::new(Mutex::new(String::new()));
+        let seen_request_line_writer = Arc::clone(&seen_request_line);
+        tokio::spawn(async move {
+            if let Ok((stream, _)) = listener.accept().await {
+                let mut buffer = [0u8; 2048];
+                let size = stream
+                    .readable()
+                    .await
+                    .and_then(|_| stream.try_read(&mut buffer))
+                    .unwrap();
+                let request = String::from_utf8_lossy(&buffer[..size]).to_string();
+                *seen_request_line_writer.lock().await =
+                    request.lines().next().unwrap_or("").to_string();
+                let body = br#"{"data":[]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                    body.len(),
+                    String::from_utf8_lossy(body)
+                );
+                let _ = stream.writable().await;
+                let _ = stream.try_write(response.as_bytes());
+            }
+        });
+
+        let client = ProxmoxApiClient::new(
+            &crate::config::ProxmoxSourceConfig {
+                base_url: format!("http://{addr}"),
+                token_id: "root@pam!token".to_string(),
+                token_secret: "secret".to_string(),
+                tls_verify: false,
+            },
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        let _ = client.node_network("node/a?x=1").await.unwrap();
+        let request_line = seen_request_line.lock().await.clone();
+
+        assert!(
+            request_line.starts_with("GET /api2/json/nodes/node%2Fa%3Fx=1/network "),
+            "unexpected request line: {request_line}"
+        );
+        assert!(
+            !request_line.contains("/nodes/node/a?x=1/network"),
+            "dynamic segment escaped into request path: {request_line}"
+        );
     }
 }

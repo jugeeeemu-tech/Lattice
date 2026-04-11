@@ -6,8 +6,8 @@ use async_trait::async_trait;
 use crate::{
     collectors::{Collector, CollectorContext, GraphPatch},
     graph::{Device, DeviceRole},
-        snmp::{
-            oids::{
+    snmp::{
+        oids::{
             IF_DESCR, IF_NAME, IP_AD_ENT_ADDR, IP_AD_ENT_IF_IDX, IP_CIDR_ROUTE_IF_INDEX,
             IP_ROUTE_IF_INDEX, IP_ROUTE_NEXT_HOP, SYS_DESCR, SYS_NAME,
         },
@@ -61,14 +61,14 @@ impl Collector for RouteCollector {
         let ip_addrs = table_by_index(session.walk(IP_AD_ENT_ADDR).await?, IP_AD_ENT_ADDR);
         let ip_if_idxs = table_by_index(session.walk(IP_AD_ENT_IF_IDX).await?, IP_AD_ENT_IF_IDX);
 
-        let default_route =
-            match resolve_cidr_default_route(session, &if_names, &if_descrs).await? {
-                RouteResolution::Resolved(route) => Some(route),
-                RouteResolution::Ambiguous => None,
-                RouteResolution::RetryLegacy => {
-                    resolve_legacy_default_route(session, &if_names, &if_descrs).await?
-                }
-            };
+        let default_route = match resolve_cidr_default_route(session, &if_names, &if_descrs).await?
+        {
+            RouteResolution::Resolved(route) => Some(route),
+            RouteResolution::Ambiguous => None,
+            RouteResolution::RetryLegacy => {
+                resolve_legacy_default_route(session, &if_names, &if_descrs).await?
+            }
+        };
         let upstream_interface = default_route
             .as_ref()
             .map(|route| route.interface_name.clone());
@@ -264,9 +264,7 @@ fn routed_interface_names(
 
 fn is_non_routed_interface(interface_name: &str) -> bool {
     let lowered = interface_name.to_ascii_lowercase();
-    lowered.starts_with("lo")
-        || lowered.starts_with("loopback")
-        || lowered.starts_with("null")
+    lowered.starts_with("lo") || lowered.starts_with("loopback") || lowered.starts_with("null")
 }
 
 fn is_default_cidr_route(suffix: &str) -> bool {
@@ -482,9 +480,18 @@ mod tests {
     #[test]
     fn keeps_loopback_and_null_interfaces_out_of_routed_interface_signal() {
         let ip_addrs = HashMap::from([
-            ("192.168.1.1".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 1, 1))),
-            ("192.168.10.2".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 10, 2))),
-            ("127.0.0.1".to_string(), SnmpValue::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1))),
+            (
+                "192.168.1.1".to_string(),
+                SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 1, 1)),
+            ),
+            (
+                "192.168.10.2".to_string(),
+                SnmpValue::IpAddress(std::net::Ipv4Addr::new(192, 168, 10, 2)),
+            ),
+            (
+                "127.0.0.1".to_string(),
+                SnmpValue::IpAddress(std::net::Ipv4Addr::new(127, 0, 0, 1)),
+            ),
         ]);
         let ip_if_idxs = HashMap::from([
             ("192.168.1.1".to_string(), SnmpValue::Integer(646)),
@@ -492,17 +499,23 @@ mod tests {
             ("127.0.0.1".to_string(), SnmpValue::Integer(949)),
         ]);
         let if_names = HashMap::from([
-            ("644".to_string(), SnmpValue::OctetString(b"GigaEthernet0.0".to_vec())),
-            ("646".to_string(), SnmpValue::OctetString(b"GigaEthernet2.0".to_vec())),
-            ("949".to_string(), SnmpValue::OctetString(b"Loopback0.0".to_vec())),
+            (
+                "644".to_string(),
+                SnmpValue::OctetString(b"GigaEthernet0.0".to_vec()),
+            ),
+            (
+                "646".to_string(),
+                SnmpValue::OctetString(b"GigaEthernet2.0".to_vec()),
+            ),
+            (
+                "949".to_string(),
+                SnmpValue::OctetString(b"Loopback0.0".to_vec()),
+            ),
         ]);
 
         assert_eq!(
             routed_interface_names(&ip_addrs, &ip_if_idxs, &if_names, &HashMap::new()),
-            BTreeSet::from([
-                "GigaEthernet0.0".to_string(),
-                "GigaEthernet2.0".to_string(),
-            ])
+            BTreeSet::from(["GigaEthernet0.0".to_string(), "GigaEthernet2.0".to_string(),])
         );
     }
 

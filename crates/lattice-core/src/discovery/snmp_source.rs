@@ -268,6 +268,7 @@ mod tests {
                 retries: 0,
                 concurrent_devices: 1,
                 auto_discovery_interval_seconds: 60,
+                manual_discovery_cooldown_seconds: 10,
             },
             SnmpSourceConfig {
                 version: "2c".to_string(),
@@ -318,6 +319,9 @@ mod tests {
 
     #[test]
     fn keeps_unknown_for_unrecognized_text() {
-        assert_eq!(infer_device_role(None, Some("appliance")), DeviceRole::Unknown);
+        assert_eq!(
+            infer_device_role(None, Some("appliance")),
+            DeviceRole::Unknown
+        );
     }
 }

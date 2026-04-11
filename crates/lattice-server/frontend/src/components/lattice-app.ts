@@ -286,9 +286,9 @@ export class LatticeApp extends LitElement {
   #discoveryTooltip(): { title: string; body: string } {
     const discoveryState = this.#effectiveDiscoveryState();
 
-    if (discoveryState === 'failed') {
+    if (discoveryState === 'failed' || discoveryState === 'partial') {
       return {
-        title: '再探索',
+        title: discoveryState === 'partial' ? '一部失敗' : '再探索',
         body: this.state.discoveryMessage ?? '探索を再実行します。',
       };
     }
@@ -310,6 +310,9 @@ export class LatticeApp extends LitElement {
     const discoveryState = this.#effectiveDiscoveryState();
     if (discoveryState === 'failed') {
       return '探索を再実行';
+    }
+    if (discoveryState === 'partial') {
+      return '一部の探索で問題があります';
     }
     if (discoveryState === 'discovering' || discoveryState === 'loading') {
       return '探索中';

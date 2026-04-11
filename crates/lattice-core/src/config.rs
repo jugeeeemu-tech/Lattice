@@ -31,6 +31,12 @@ pub struct ServerConfig {
     pub host: String,
     #[serde(default = "default_port")]
     pub port: u16,
+    #[serde(default)]
+    pub allowed_origins: Vec<String>,
+    #[serde(default = "default_max_websocket_connections")]
+    pub max_websocket_connections: usize,
+    #[serde(default = "default_request_header_timeout_seconds")]
+    pub request_header_timeout_seconds: u64,
 }
 
 impl Default for ServerConfig {
@@ -38,6 +44,9 @@ impl Default for ServerConfig {
         Self {
             host: default_host(),
             port: default_port(),
+            allowed_origins: Vec::new(),
+            max_websocket_connections: default_max_websocket_connections(),
+            request_header_timeout_seconds: default_request_header_timeout_seconds(),
         }
     }
 }
@@ -61,6 +70,8 @@ pub struct DiscoveryConfig {
     pub concurrent_devices: usize,
     #[serde(default = "default_auto_discovery_interval_seconds")]
     pub auto_discovery_interval_seconds: u64,
+    #[serde(default = "default_manual_discovery_cooldown_seconds")]
+    pub manual_discovery_cooldown_seconds: u64,
 }
 
 impl Default for DiscoveryConfig {
@@ -71,6 +82,7 @@ impl Default for DiscoveryConfig {
             retries: default_retries(),
             concurrent_devices: default_concurrent_devices(),
             auto_discovery_interval_seconds: default_auto_discovery_interval_seconds(),
+            manual_discovery_cooldown_seconds: default_manual_discovery_cooldown_seconds(),
         }
     }
 }
@@ -278,6 +290,10 @@ const fn default_auto_discovery_interval_seconds() -> u64 {
     60
 }
 
+const fn default_manual_discovery_cooldown_seconds() -> u64 {
+    10
+}
+
 fn default_snmp_version() -> String {
     "2c".to_string()
 }
@@ -288,6 +304,14 @@ const fn default_tls_verify() -> bool {
 
 fn default_host() -> String {
     "127.0.0.1".to_string()
+}
+
+const fn default_max_websocket_connections() -> usize {
+    64
+}
+
+const fn default_request_header_timeout_seconds() -> u64 {
+    5
 }
 
 #[cfg(test)]
@@ -319,8 +343,12 @@ mod tests {
 
         assert_eq!(config.server.host, "127.0.0.1");
         assert_eq!(config.server.port, 8080);
+        assert!(config.server.allowed_origins.is_empty());
+        assert_eq!(config.server.max_websocket_connections, 64);
+        assert_eq!(config.server.request_header_timeout_seconds, 5);
         assert_eq!(config.discovery.max_hops, 10);
         assert_eq!(config.discovery.auto_discovery_interval_seconds, 60);
+        assert_eq!(config.discovery.manual_discovery_cooldown_seconds, 10);
         assert!(config.topology_hints.links.is_empty());
         assert_eq!(config.sources.len(), 2);
 
@@ -347,8 +375,12 @@ mod tests {
         let json = config.as_json().unwrap();
 
         assert_eq!(json["server"]["host"], "127.0.0.1");
+        assert_eq!(json["server"]["allowed_origins"], serde_json::json!([]));
+        assert_eq!(json["server"]["max_websocket_connections"], 64);
+        assert_eq!(json["server"]["request_header_timeout_seconds"], 5);
         assert_eq!(json["discovery"]["max_hops"], 10);
         assert_eq!(json["discovery"]["auto_discovery_interval_seconds"], 60);
+        assert_eq!(json["discovery"]["manual_discovery_cooldown_seconds"], 10);
         assert_eq!(json["topology_hints"]["links"], serde_json::json!([]));
         assert_eq!(json["sources"][0]["kind"], "snmp");
         assert_eq!(json["sources"][1]["kind"], "proxmox");
@@ -379,6 +411,9 @@ seeds:
     fn default_server_config_builds_listen_addr() {
         let config = ServerConfig::default();
         assert_eq!(config.listen_addr(), "127.0.0.1:8080");
+        assert!(config.allowed_origins.is_empty());
+        assert_eq!(config.max_websocket_connections, 64);
+        assert_eq!(config.request_header_timeout_seconds, 5);
     }
 
     #[test]

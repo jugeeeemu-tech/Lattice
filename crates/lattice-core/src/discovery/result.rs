@@ -53,6 +53,8 @@ pub struct DiscoveryResult {
     pub tree: DiscoveryTree,
     #[serde(default)]
     pub relations: DiscoveryRelations,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
     pub discovered_at: DateTime<Utc>,
 }
 
@@ -76,6 +78,7 @@ mod tests {
                 }],
             },
             relations: DiscoveryRelations::default(),
+            warnings: Vec::new(),
             discovered_at: Utc::now(),
         };
 

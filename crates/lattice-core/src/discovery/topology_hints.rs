@@ -65,10 +65,7 @@ fn resolve_endpoint(
     Some((device.id.clone(), interface))
 }
 
-fn endpoint_matches_device(
-    device: &crate::Device,
-    endpoint: &TopologyHintEndpoint,
-) -> bool {
+fn endpoint_matches_device(device: &crate::Device, endpoint: &TopologyHintEndpoint) -> bool {
     let device_name = endpoint.device.trim();
     if device_name.is_empty() {
         return false;
@@ -118,10 +115,12 @@ fn resolve_interface_name(
                 None
             }
         }
-        (None, None) => device
-            .upstream_interface
-            .clone()
-            .or_else(|| device.interfaces.first().map(|interface| interface.if_name.clone())),
+        (None, None) => device.upstream_interface.clone().or_else(|| {
+            device
+                .interfaces
+                .first()
+                .map(|interface| interface.if_name.clone())
+        }),
     }
 }
 
@@ -156,7 +155,8 @@ fn interface_matches_pattern(actual: &str, pattern: &str) -> bool {
 }
 
 fn normalize_interface_name(value: &str) -> String {
-    value.to_ascii_lowercase()
+    value
+        .to_ascii_lowercase()
         .replace(' ', "")
         .replace("gigabitethernet", "ge")
         .replace("gigaethernet", "ge")
@@ -272,7 +272,13 @@ mod tests {
                 ),
                 (
                     "bridge-1".to_string(),
-                    device("bridge-1", "vmbr0", "Proxmox bridge vmbr0", &["vmbr0", "enp3s0"], None),
+                    device(
+                        "bridge-1",
+                        "vmbr0",
+                        "Proxmox bridge vmbr0",
+                        &["vmbr0", "enp3s0"],
+                        None,
+                    ),
                 ),
             ]),
             links: Vec::new(),
@@ -304,7 +310,10 @@ mod tests {
         assert_eq!(topology.links.len(), 1);
         let link = &topology.links[0];
         assert_eq!(link.protocol, LinkProtocol::TopologyHint);
-        let interfaces = [link.local_interface.as_str(), link.remote_interface.as_str()];
+        let interfaces = [
+            link.local_interface.as_str(),
+            link.remote_interface.as_str(),
+        ];
         assert!(interfaces.contains(&"GigaEthernet2.0"));
         assert!(interfaces.contains(&"enp3s0"));
     }
@@ -325,7 +334,13 @@ mod tests {
                 ),
                 (
                     "bridge-1".to_string(),
-                    device("bridge-1", "vmbr0", "Proxmox bridge vmbr0", &["enp3s0"], None),
+                    device(
+                        "bridge-1",
+                        "vmbr0",
+                        "Proxmox bridge vmbr0",
+                        &["enp3s0"],
+                        None,
+                    ),
                 ),
             ]),
             links: vec![crate::Link {

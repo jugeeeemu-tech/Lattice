@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
@@ -31,8 +31,9 @@ pub fn build_discovery_sources(
                 )));
             }
             SourceConfig::Proxmox(config) => {
+                let request_timeout = Duration::from_secs(discovery.timeout_seconds.max(1));
                 let client = Arc::new(
-                    ProxmoxApiClient::new(config)
+                    ProxmoxApiClient::new(config, request_timeout)
                         .with_context(|| "failed to build proxmox api client")?,
                 );
                 built_sources.push(Arc::new(ProxmoxDiscoverySource::new(client)));
