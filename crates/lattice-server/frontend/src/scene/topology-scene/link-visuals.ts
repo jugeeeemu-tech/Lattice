@@ -310,9 +310,9 @@ function createHeadTexture(): CanvasTexture {
   canvas.height = size;
   const context = canvas.getContext('2d');
   if (!context) {
-    const fallback = new CanvasTexture(canvas);
-    fallback.colorSpace = SRGBColorSpace;
-    return fallback;
+    const emptyTexture = new CanvasTexture(canvas);
+    emptyTexture.colorSpace = SRGBColorSpace;
+    return emptyTexture;
   }
 
   const gradient = context.createRadialGradient(size * 0.5, size * 0.5, size * 0.08, size * 0.5, size * 0.5, size * 0.5);

@@ -23,7 +23,7 @@ describe('buildTopologyModel', () => {
     ]);
     expect(
       entryMetaText(model, model.sidebarEntryById.get('tree:seed:192.0.2.1/guest-app#1')!)
-    ).toBe('Server · VM · pve-01 上');
+    ).toBe('サーバー · VM · pve-01 上');
     expect(Array.from(model.visibleLinkIds)).toEqual(['link-core-pve', 'link-pve-guest']);
   });
 
@@ -772,7 +772,7 @@ describe('buildTopologyModel', () => {
     const snapshot = await loadViewSnapshotFixture('populated');
     const vmSummary = deviceSummary(snapshot.devices.find((device) => device.id === 'guest-app')!);
 
-    expect(vmSummary).toEqual(['Server', 'VM', 'Virtual', 'pve-01 上']);
+    expect(vmSummary).toEqual(['サーバー', 'VM', '仮想', 'pve-01 上']);
 
     const containerSummary = deviceSummary({
       ...snapshot.devices.find((device) => device.id === 'guest-app')!,
@@ -780,6 +780,6 @@ describe('buildTopologyModel', () => {
       label: 'ct-app-01',
     });
 
-    expect(containerSummary).toEqual(['Server', 'Container', 'Virtual', 'pve-01 上']);
+    expect(containerSummary).toEqual(['サーバー', 'コンテナ', '仮想', 'pve-01 上']);
   });
 });

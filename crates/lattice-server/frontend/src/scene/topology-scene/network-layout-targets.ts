@@ -93,8 +93,8 @@ function rootForwardAxis(rootId: string, rootAnchor: Vector3, rootAnchors: Map<s
 
   const outward = rootAnchor.clone().sub(centroid);
   if (outward.lengthSq() < 0.0001) {
-    const fallbackAngle = hash01(`root-forward:${rootId}`) * Math.PI * 2;
-    return new Vector3(Math.cos(fallbackAngle), 0, Math.sin(fallbackAngle));
+    const seedAngle = hash01(`root-forward:${rootId}`) * Math.PI * 2;
+    return new Vector3(Math.cos(seedAngle), 0, Math.sin(seedAngle));
   }
   return outward.normalize();
 }
@@ -874,7 +874,7 @@ export function placeDevicesWithinCluster(
   return positions;
 }
 
-function computeLegacyRelationTargets(
+function computeRelationSeedTargets(
   devices: ViewDevice[],
   state: TopologyStoreState
 ): Map<string, Vector3> {
@@ -1128,7 +1128,7 @@ export function computeNetworkLayoutTargets(
     return new Map();
   }
 
-  const legacyTargets = computeLegacyRelationTargets(devices, state);
+  const relationTargets = computeRelationSeedTargets(devices, state);
   const visibleIds = new Set(devices.map((device) => device.id));
   const deviceById = new Map(devices.map((device) => [device.id, device]));
   const visibleLinks = state.snapshot.links.filter(
@@ -1156,7 +1156,7 @@ export function computeNetworkLayoutTargets(
     parentIdsByDeviceId: parentsByDeviceId,
   });
   if (clusters.length === 0) {
-    return legacyTargets;
+    return relationTargets;
   }
 
   const clusterCentersById = placeClusterCenters(clusters, layoutGraph, deviceById);
@@ -1200,7 +1200,7 @@ export function computeNetworkLayoutTargets(
     }
   }
 
-  const anchorByDeviceId = new Map<string, Vector3>(legacyTargets);
+  const anchorByDeviceId = new Map<string, Vector3>(relationTargets);
   const sameClusterDepthMinDistanceByPair = new Map<string, number>();
   const sameClusterDepthProtectedDeviceIds = new Set<string>();
   for (const device of devices) {
@@ -1223,14 +1223,10 @@ export function computeNetworkLayoutTargets(
       combined.divideScalar(totalWeight);
     }
 
-    const fallback = legacyTargets.get(device.id);
     const depth = layoutGraph.depthByDeviceId.get(device.id) ?? 0;
     const defaultDepthY = -depth * depthSpacing;
-    const blended = fallback
-      ? fallback.clone().multiplyScalar(0.15).add(combined.multiplyScalar(0.85))
-      : combined;
-    blended.y = defaultDepthY;
-    anchorByDeviceId.set(device.id, blended);
+    combined.y = defaultDepthY;
+    anchorByDeviceId.set(device.id, combined);
   }
 
   for (const cluster of clusters) {

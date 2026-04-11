@@ -44,7 +44,7 @@ export function guestKindLabel(guestKind: GuestKind | null | undefined): string 
     case 'vm':
       return 'VM';
     case 'container':
-      return 'Container';
+      return 'コンテナ';
     default:
       return null;
   }

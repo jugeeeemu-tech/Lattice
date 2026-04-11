@@ -77,7 +77,7 @@ export class LatticeSidebarTree extends LitElement {
       <div
         class="tree"
         role="tree"
-        aria-label="scene navigation"
+        aria-label="構成ツリー"
         @pointerleave=${this.#handlePointerLeave}
       >
         ${this.state.model.treeRootEntryIds.length > 0
@@ -140,7 +140,7 @@ export class LatticeSidebarTree extends LitElement {
             class=${`tree-toggle ${hasChildren && expanded ? 'is-open' : ''} ${
               hasChildren ? '' : 'tree-toggle--leaf'
             }`}
-            aria-label=${hasChildren ? (expanded ? '折りたたむ' : '展開する') : 'leaf'}
+            aria-label=${hasChildren ? (expanded ? '折りたたむ' : '展開する') : '子要素なし'}
             ?disabled=${!hasChildren}
             @click=${(event: MouseEvent) => this.#handleToggleClick(event, entry.id)}
           ></button>
@@ -151,7 +151,7 @@ export class LatticeSidebarTree extends LitElement {
           >
             ${this.#renderDeviceMark(device)}
             <span class="tree-row__copy">
-              <span class="tree-row__name">${entry.label || device.label || 'Unknown'}</span>
+              <span class="tree-row__name">${entry.label || device.label || '不明'}</span>
               <span class="tree-row__meta">${entryMetaText(this.state.model, entry)}</span>
             </span>
           </button>

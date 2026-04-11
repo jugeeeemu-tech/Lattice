@@ -10,17 +10,17 @@ import type {
 import { deviceGuestKindLabel } from './device-visuals';
 
 const ROLE_LABELS: Record<DeviceRole, string> = {
-  bridge: 'Bridge',
-  router: 'Router',
-  server: 'Server',
-  switch: 'Switch',
-  unknown: 'Unknown',
+  bridge: 'ブリッジ',
+  router: 'ルーター',
+  server: 'サーバー',
+  switch: 'スイッチ',
+  unknown: '不明',
 };
 
 const DEPLOYMENT_LABELS: Record<DeploymentType, string> = {
-  physical: 'Physical',
-  unknown: 'Unknown deployment',
-  virtual: 'Virtual',
+  physical: '物理',
+  unknown: '配置未設定',
+  virtual: '仮想',
 };
 
 const DEPLOYMENT_COLORS: Record<DeploymentType, number> = {
@@ -31,8 +31,8 @@ const DEPLOYMENT_COLORS: Record<DeploymentType, number> = {
 
 const PROTOCOL_LABELS: Record<string, string> = {
   lldp: 'LLDP',
-  proxmox_guest_link: 'Proxmox guest',
-  proxmox_uplink: 'Proxmox uplink',
+  proxmox_guest_link: 'ゲスト接続',
+  proxmox_uplink: 'ホスト接続',
 };
 
 export interface SidebarEntry {
@@ -122,8 +122,8 @@ function compareByLabel(
   left: { id: string; label: string } | null | undefined,
   right: { id: string; label: string } | null | undefined
 ): number {
-  const leftLabel = normalizeText(left?.label, 'Unknown').toLowerCase();
-  const rightLabel = normalizeText(right?.label, 'Unknown').toLowerCase();
+  const leftLabel = normalizeText(left?.label, '不明').toLowerCase();
+  const rightLabel = normalizeText(right?.label, '不明').toLowerCase();
   if (leftLabel === rightLabel) {
     return normalizeText(left?.id).localeCompare(normalizeText(right?.id));
   }
@@ -452,7 +452,7 @@ function buildSidebarModel(
       device_id: row.device_id,
       host_label: device?.host_label ?? null,
       id: entryId,
-      label: row.label || device?.label || 'Unknown',
+      label: row.label || device?.label || '不明',
       source: 'tree',
       tree_row_id: row.id,
     };
@@ -492,7 +492,7 @@ function buildSidebarModel(
           device_id: device.id,
           host_label: device.host_label ?? null,
           id: `flat:${device.id}`,
-          label: device.label || 'Unknown',
+          label: device.label || '不明',
           source: 'flat',
           tree_row_id: rowModel.primaryRowByDevice.get(device.id) ?? null,
         })
@@ -722,10 +722,10 @@ export function buildEmptyState(
       } satisfies Record<DiscoveryState, string>)[status],
     title:
       ({
-        discovering: 'Discovery is running',
-        failed: 'Discovery failed',
-        loading: 'Topology is warming up',
-        ready: 'No devices to render',
+        discovering: '探索を実行しています',
+        failed: '探索に失敗しました',
+        loading: '構成を準備しています',
+        ready: '表示できる機器がありません',
       } satisfies Record<DiscoveryState, string>)[status],
   };
 }
@@ -1304,7 +1304,7 @@ export function buildHoverCardForEntry(
 
   return {
     body: deviceSummary(device).join(' · '),
-    title: entry.label || device.label || 'Unknown',
+    title: entry.label || device.label || '不明',
     x: 20,
     y: 20,
   };
@@ -1326,7 +1326,7 @@ export function buildHoverCardForDevice(
 
   return {
     body: deviceSummary(device).join(' · '),
-    title: device.label || device.identity_keys.sys_name || 'Unknown',
+    title: device.label || device.identity_keys.sys_name || '不明',
     x: pointer.x + 18,
     y: pointer.y + 18,
   };

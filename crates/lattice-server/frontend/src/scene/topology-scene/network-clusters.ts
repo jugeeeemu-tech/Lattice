@@ -285,8 +285,13 @@ export function buildNetworkLayoutClusters(
       for (const networkCidr of link.network_cidrs) {
         const directMatches = clusterIdsByDeviceAndCidr.get(endpointId)?.get(networkCidr) ?? [];
         const remoteEndpointId = endpointIds[0] === endpointId ? endpointIds[1] : endpointIds[0];
-        const fallbackMatches = clusterIdsByDeviceAndCidr.get(remoteEndpointId)?.get(networkCidr) ?? [];
-        const matchedClusterIds = (directMatches.length > 0 ? directMatches : fallbackMatches).slice().sort();
+        const oppositeEndpointMatches =
+          clusterIdsByDeviceAndCidr.get(remoteEndpointId)?.get(networkCidr) ?? [];
+        const matchedClusterIds = (
+          directMatches.length > 0 ? directMatches : oppositeEndpointMatches
+        )
+          .slice()
+          .sort();
         if (matchedClusterIds.length === 0) {
           continue;
         }
