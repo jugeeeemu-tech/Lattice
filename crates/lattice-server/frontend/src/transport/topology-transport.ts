@@ -8,7 +8,9 @@ type DiscoveryRequestResponse =
 
 export class TopologyTransport {
   #store: TopologyStore;
-  #fetchInFlight = false;
+  #activeRefreshToken: symbol | null = null;
+  #appliedSnapshotVersion = 0;
+  #lifecycleVersion = 0;
   #reconnectTimer: number | null = null;
   #ws: WebSocket | null = null;
   #wsReconnectDelay = 1000;
@@ -20,6 +22,7 @@ export class TopologyTransport {
 
   start(): void {
     this.#stopped = false;
+    this.#lifecycleVersion += 1;
     this.#store.setTransport('connecting', 'スナップショットを読み込んでいます');
     void this.refreshSnapshot({
       reportTransportFailure: true,
@@ -30,6 +33,8 @@ export class TopologyTransport {
 
   stop(): void {
     this.#stopped = true;
+    this.#lifecycleVersion += 1;
+    this.#activeRefreshToken = null;
     if (this.#reconnectTimer) {
       window.clearTimeout(this.#reconnectTimer);
       this.#reconnectTimer = null;
@@ -48,11 +53,14 @@ export class TopologyTransport {
       transportFailureNote?: string;
     } = {}
   ): Promise<boolean> {
-    if (this.#fetchInFlight) {
+    if (this.#activeRefreshToken) {
       return false;
     }
 
-    this.#fetchInFlight = true;
+    const refreshToken = Symbol('refresh');
+    this.#activeRefreshToken = refreshToken;
+    const lifecycleVersionAtStart = this.#lifecycleVersion;
+    const snapshotVersionAtStart = this.#appliedSnapshotVersion;
 
     try {
       const response = await fetch('/api/topology', {
@@ -64,9 +72,25 @@ export class TopologyTransport {
       }
 
       const payload = await response.json();
-      this.#store.applySnapshot(decodeViewSnapshot(payload), 'http');
+      if (!this.#isLifecycleCurrent(lifecycleVersionAtStart)) {
+        return false;
+      }
+
+      if (this.#appliedSnapshotVersion !== snapshotVersionAtStart) {
+        return false;
+      }
+
+      this.#applySnapshot(decodeViewSnapshot(payload), 'http');
       return true;
     } catch (error) {
+      if (!this.#isLifecycleCurrent(lifecycleVersionAtStart)) {
+        return false;
+      }
+
+      if (this.#appliedSnapshotVersion !== snapshotVersionAtStart) {
+        return false;
+      }
+
       if (options.reportTransportFailure) {
         const message = error instanceof Error ? error.message : String(error);
         this.#store.setTransport(
@@ -76,17 +100,34 @@ export class TopologyTransport {
       }
       return false;
     } finally {
-      this.#fetchInFlight = false;
+      if (this.#activeRefreshToken === refreshToken) {
+        this.#activeRefreshToken = null;
+      }
     }
   }
 
   async requestDiscovery(): Promise<void> {
+    const lifecycleVersionAtStart = this.#lifecycleVersion;
+    const snapshotVersionAtStart = this.#appliedSnapshotVersion;
+
     try {
       const response = await fetch('/api/discover', {
         method: 'POST',
         headers: { Accept: 'application/json' },
       });
+      if (!this.#isLifecycleCurrent(lifecycleVersionAtStart)) {
+        return;
+      }
+
       const payload = (await response.json()) as DiscoveryRequestResponse;
+      if (!this.#isLifecycleCurrent(lifecycleVersionAtStart)) {
+        return;
+      }
+
+      if (this.#appliedSnapshotVersion !== snapshotVersionAtStart) {
+        return;
+      }
+
       if (!response.ok) {
         if (payload.status === 'rate_limited') {
           this.#store.setTransport(
@@ -100,8 +141,8 @@ export class TopologyTransport {
       }
 
       if (payload.status === 'started') {
-        this.#store.applySnapshot(decodeViewSnapshot(payload.snapshot), 'http');
-        this.connectWebSocket(true);
+        this.#applySnapshot(decodeViewSnapshot(payload.snapshot), 'http');
+        this.connectWebSocket();
         return;
       }
 
@@ -112,6 +153,14 @@ export class TopologyTransport {
         );
       }
     } catch (error) {
+      if (!this.#isLifecycleCurrent(lifecycleVersionAtStart)) {
+        return;
+      }
+
+      if (this.#appliedSnapshotVersion !== snapshotVersionAtStart) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       this.#store.setTransport(
         this.#transportModeForConnectionState(),
@@ -136,8 +185,10 @@ export class TopologyTransport {
     }
 
     if (force && this.#ws) {
-      if (this.#ws.readyState < WebSocket.CLOSING) {
-        this.#ws.close();
+      const previousSocket = this.#ws;
+      this.#ws = null;
+      if (previousSocket.readyState < WebSocket.CLOSING) {
+        previousSocket.close();
       }
     }
 
@@ -147,6 +198,10 @@ export class TopologyTransport {
     this.#store.setTransport('connecting', 'ライブ更新へ接続しています');
 
     socket.addEventListener('open', () => {
+      if (this.#ws !== socket) {
+        return;
+      }
+
       if (this.#reconnectTimer) {
         window.clearTimeout(this.#reconnectTimer);
         this.#reconnectTimer = null;
@@ -156,9 +211,13 @@ export class TopologyTransport {
     });
 
     socket.addEventListener('message', (event) => {
+      if (this.#ws !== socket) {
+        return;
+      }
+
       try {
         const payload = JSON.parse(event.data as string);
-        this.#store.applySnapshot(decodeViewSnapshot(payload), 'ws');
+        this.#applySnapshot(decodeViewSnapshot(payload), 'ws');
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         this.#handleSocketFailure(socket, `ライブ更新の受信内容を解釈できません: ${message}`);
@@ -166,8 +225,13 @@ export class TopologyTransport {
     });
 
     socket.addEventListener('close', () => {
-      if (this.#ws === socket) {
+      const isActiveSocket = this.#ws === socket;
+      if (isActiveSocket) {
         this.#ws = null;
+      }
+
+      if (!isActiveSocket) {
+        return;
       }
 
       if (this.#stopped) {
@@ -183,6 +247,10 @@ export class TopologyTransport {
     });
 
     socket.addEventListener('error', () => {
+      if (this.#ws !== socket) {
+        return;
+      }
+
       this.#store.setTransport(
         this.#ws?.readyState === WebSocket.OPEN ? 'websocket' : 'connecting',
         'ライブ更新で通信エラーが発生しました'
@@ -218,5 +286,14 @@ export class TopologyTransport {
     }
 
     return this.#ws?.readyState === WebSocket.OPEN ? 'websocket' : 'connecting';
+  }
+
+  #applySnapshot(snapshot: ReturnType<typeof decodeViewSnapshot>, source: 'http' | 'ws'): void {
+    this.#appliedSnapshotVersion += 1;
+    this.#store.applySnapshot(snapshot, source);
+  }
+
+  #isLifecycleCurrent(version: number): boolean {
+    return !this.#stopped && this.#lifecycleVersion === version;
   }
 }

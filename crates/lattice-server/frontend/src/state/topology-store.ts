@@ -324,6 +324,10 @@ export class TopologyStore {
     } else if (this.#hoveredDeviceId) {
       const entryIds = this.#model.entryIdsByDeviceId.get(this.#hoveredDeviceId) ?? [];
       if (this.#hoveredEntryId && !entryIds.includes(this.#hoveredEntryId)) {
+        if (this.#hoverSource === 'tree') {
+          this.#clearHoverState();
+          return;
+        }
         this.#hoveredEntryId = null;
       }
       this.#hoveredRowId = preferredRowForDevice(this.#model, this.#hoveredDeviceId);
@@ -338,7 +342,7 @@ export class TopologyStore {
       (!this.#snapshot.links.some((link) => link.id === this.#hoveredLinkId) ||
         !this.#model.visibleLinkIds.has(this.#hoveredLinkId))
     ) {
-      this.#hoveredLinkId = null;
+      this.#clearHoverState();
     }
   }
 

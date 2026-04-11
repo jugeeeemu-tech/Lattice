@@ -97,4 +97,69 @@ describe('TopologyStore', () => {
     expect(state.deviceCount).toBe(snapshot.devices.length + 1);
     expect(state.visibleLinkCount).toBe(snapshot.links.length + 1);
   });
+
+  it('clears scene link hover state when the hovered link disappears after a snapshot refresh', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const store = new TopologyStore();
+    const hoveredLinkId = snapshot.links[0]?.id;
+
+    expect(hoveredLinkId).toBeTruthy();
+
+    store.applySnapshot(snapshot, 'http');
+    store.hoverSceneLink(hoveredLinkId!);
+
+    const hoveredState = store.getState();
+    expect(hoveredState.hoverSource).toBe('scene');
+    expect(hoveredState.hoveredLinkId).toBe(hoveredLinkId);
+
+    store.applySnapshot(
+      {
+        ...snapshot,
+        links: snapshot.links.filter((link) => link.id !== hoveredLinkId),
+      },
+      'ws'
+    );
+
+    const refreshedState = store.getState();
+    expect(refreshedState.hoveredLinkId).toBeNull();
+    expect(refreshedState.hoverSource).toBeNull();
+    expect(refreshedState.hoverCard).toBeNull();
+  });
+
+  it('clears tree hover state when the hovered entry disappears even if the device still exists', async () => {
+    const snapshot = await loadViewSnapshotFixture('populated');
+    const store = new TopologyStore();
+    const hoveredEntryId = 'tree:seed:192.0.2.1/guest-app#1';
+
+    store.applySnapshot(snapshot, 'http');
+    store.hoverEntry(hoveredEntryId);
+
+    const hoveredState = store.getState();
+    expect(hoveredState.hoverSource).toBe('tree');
+    expect(hoveredState.hoveredEntryId).toBe(hoveredEntryId);
+    expect(hoveredState.hoveredDeviceId).toBe('guest-app');
+
+    const refreshedSnapshot = {
+      ...snapshot,
+      tree_rows: snapshot.tree_rows.map((row) =>
+        row.id === 'seed:192.0.2.1/guest-app#1' ? { ...row, id: 'seed:192.0.2.1/guest-app#2' } : row
+      ),
+      tree_edges: snapshot.tree_edges.map((edge) => ({
+        parent_row_id: edge.parent_row_id === 'seed:192.0.2.1/guest-app#1' ? 'seed:192.0.2.1/guest-app#2' : edge.parent_row_id,
+        child_row_id: edge.child_row_id === 'seed:192.0.2.1/guest-app#1' ? 'seed:192.0.2.1/guest-app#2' : edge.child_row_id,
+      })),
+      primary_row_by_device: {
+        ...snapshot.primary_row_by_device,
+        'guest-app': 'seed:192.0.2.1/guest-app#2',
+      },
+    };
+
+    store.applySnapshot(refreshedSnapshot, 'ws');
+
+    const refreshedState = store.getState();
+    expect(refreshedState.hoverSource).toBeNull();
+    expect(refreshedState.hoveredEntryId).toBeNull();
+    expect(refreshedState.hoveredDeviceId).toBeNull();
+    expect(refreshedState.hoverCard).toBeNull();
+  });
 });
